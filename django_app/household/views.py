@@ -78,6 +78,12 @@ def index(request):
         })
     price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)
     retailer_choices = ShoppingPrice.Retailer.choices
+    retailer_marks = {
+        ShoppingPrice.Retailer.ALBERT_HEIJN: "AH",
+        ShoppingPrice.Retailer.JUMBO: "J",
+        ShoppingPrice.Retailer.LIDL: "L",
+        ShoppingPrice.Retailer.KAUFLAND: "K",
+    }
     price_rows = []
     latest_price_at = None
     retailer_totals = {retailer: {"retailer": retailer, "label": label, "total": Decimal("0"), "priced_items": 0} for retailer, label in retailer_choices}
@@ -108,6 +114,14 @@ def index(request):
         "price_totals": [
             {**total, "missing_items": len(price_items) - total["priced_items"]}
             for total in retailer_totals.values()
+        ],
+        "price_retailer_headers": [
+            {
+                **total,
+                "mark": retailer_marks[retailer],
+                "missing_items": len(price_items) - total["priced_items"],
+            }
+            for retailer, total in retailer_totals.items()
         ],
         "latest_price_at": latest_price_at,
         "price_form": ShoppingPriceForm(),

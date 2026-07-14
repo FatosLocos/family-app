@@ -20,6 +20,19 @@ CHECKJEBON_URL = "https://www.checkjebon.nl/data/supermarkets.json"
 PRIJSPROFEET_URL = "https://www.prijsprofeet.nl/api/v1/search"
 REQUEST_TIMEOUT = 15
 _checkjebon_cache: tuple[float, list[dict]] | None = None
+FRESH_PRODUCT_TOKENS = frozenset({
+    "aardappel", "aardbei", "appel", "aubergine", "banaan", "bloemkool", "boon",
+    "broccoli", "citroen", "courgette", "druif", "komkommer", "limoen", "paprika",
+    "peer", "prei", "sla", "sinaasappel", "spinazie", "tomaat", "ui", "wortel",
+})
+PREPARED_VARIANT_TOKENS = frozenset({
+    "brood", "chips", "chutney", "dip", "dressing", "hummus", "ketchup", "lasagne",
+    "pasta", "pizza", "puree", "salade", "sap", "saus", "salsa", "snack", "soep",
+    "spread", "wrap",
+})
+PRODUCT_TOKEN_ALIASES = {
+    "tomaat": ("tomaat", "tomaten"),
+}
 
 
 class PriceProviderError(RuntimeError):
@@ -79,8 +92,21 @@ def _package_label(product: dict) -> str:
 def _matches(item: ShoppingItem, product: dict) -> bool:
     query_tokens = _tokens(f"{item.quantity} {item.name}")
     name = _normalized(str(product.get("n") or ""))
-    if not query_tokens or not all(token in name for token in query_tokens):
+    if not query_tokens or not all(
+        any(variant in name for variant in PRODUCT_TOKEN_ALIASES.get(token, (token,)))
+        for token in query_tokens
+    ):
         return False
+    # A single fresh-produce word is otherwise too broad: "tomaat" matched
+    # tomato soup and hummus instead of actual tomatoes.
+    if len(query_tokens) == 1 and query_tokens[0] in FRESH_PRODUCT_TOKENS:
+        product_tokens = _tokens(name)
+        if any(
+            token in PREPARED_VARIANT_TOKENS
+            or any(token.endswith(marker) for marker in PREPARED_VARIANT_TOKENS)
+            for token in product_tokens
+        ):
+            return False
     # A plain spread query should not resolve to snack bars or biscuit variants.
     if any(token in {"pasta", "chocopasta", "hazelnootpasta"} for token in query_tokens):
         if any(token in name for token in {"b ready", "bready", "biscuit", "snack", "sticks", "dip"}):
@@ -211,12 +237,23 @@ def refresh_household_prices(household) -> dict[str, int]:
         return {"updated": 0, "offers": 0, "errors": 0}
     items_by_id = {item.id: item for item in items}
     errors = 0
+    checkjebon_available = False
     try:
         base_prices = fetch_checkjebon_prices(items)
+        checkjebon_available = True
     except PriceProviderError:
         base_prices = []
         errors += 1
     offers = fetch_prijsprofeet_offers(items)
+    if checkjebon_available:
+        matched_base_prices = {(result.item_id, result.retailer) for result in base_prices}
+        stale_prices = ShoppingPrice.objects.for_household(household).filter(
+            item__in=items,
+            source=ShoppingPrice.Source.CHECKJEBON,
+        )
+        for stale_price in stale_prices:
+            if (stale_price.item_id, stale_price.retailer) not in matched_base_prices:
+                stale_price.delete()
     # Offers intentionally overwrite an indicative base price for the same item/store.
     results = {(result.item_id, result.retailer): result for result in base_prices}
     results.update({(result.item_id, result.retailer): result for result in offers})
