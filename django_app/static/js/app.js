@@ -26,8 +26,9 @@
       status.hidden = connected;
       document.documentElement.toggleAttribute("data-offline", !connected);
     } catch (_) {
-      status.hidden = false;
-      document.documentElement.toggleAttribute("data-offline", true);
+      // A blocked or cached browser fetch is not sufficient evidence that the app is offline.
+      status.hidden = true;
+      document.documentElement.toggleAttribute("data-offline", false);
     } finally {
       window.clearTimeout(timer);
     }
