@@ -62,7 +62,7 @@ def sync_home_assistant(request):
 def control(request, entity_id, action):
     entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id)
     try:
-        control_entity(request.household, entity, action)
+        control_entity(request.household, entity, action, request.POST.get("target_temperature"))
         messages.success(request, f"{entity.name} bijgewerkt.")
     except HomeAssistantError as error:
         messages.error(request, str(error))
