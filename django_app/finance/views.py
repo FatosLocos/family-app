@@ -12,7 +12,7 @@ from finance.tasks import fingerprint, refresh_household_recurring_rules
 from households.decorators import household_required, parent_required
 
 
-@household_required
+@parent_required
 def index(request):
     tab = request.GET.get("tab", "transacties")
     query = request.GET.get("q", "").strip()

@@ -89,3 +89,12 @@ class FinanceWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f"recurring-edit-{rule.id}")
         self.assertContains(response, f"budget-edit-{budget.id}")
+
+    def test_child_cannot_open_financial_data_or_see_finance_navigation(self):
+        child = User.objects.create_user(username="kind@example.com", email="kind@example.com", password="safe-password-123")
+        Membership.objects.create(household=self.household, user=child, role=Membership.Role.CHILD)
+        self.client.force_login(child)
+
+        self.assertEqual(self.client.get(reverse("finance:index")).status_code, 403)
+        response = self.client.get(reverse("today"))
+        self.assertNotContains(response, reverse("finance:index"))

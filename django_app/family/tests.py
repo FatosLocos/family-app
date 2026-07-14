@@ -104,6 +104,19 @@ class FamilyWishlistTests(TestCase):
         ).id]), {"name": "Ander lid", "birth_date": "", "email": "", "phone": ""})
         self.assertEqual(response.status_code, 403)
 
+    def test_child_can_view_contacts_but_cannot_manage_or_export_them(self):
+        contact = Contact.objects.create(household=self.household, name="Familie Jansen", address="Straat 1")
+        self.client.force_login(self.child)
+
+        response = self.client.get(f"{reverse('family:index')}?tab=contacten")
+        self.assertContains(response, "Familie Jansen")
+        self.assertNotContains(response, f"contact-edit-{contact.id}")
+        self.assertNotContains(response, reverse("family:export_contacts"))
+        self.assertEqual(self.client.post(reverse("family:add_contact"), {"name": "Nieuw contact", "contact_type": "person"}).status_code, 403)
+        self.assertEqual(self.client.post(reverse("family:update_contact", args=[contact.id]), {"name": "Aangepast", "contact_type": "family"}).status_code, 403)
+        self.assertEqual(self.client.post(reverse("family:delete_contact", args=[contact.id])).status_code, 403)
+        self.assertEqual(self.client.get(reverse("family:export_contacts")).status_code, 403)
+
     def test_family_contacts_screen_renders_management_overlays(self):
         contact = Contact.objects.create(household=self.household, name="Familie De Vries")
         person = ContactPerson.objects.create(household=self.household, contact=contact, name="Piet de Vries")

@@ -47,7 +47,7 @@ def index(request):
     })
 
 
-@household_required
+@parent_required
 @require_POST
 def add_contact(request):
     form = ContactForm(request.POST)
@@ -64,7 +64,7 @@ def _family_tab_redirect(tab: str, **params):
     return redirect(f"{reverse('family:index')}?{urlencode(query)}")
 
 
-@household_required
+@parent_required
 @require_POST
 def update_contact(request, contact_id):
     contact = get_object_or_404(Contact.objects.for_household(request.household), pk=contact_id)
@@ -77,7 +77,7 @@ def update_contact(request, contact_id):
     return _family_tab_redirect("contacten")
 
 
-@household_required
+@parent_required
 @require_POST
 def delete_contact(request, contact_id):
     contact = get_object_or_404(Contact.objects.for_household(request.household), pk=contact_id)
@@ -86,7 +86,7 @@ def delete_contact(request, contact_id):
     return _family_tab_redirect("contacten")
 
 
-@household_required
+@parent_required
 @require_POST
 def import_contacts(request):
     contacts_url = f"{reverse('family:index')}?tab=contacten"
@@ -111,7 +111,7 @@ def import_contacts(request):
     return redirect(contacts_url)
 
 
-@household_required
+@parent_required
 def export_contacts(request):
     contacts = Contact.objects.for_household(request.household).prefetch_related("people").order_by("name")
     response = HttpResponse(contacts_as_vcard(contacts), content_type="text/vcard; charset=utf-8")
