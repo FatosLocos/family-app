@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -142,6 +143,22 @@ class HouseholdIsolationTests(TestCase):
         receipt.refresh_from_db()
         self.assertEqual(receipt.ocr_status, Receipt.OcrStatus.COMPLETE)
         self.assertEqual(str(receipt.total_amount), "12.34")
+
+    def test_pdf_receipt_ocr_reads_the_first_page(self):
+        receipt = Receipt.objects.create(household=self.first_household, retailer="Jumbo", image=SimpleUploadedFile("bon.pdf", b"%PDF-1.4", content_type="application/pdf"))
+
+        def render_first_page(command, **_kwargs):
+            Path(f"{command[-1]}-1.png").touch()
+
+        with patch("household.ocr.subprocess.run", side_effect=render_first_page) as render, patch("household.ocr.Image.open") as image_open, patch("household.ocr.pytesseract.image_to_string", return_value="JUMBO\nTOTAAL 18,75"):
+            image_open.return_value.__enter__.return_value = object()
+            from household.ocr import process_receipt
+            process_receipt(receipt.id)
+
+        receipt.refresh_from_db()
+        render.assert_called_once()
+        self.assertEqual(receipt.ocr_status, Receipt.OcrStatus.COMPLETE)
+        self.assertEqual(str(receipt.total_amount), "18.75")
 
     @patch("household.views.process_receipt_ocr.delay")
     def test_owner_can_upload_a_receipt_without_a_message_error(self, process_ocr):
