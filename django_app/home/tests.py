@@ -1,15 +1,21 @@
+from datetime import timedelta
 from unittest.mock import patch
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from channels.testing import WebsocketCommunicator
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from home.models import HomeActionAudit, HomeAssistantConfig, HomeEntity
+from home.consumers import HomeLiveConsumer
+from home.realtime import home_entity_payload
 from home.services import HomeAssistantError, control_entity, sync_entities
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
-from integrations.models import IntegrationConnection
+from integrations.models import IntegrationConnection, SyncRun
 
 
 class FakeResponse:
@@ -112,14 +118,356 @@ class HomeAssistantTests(TestCase):
             attributes={"hue_light_id": "1", "brightness": 120},
         )
 
-        with patch("integrations.providers.control_hue_light", return_value="Helderheid ingesteld op 50%.") as control, patch("integrations.providers.sync_hue") as sync:
+        with patch("integrations.providers.control_hue_light", return_value="Helderheid ingesteld op 50%.") as control:
             control_entity(self.household, entity, "brightness", "127")
 
         control.assert_called_once_with(entity, "brightness", "127")
-        sync.assert_called_once_with(connection)
+        entity.refresh_from_db()
+        self.assertEqual(entity.state, "on")
+        self.assertEqual(entity.attributes["brightness"], 127.0)
         audit = HomeActionAudit.objects.get(entity=entity)
         self.assertTrue(audit.succeeded)
         self.assertEqual(audit.detail, "Helderheid ingesteld op 50%.")
+
+    def test_async_control_returns_a_toast_and_state_event(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"bridge_username": "bridge-user"},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id=f"hue.{connection.id}.1",
+            domain="light",
+            name="Keuken",
+            is_supported=True,
+            attributes={"hue_light_id": "1"},
+        )
+        self.client.force_login(self.parent)
+
+        with patch("integrations.providers.control_hue_light", return_value="Ingeschakeld."):
+            response = self.client.post(
+                reverse("home:control", args=[entity.id, "on"]),
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        trigger = response.headers["HX-Trigger"]
+        self.assertIn('"family:toast"', trigger)
+        self.assertIn('"family:home-control"', trigger)
+        self.assertIn(f'"entity_id": {entity.id}', trigger)
+
+    def test_hue_scene_activation_marks_other_scenes_in_the_same_room_idle(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"bridge_username": "bridge-user"},
+        )
+        active_scene = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.scene.active",
+            domain="scene",
+            name="Lezen",
+            state="active",
+            is_supported=True,
+            attributes={"hue_scene_id": "scene-active", "hue_resource_type": "scene", "hue_group_name": "Woonkamer"},
+        )
+        new_scene = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.scene.new",
+            domain="scene",
+            name="Film",
+            state="idle",
+            is_supported=True,
+            attributes={"hue_scene_id": "scene-new", "hue_resource_type": "scene", "hue_group_name": "Woonkamer"},
+        )
+
+        with patch("integrations.providers.control_hue_light", return_value="Scène gestart."):
+            control_entity(self.household, new_scene, "activate")
+
+        active_scene.refresh_from_db()
+        new_scene.refresh_from_db()
+        self.assertEqual(active_scene.state, "idle")
+        self.assertEqual(new_scene.state, "active")
+
+    def test_hue_group_command_updates_visible_member_lights(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"bridge_username": "bridge-user"},
+        )
+        group = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.group.keuken",
+            domain="group",
+            name="Keuken",
+            is_supported=True,
+            attributes={"hue_grouped_light_id": "group-1", "hue_resource_type": "grouped_light", "member_light_ids": ["light-1", "light-2"]},
+        )
+        members = [
+            HomeEntity.objects.create(household=self.household, connection=connection, source=HomeEntity.Source.HUE, entity_id=f"hue.{light_id}", domain="light", name=light_id, attributes={"hue_light_id": light_id})
+            for light_id in ("light-1", "light-2")
+        ]
+
+        with patch("integrations.providers.control_hue_light", return_value="Ingeschakeld."):
+            control_entity(self.household, group, "on")
+
+        for member in members:
+            member.refresh_from_db()
+            self.assertEqual(member.state, "on")
+
+    def test_hue_toolbar_shows_latest_sync_result(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            status="configured",
+        )
+        SyncRun.objects.create(household=self.household, connection=connection, status="succeeded", detail="{'lights': 3, 'groups': 1, 'scenes': 2}")
+
+        self.client.force_login(self.parent)
+        response = self.client.get(reverse("home:index"))
+
+        self.assertContains(response, "Laatste synchronisatie voltooid")
+        self.assertContains(response, "3 lampen")
+        self.assertContains(response, "1 kamer of zone")
+        self.assertContains(response, "Automatisch elke 15 minuten bijgewerkt")
+
+    def test_hue_toolbar_warns_when_the_last_sync_is_stale(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            status="configured",
+        )
+        from django.utils import timezone
+        connection.last_sync_at = timezone.now() - timedelta(minutes=21)
+        connection.save(update_fields=["last_sync_at"])
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"))
+
+        self.assertContains(response, "Status is ouder dan 20 minuten")
+
+    def test_hue_toolbar_allows_retry_after_a_sync_error(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            status="sync_error",
+            settings={"bridge_username": "bridge-user"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"))
+
+        self.assertContains(response, "De laatste synchronisatie is niet gelukt")
+        self.assertContains(response, reverse("integrations:sync_connection", args=[connection.id]))
+
+    def test_home_can_filter_entities_by_source(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.living-room",
+            domain="light",
+            name="Hue woonkamer",
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HOME_ASSISTANT,
+            entity_id="switch.coffee",
+            domain="switch",
+            name="Home Assistant koffie",
+        )
+
+        self.client.force_login(self.parent)
+        response = self.client.get(reverse("home:index"), {"source": "hue"})
+
+        self.assertContains(response, "Hue woonkamer")
+        self.assertNotContains(response, "Home Assistant koffie")
+        self.assertNotContains(response, '>switch<', html=False)
+
+
+    def test_home_can_filter_hue_entities_by_room(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.kitchen",
+            domain="light",
+            name="Keukenlamp",
+            attributes={"hue_locations": ["Keuken"]},
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.bedroom",
+            domain="light",
+            name="Slaapkamerlamp",
+            attributes={"hue_locations": ["Slaapkamer"]},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "hue", "location": "Keuken"})
+
+        self.assertContains(response, "Keukenlamp")
+        self.assertNotContains(response, "Slaapkamerlamp")
+        self.assertContains(response, 'aria-label="Hue kamers"')
+
+    def test_hue_scenes_are_grouped_and_filterable_by_their_room(self):
+        for name, room in (("Lezen", "Woonkamer"), ("Ontspannen", "Woonkamer"), ("Slapen", "Slaapkamer")):
+            HomeEntity.objects.create(
+                household=self.household,
+                source=HomeEntity.Source.HUE,
+                entity_id=f"hue.scene.{name.lower()}",
+                domain="scene",
+                name=name,
+                attributes={"hue_group_name": room},
+            )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "hue", "domain": "scene", "location": "Woonkamer"})
+
+        self.assertContains(response, "Woonkamer")
+        self.assertContains(response, "Lezen")
+        self.assertContains(response, "Ontspannen")
+        self.assertNotContains(response, "Slapen")
+
+    def test_unavailable_hue_entity_is_read_only(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.bedroom",
+            domain="light",
+            name="Hue slaapkamer",
+            is_supported=True,
+            is_available=False,
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "hue"})
+
+        self.assertContains(response, "Niet bereikbaar")
+        self.assertNotContains(response, 'aria-label="Hue slaapkamer inschakelen"')
+
+    def test_hue_connectivity_issue_has_a_clear_localized_warning(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.hal",
+            domain="light",
+            name="Lange lampnaam voor de hal",
+            attributes={"hue_connectivity": "connectivity_issue"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "hue"})
+
+        self.assertContains(response, "Niet verbonden")
+        self.assertNotContains(response, "connectivity_issue")
+        self.assertContains(response, "hue-device-health is-error")
+
+    def test_hue_sensors_are_grouped_per_device(self):
+        sensor_attributes = {"hue_device_id": "device-gang", "hue_device_name": "Gang", "hue_locations": ["Gang"]}
+        for sensor_id, kind, state in (
+            ("motion", "Beweging", "Beweging"),
+            ("light", "Lichtniveau", "Lichtniveau 12000"),
+            ("temperature", "Temperatuur", "21,5 °C"),
+        ):
+            HomeEntity.objects.create(
+                household=self.household,
+                source=HomeEntity.Source.HUE,
+                entity_id=f"hue.gang.{sensor_id}",
+                domain="sensor",
+                name=f"Gang · {kind}",
+                state=state,
+                attributes={**sensor_attributes, "hue_sensor_kind": kind, "sensor_active": sensor_id == "motion"},
+                is_supported=False,
+            )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"domain": "sensor"})
+
+        self.assertContains(response, "Gang")
+        self.assertContains(response, "Beweging")
+        self.assertContains(response, "Lichtniveau")
+        self.assertContains(response, "Temperatuur")
+        self.assertNotContains(response, "Gang · Beweging")
+
+    def test_home_entity_search_filters_hue_entities_immediately(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.scene.movie",
+            domain="scene",
+            name="Filmavond",
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.scene.dinner",
+            domain="scene",
+            name="Eten",
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "hue", "domain": "scene", "q": "film"})
+
+        self.assertContains(response, "Filmavond")
+        self.assertNotContains(response, ">Eten<", html=False)
+        self.assertContains(response, 'data-live-search')
+
+    def test_home_default_excludes_scenes_but_the_all_filter_keeps_them_available(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.scene.movie",
+            domain="scene",
+            name="Filmavond",
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.light.living",
+            domain="light",
+            name="Woonkamerlamp",
+        )
+        self.client.force_login(self.parent)
+
+        default_response = self.client.get(reverse("home:index"))
+        all_response = self.client.get(reverse("home:index"), {"domain": "alles"})
+
+        self.assertContains(default_response, "Woonkamerlamp")
+        self.assertNotContains(default_response, "Filmavond")
+        self.assertContains(all_response, "Filmavond")
+
+    @patch("home.views.sync_entities", return_value=2)
+    def test_sync_returns_to_current_safe_filtered_home_page(self, sync_entities):
+        self.client.force_login(self.parent)
+
+        response = self.client.post(
+            reverse("home:sync_home_assistant"),
+            HTTP_REFERER="http://testserver/huis/?source=hue&domain=scene",
+        )
+
+        self.assertRedirects(response, "/huis/?source=hue&domain=scene", fetch_redirect_response=False)
+        sync_entities.assert_called_once_with(self.household)
 
     def test_household_document_is_downloadable_only_inside_household(self):
         self.client.force_login(self.parent)
@@ -130,3 +478,39 @@ class HomeAssistantTests(TestCase):
         self.assertEqual(self.client.get(reverse("home:download_document", args=[document.id])).status_code, 200)
         self.client.force_login(self.child)
         self.assertEqual(self.client.get(reverse("home:download_document", args=[document.id])).status_code, 200)
+
+
+class HomeRealtimeTests(TransactionTestCase):
+    def setUp(self):
+        self.parent = User.objects.create_user(username="realtime@example.com", email="realtime@example.com", password="safe-password-123")
+        self.household = Household.objects.create(name="Realtime gezin")
+        Membership.objects.create(household=self.household, user=self.parent, role=Membership.Role.PARENT)
+
+    def test_household_member_receives_a_live_entity_update(self):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.SONOS,
+            entity_id="sonos.group-1",
+            domain="media_player",
+            name="Woonkamer",
+            state="on",
+            attributes={"sonos_volume": 18, "sonos_muted": False, "sonos_playback_state": "PLAYBACK_STATE_PLAYING"},
+        )
+
+        async def scenario():
+            communicator = WebsocketCommunicator(HomeLiveConsumer.as_asgi(), "/ws/huis/")
+            communicator.scope["user"] = self.parent
+            communicator.scope["url_route"] = {"kwargs": {"household_id": self.household.id}}
+            connected, _ = await communicator.connect()
+            self.assertTrue(connected)
+            await get_channel_layer().group_send(
+                f"household-home-{self.household.id}",
+                {"type": "home.entity_update", "payload": home_entity_payload(entity)},
+            )
+            payload = await communicator.receive_json_from()
+            self.assertEqual(payload["type"], "home.entity.updated")
+            self.assertEqual(payload["entity"]["id"], entity.id)
+            self.assertEqual(payload["entity"]["attributes"]["sonos_volume"], 18)
+            await communicator.disconnect()
+
+        async_to_sync(scenario)()

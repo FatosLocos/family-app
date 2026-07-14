@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>nl.familyapp.probe</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/family-app/local_probe/.venv/bin/python</string>
+    <string>-m</string>
+    <string>family_app_probe.main</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/family-app/local_probe</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/family-app-probe.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/family-app-probe-error.log</string>
+</dict>
+</plist>

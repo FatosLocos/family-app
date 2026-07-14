@@ -1,4 +1,6 @@
 Django==5.2.8
+channels[daphne]==4.2.2
+channels_redis==4.2.1
 celery[redis]==5.5.3
 cryptography==45.0.7
 dj-database-url==3.0.1

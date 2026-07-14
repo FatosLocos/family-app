@@ -1,0 +1,15 @@
+[Unit]
+Description=Family App Local Probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=familyprobe
+WorkingDirectory=/opt/family-app/local_probe
+ExecStart=/opt/family-app/local_probe/.venv/bin/python -m family_app_probe.main run
+Restart=always
+RestartSec=8
+
+[Install]
+WantedBy=multi-user.target

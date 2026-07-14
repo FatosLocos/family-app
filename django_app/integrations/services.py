@@ -16,6 +16,11 @@ from integrations.models import IntegrationAppConfig, IntegrationConnection
 OUTLOOK_SCOPES = "offline_access User.Read Calendars.Read"
 HUE_OAUTH_AUTHORIZE_URL = "https://api.meethue.com/v2/oauth2/authorize"
 HUE_OAUTH_TOKEN_URL = "https://api.meethue.com/v2/oauth2/token"
+SONOS_OAUTH_AUTHORIZE_URL = "https://api.sonos.com/login/v3/oauth"
+SONOS_OAUTH_TOKEN_URL = "https://api.sonos.com/login/v3/oauth/access"
+GOOGLE_HOME_PCM_URL = "https://nestservices.google.com/partnerconnections"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_HOME_SCOPE = "https://www.googleapis.com/auth/sdm.service"
 
 
 def public_origin(request) -> str:
@@ -32,7 +37,31 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
         return settings.BUNQ_OAUTH_CLIENT_ID, settings.BUNQ_OAUTH_CLIENT_SECRET, {"environment": "production"}
     if provider == "hue":
         return "", "", {"app_id": "", "device_name": "Family App"}
+    if provider == "sonos":
+        return "", "", {}
+    if provider == "google_home":
+        return "", "", {"project_id": ""}
+    if provider == "lg_thinq":
+        return "", "", {"authorize_url": "", "token_url": "", "api_base_url": "", "devices_path": "/devices"}
     return "", "", {}
+
+
+def get_sonos_event_callback_token(household) -> str:
+    _, _, config = get_app_config(household, "sonos")
+    encrypted_token = str(config.get("event_callback_token") or "")
+    return decrypt(encrypted_token) if encrypted_token else ""
+
+
+def save_sonos_config(household, client_id: str, client_secret: str, events_enabled: bool) -> IntegrationAppConfig:
+    _, _, existing = get_app_config(household, "sonos")
+    token = get_sonos_event_callback_token(household) or secrets.token_urlsafe(32)
+    return save_app_config(
+        household,
+        "sonos",
+        client_id,
+        client_secret,
+        {"event_callback_token": encrypt(token), "events_enabled": events_enabled},
+    )
 
 
 def save_app_config(household, provider: str, client_id: str, client_secret: str, config: dict) -> IntegrationAppConfig:
@@ -175,5 +204,143 @@ def finish_hue_connection(request, code: str, state: str) -> IntegrationConnecti
     }
     connection.status = "needs_bridge_link"
     connection.last_error = ""
+    connection.save()
+    return connection
+
+
+def start_sonos_connection(request) -> str:
+    client_id, _, _ = get_app_config(request.household, "sonos")
+    if not client_id:
+        raise ValueError("Vul eerst de Sonos-clientgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.SONOS,
+        defaults={"display_name": "Sonos"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["sonos_oauth"] = {"state": state, "connection_id": connection.id}
+    return f"{SONOS_OAUTH_AUTHORIZE_URL}?{urlencode({'client_id': client_id, 'response_type': 'code', 'state': state, 'scope': 'playback-control-all', 'redirect_uri': f'{public_origin(request)}/instellingen/sonos/callback/'})}"
+
+
+def finish_sonos_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("sonos_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Sonos-aanmelding.")
+    client_id, client_secret, _ = get_app_config(request.household, "sonos")
+    if not client_id or not client_secret:
+        raise ValueError("Sonos-clientgegevens ontbreken.")
+    response = requests.post(
+        SONOS_OAUTH_TOKEN_URL,
+        data={"grant_type": "authorization_code", "code": code, "redirect_uri": f"{public_origin(request)}/instellingen/sonos/callback/"},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Sonos gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or "Sonos gaf geen toegangstoken terug."))
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 86400)) - 60, 60))).isoformat(),
+    }
+    connection.status, connection.last_error = "needs_sync", ""
+    connection.save()
+    return connection
+
+
+def start_google_home_connection(request) -> str:
+    client_id, _, config = get_app_config(request.household, "google_home")
+    project_id = str(config.get("project_id") or "")
+    if not client_id or not project_id:
+        raise ValueError("Vul eerst de Google Home-clientgegevens en het Device Access project ID in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.GOOGLE_HOME,
+        defaults={"display_name": "Google Home"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["google_home_oauth"] = {"state": state, "connection_id": connection.id}
+    params = {"redirect_uri": f"{public_origin(request)}/instellingen/google-home/callback/", "access_type": "offline", "prompt": "consent", "client_id": client_id, "response_type": "code", "scope": GOOGLE_HOME_SCOPE, "state": state}
+    return f"{GOOGLE_HOME_PCM_URL}/{project_id}/auth?{urlencode(params)}"
+
+
+def finish_google_home_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("google_home_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Google Home-aanmelding.")
+    client_id, client_secret, config = get_app_config(request.household, "google_home")
+    if not client_id or not client_secret or not config.get("project_id"):
+        raise ValueError("Google Home-clientgegevens of Device Access project ID ontbreken.")
+    response = requests.post(
+        GOOGLE_OAUTH_TOKEN_URL,
+        data={"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code", "redirect_uri": f"{public_origin(request)}/instellingen/google-home/callback/"},
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Google gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or "Google gaf geen toegangstoken terug."))
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+        "project_id": config["project_id"],
+    }
+    connection.status, connection.last_error = "needs_sync", ""
+    connection.save()
+    return connection
+
+
+def start_lg_thinq_connection(request) -> str:
+    client_id, _, config = get_app_config(request.household, "lg_thinq")
+    if not client_id or not config.get("authorize_url"):
+        raise ValueError("Vul eerst de LG ThinQ-clientgegevens en OAuth-endpoints uit de Smart Solution API in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.LG_THINQ,
+        defaults={"display_name": "LG ThinQ"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["lg_thinq_oauth"] = {"state": state, "connection_id": connection.id}
+    return f"{config['authorize_url']}?{urlencode({'client_id': client_id, 'response_type': 'code', 'redirect_uri': f'{public_origin(request)}/instellingen/lg-thinq/callback/', 'state': state})}"
+
+
+def finish_lg_thinq_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("lg_thinq_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen LG ThinQ-aanmelding.")
+    client_id, client_secret, config = get_app_config(request.household, "lg_thinq")
+    if not client_id or not client_secret or not config.get("token_url") or not config.get("api_base_url"):
+        raise ValueError("LG ThinQ-clientgegevens of API-endpoints ontbreken.")
+    response = requests.post(
+        config["token_url"],
+        data={"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code", "redirect_uri": f"{public_origin(request)}/instellingen/lg-thinq/callback/"},
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("LG ThinQ gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or "LG ThinQ gaf geen toegangstoken terug."))
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+        "api_base_url": config["api_base_url"].rstrip("/"),
+        "devices_path": str(config.get("devices_path") or "/devices"),
+    }
+    connection.status, connection.last_error = "needs_sync", ""
     connection.save()
     return connection

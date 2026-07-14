@@ -22,6 +22,9 @@ class HomeEntity(models.Model):
     class Source(models.TextChoices):
         HOME_ASSISTANT = "home_assistant", "Home Assistant"
         HUE = "hue", "Philips Hue"
+        SONOS = "sonos", "Sonos"
+        LG_THINQ = "lg_thinq", "LG ThinQ"
+        GOOGLE_HOME = "google_home", "Google Home"
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE)
     connection = models.ForeignKey("integrations.IntegrationConnection", null=True, blank=True, on_delete=models.CASCADE, related_name="home_entities")

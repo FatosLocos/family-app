@@ -40,9 +40,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
       CELERY_BROKER_URL: redis://family-app-redis:6379/0
       CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
+      CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
+      LOCAL_PROBE_SOURCE_DIR: /opt/family-app/local_probe
     command: >-
       sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
-      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
+      daphne -b 0.0.0.0 -p 8000 config.asgi:application"
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +52,7 @@ services:
         condition: service_started
     volumes:
       - family_app-media:/app/media
+      - ./local_probe:/opt/family-app/local_probe:ro
     networks:
       default:
       edge:

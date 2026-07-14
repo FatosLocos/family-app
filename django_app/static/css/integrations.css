@@ -1,0 +1,13 @@
+.panel-actions{display:flex;align-items:center;gap:3px}
+.settings-grid>.content-panel{min-width:0}
+.connection-list li>div,.technical-status-list li>div{min-width:0}
+.connection-list em,.technical-status-detail{max-width:100%;overflow-wrap:anywhere}
+.technical-status-detail{display:-webkit-box!important;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden!important;white-space:normal!important;line-height:1.35}
+.probe-guide-modal{width:min(720px,calc(100vw - 28px))}
+.probe-guide{display:grid;gap:12px;margin:0;padding-left:22px}
+.probe-guide li{padding-left:3px}
+.probe-guide strong,.probe-guide span{display:block}
+.probe-guide span{margin-top:3px;color:var(--muted);font-size:13px}
+.probe-guide code{display:block;margin-top:6px;padding:7px 8px;border:1px solid var(--line);border-radius:5px;background:var(--surface-alt);font-size:12px;line-height:1.4;overflow-wrap:anywhere;white-space:normal}
+.probe-guide-note{display:flex;gap:8px;align-items:flex-start;margin:0!important;padding:10px;border:1px solid var(--line);border-radius:6px;color:var(--muted)}
+.probe-guide-note svg{width:17px;flex:0 0 auto;color:var(--accent-strong)}

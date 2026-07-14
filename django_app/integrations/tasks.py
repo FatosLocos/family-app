@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
-def sync_connection_task(connection_id: int, household_id: int):
+def sync_connection_task(connection_id: int, household_id: int, sync_run_id: int | None = None):
     with household_db_scope(household_id):
         with transaction.atomic():
             connection = IntegrationConnection.objects.select_for_update().get(pk=connection_id, household_id=household_id)
@@ -26,8 +26,37 @@ def sync_connection_task(connection_id: int, household_id: int):
                 finished_at=timezone.now(),
             )
             if SyncRun.objects.filter(connection=connection, status="running").exists():
+                if sync_run_id:
+                    SyncRun.objects.filter(
+                        pk=sync_run_id,
+                        household_id=household_id,
+                        connection=connection,
+                        status="queued",
+                    ).update(
+                        status="failed",
+                        detail="Er liep al een synchronisatie. Probeer opnieuw zodra die is voltooid.",
+                        finished_at=timezone.now(),
+                    )
                 return {"status": "already_running"}
-            run = SyncRun.objects.create(household=connection.household, connection=connection, status="running")
+            if sync_run_id:
+                run = SyncRun.objects.select_for_update().filter(
+                    pk=sync_run_id,
+                    household_id=household_id,
+                    connection=connection,
+                ).first()
+                if run and run.status in {"succeeded", "failed"}:
+                    return {"status": "already_finished"}
+            else:
+                run = SyncRun.objects.select_for_update().filter(
+                    household_id=household_id,
+                    connection=connection,
+                    status="queued",
+                ).order_by("-started_at").first()
+            if not run:
+                run = SyncRun.objects.create(household=connection.household, connection=connection, status="queued")
+            run.status = "running"
+            run.detail = ""
+            run.save(update_fields=["status", "detail"])
         try:
             result = sync_connection(connection)
             connection.status = "configured"

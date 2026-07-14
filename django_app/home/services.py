@@ -4,6 +4,7 @@ import requests
 from django.utils import timezone
 
 from home.models import HomeActionAudit, HomeAssistantConfig, HomeEntity
+from home.realtime import broadcast_home_entity
 from integrations.crypto import decrypt, encrypt
 
 SUPPORTED_DOMAINS = {"light", "switch", "scene", "script", "cover", "climate", "media_player"}
@@ -127,12 +128,54 @@ def _action_detail(action, payload):
 
 
 def control_entity(household, entity, action, target_temperature=None):
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    probe_id = attributes.get("probe_id")
+    if probe_id:
+        from integrations.local_probe import ProbeError, send_probe_command
+        from integrations.models import LocalProbe
+
+        try:
+            probe = LocalProbe.objects.for_household(household).get(pk=probe_id, revoked_at__isnull=True)
+            send_probe_command(probe, entity, action, target_temperature)
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail="Lokale opdracht naar probe verzonden.")
+            return
+        except (LocalProbe.DoesNotExist, ProbeError) as error:
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
+            raise HomeAssistantError(str(error)) from error
     if entity.source == HomeEntity.Source.HUE:
-        from integrations.providers import ProviderError, control_hue_light, sync_hue
+        from integrations.providers import ProviderError, control_hue_light
 
         try:
             detail = control_hue_light(entity, action, target_temperature)
-            sync_hue(entity.connection)
+            _apply_hue_control_state(entity, action, target_temperature)
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail=detail)
+            return
+        except ProviderError as error:
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
+            raise HomeAssistantError(str(error)) from error
+    if entity.source in {HomeEntity.Source.SONOS, HomeEntity.Source.GOOGLE_HOME, HomeEntity.Source.LG_THINQ}:
+        from integrations.providers import ProviderError, control_connected_home_entity
+
+        try:
+            detail = control_connected_home_entity(entity, action, target_temperature)
+            if entity.source == HomeEntity.Source.SONOS:
+                _apply_sonos_control_state(entity, action, target_temperature)
+                if action == "set_group" and entity.connection:
+                    from integrations.providers import sync_sonos
+
+                    sync_sonos(entity.connection)
+            elif action == "on":
+                entity.state = "on"
+            elif action == "play_pause":
+                entity.state = "on" if entity.state != "on" else "off"
+            elif action == "off":
+                entity.state = "off"
+            elif action == "set_temperature":
+                attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+                attributes["temperature"] = float(target_temperature)
+                entity.attributes = attributes
+            entity.save(update_fields=["state", "attributes", "last_seen_at"])
+            broadcast_home_entity(entity)
             HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail=detail)
             return
         except ProviderError as error:
@@ -149,3 +192,140 @@ def control_entity(household, entity, action, target_temperature=None):
     except HomeAssistantError as error:
         HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
         raise
+
+
+def _apply_sonos_control_state(entity, action, value=None):
+    """Reflect a confirmed Sonos command without waiting for a full inventory sync."""
+    attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+    if action in {"on", "off", "play_pause"}:
+        entity.state = "on" if action == "on" or (action == "play_pause" and entity.state != "on") else "off"
+        attributes["sonos_playback_state"] = "PLAYBACK_STATE_PLAYING" if entity.state == "on" else "PLAYBACK_STATE_PAUSED"
+        if attributes.get("sonos_entity_type") == "group":
+            HomeEntity.objects.filter(
+                household=entity.household,
+                connection=entity.connection,
+                source=HomeEntity.Source.SONOS,
+                attributes__sonos_group_id=attributes.get("sonos_group_id"),
+            ).exclude(pk=entity.pk).update(state=entity.state)
+    elif action == "set_volume":
+        try:
+            attributes["sonos_volume"] = max(0, min(100, int(float(value))))
+        except (TypeError, ValueError):
+            pass
+    elif action == "toggle_shuffle":
+        attributes["sonos_shuffle"] = not bool(attributes.get("sonos_shuffle"))
+    elif action == "toggle_repeat":
+        attributes["sonos_repeat"] = not bool(attributes.get("sonos_repeat"))
+    elif action in {"volume_up", "volume_down"}:
+        current = attributes.get("sonos_volume")
+        if isinstance(current, (int, float)):
+            attributes["sonos_volume"] = max(0, min(100, int(current) + (5 if action == "volume_up" else -5)))
+    elif action in {"mute", "unmute"}:
+        attributes["sonos_muted"] = action == "mute"
+    entity.attributes = attributes
+
+
+def _apply_hue_control_state(entity, action, value=None):
+    """Keep the visible Hue card responsive after a confirmed remote command.
+
+    A full Hue inventory sync is intentionally left to the explicit refresh
+    action. Fetching every resource after a single dimmer change is slow and
+    unnecessary for the local, confirmed state shown to the user.
+    """
+    attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+    update_fields = ["attributes"]
+    if action == "on":
+        entity.state = "on"
+        update_fields.append("state")
+    elif action == "off":
+        entity.state = "off"
+        update_fields.append("state")
+    elif action == "activate":
+        entity.state = "active"
+        update_fields.append("state")
+        group_name = attributes.get("hue_group_name")
+        if group_name:
+            HomeEntity.objects.filter(
+                household=entity.household,
+                source=HomeEntity.Source.HUE,
+                domain="scene",
+                attributes__hue_group_name=group_name,
+            ).exclude(pk=entity.pk).update(state="idle")
+    elif action == "brightness":
+        try:
+            attributes["brightness"] = float(value)
+        except (TypeError, ValueError):
+            pass
+        entity.state = "on"
+        update_fields.append("state")
+    elif action == "color_temperature":
+        try:
+            attributes["color_temperature"] = int(float(value))
+        except (TypeError, ValueError):
+            pass
+        entity.state = "on"
+        update_fields.append("state")
+    elif action == "color":
+        attributes["color_hex"] = str(value or "")
+        entity.state = "on"
+        update_fields.append("state")
+    elif action == "effect":
+        attributes["effect_current"] = str(value or "")
+    entity.attributes = attributes
+    entity.save(update_fields=update_fields + ["last_seen_at"])
+    if entity.domain == "group":
+        _apply_hue_group_member_state(entity, action, value)
+
+
+def _apply_hue_group_member_state(group, action, value=None):
+    """Mirror a confirmed Hue group command into the visible member cards.
+
+    Hue applies the command to the bridge group in one request. Updating the
+    local member state avoids a misleading UI until the next full sync.
+    """
+    if action not in {"on", "off", "brightness", "color_temperature", "color", "effect"}:
+        return
+    attributes = group.attributes if isinstance(group.attributes, dict) else {}
+    member_light_ids = {str(light_id) for light_id in attributes.get("member_light_ids", []) if light_id}
+    member_names = {str(name) for name in attributes.get("member_names", []) if name}
+    if not member_light_ids and not member_names:
+        return
+    candidates = HomeEntity.objects.filter(
+        household=group.household,
+        connection=group.connection,
+        source=HomeEntity.Source.HUE,
+        domain="light",
+    )
+    for member in candidates:
+        member_attributes = dict(member.attributes) if isinstance(member.attributes, dict) else {}
+        if str(member_attributes.get("hue_light_id") or "") not in member_light_ids and member.name not in member_names:
+            continue
+        fields = ["attributes", "last_seen_at"]
+        if action == "on":
+            member.state = "on"
+            fields.append("state")
+        elif action == "off":
+            member.state = "off"
+            fields.append("state")
+        elif action == "brightness":
+            try:
+                member_attributes["brightness"] = float(value)
+            except (TypeError, ValueError):
+                continue
+            member.state = "on"
+            fields.append("state")
+        elif action == "color_temperature":
+            try:
+                member_attributes["color_temperature"] = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            member.state = "on"
+            fields.append("state")
+        elif action == "color":
+            member_attributes["color_hex"] = str(value or "")
+            member.state = "on"
+            fields.append("state")
+        elif action == "effect":
+            member_attributes["effect_current"] = str(value or "")
+        member.attributes = member_attributes
+        member.save(update_fields=fields)

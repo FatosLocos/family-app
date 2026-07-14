@@ -21,6 +21,12 @@ class ProviderError(Exception):
     pass
 
 
+class HueProviderError(ProviderError):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def _safe_response_json(response, provider: str) -> dict:
     """Return a provider response without leaking implementation details to the UI."""
     try:
@@ -75,7 +81,444 @@ def sync_connection(connection: IntegrationConnection) -> dict:
         return sync_bunq(connection)
     if connection.provider == "hue":
         return sync_hue(connection)
+    if connection.provider == "sonos":
+        return sync_sonos(connection)
+    if connection.provider == "google_home":
+        return sync_google_home(connection)
+    if connection.provider == "lg_thinq":
+        return sync_lg_thinq(connection)
     raise ProviderError("Onbekende koppeling.")
+
+
+def _stored_token_is_current(data: dict) -> bool:
+    expires_at = data.get("expires_at", "")
+    if not data.get("access_token") or not expires_at:
+        return False
+    try:
+        expires = timezone.datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return False
+    if timezone.is_naive(expires):
+        expires = timezone.make_aware(expires, timezone.get_current_timezone())
+    return expires > timezone.now() + timedelta(seconds=45)
+
+
+def _oauth_response(response, provider: str) -> dict:
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError as error:
+        raise ProviderError(f"{provider} gaf geen geldige reactie.") from error
+    if not response.ok or not isinstance(payload, dict):
+        message = payload.get("error_description") or payload.get("error") if isinstance(payload, dict) else ""
+        raise ProviderError(str(message or f"{provider} weigerde de aanvraag.")[:240])
+    return payload
+
+
+def _refresh_connection_token(connection: IntegrationConnection, provider: str, token_url: str) -> str:
+    data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+    if _stored_token_is_current(data):
+        return decrypt(data["access_token"])
+    refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+    if not refresh_token:
+        raise ProviderError(f"{provider} moet opnieuw worden geautoriseerd.")
+    from integrations.services import get_app_config
+
+    client_id, client_secret, _ = get_app_config(connection.household, connection.provider)
+    if not client_id or not client_secret:
+        raise ProviderError(f"{provider}-clientgegevens ontbreken.")
+    response = requests.post(token_url, data={"grant_type": "refresh_token", "refresh_token": refresh_token}, auth=(client_id, client_secret), timeout=20)
+    payload = _oauth_response(response, provider)
+    if not payload.get("access_token"):
+        raise ProviderError(f"{provider}-token vernieuwen mislukt.")
+    if payload.get("refresh_token"):
+        connection.secret_encrypted = encrypt(payload["refresh_token"])
+    data["access_token"] = encrypt(payload["access_token"])
+    data["expires_at"] = (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat()
+    connection.settings = data
+    connection.save(update_fields=["secret_encrypted", "settings", "updated_at"])
+    return payload["access_token"]
+
+
+def _sonos_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
+    from integrations.services import SONOS_OAUTH_TOKEN_URL
+
+    token = _refresh_connection_token(connection, "Sonos", SONOS_OAUTH_TOKEN_URL)
+    try:
+        response = requests.request(method, f"https://api.ws.sonos.com/control/api/v1{path}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=20)
+    except requests.RequestException as error:
+        raise ProviderError("Sonos is tijdelijk niet bereikbaar.") from error
+    return _oauth_response(response, "Sonos")
+
+
+def _sonos_optional_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
+    try:
+        return _sonos_request(connection, method, path, payload)
+    except ProviderError:
+        return {}
+
+
+def sonos_playback_metadata_attributes(payload: dict) -> dict:
+    """Reduce Sonos metadata to the fields the household UI needs to display."""
+    container = payload.get("container") if isinstance(payload.get("container"), dict) else {}
+    current_item = payload.get("currentItem") if isinstance(payload.get("currentItem"), dict) else {}
+    track = current_item.get("track") if isinstance(current_item.get("track"), dict) else {}
+    artist = track.get("artist") if isinstance(track.get("artist"), dict) else {}
+    album = track.get("album") if isinstance(track.get("album"), dict) else {}
+    service = track.get("service") if isinstance(track.get("service"), dict) else container.get("service") if isinstance(container.get("service"), dict) else {}
+    next_item = payload.get("nextItem") if isinstance(payload.get("nextItem"), dict) else {}
+    next_track = next_item.get("track") if isinstance(next_item.get("track"), dict) else {}
+    return {
+        "sonos_now_playing_title": str(track.get("name") or container.get("name") or payload.get("streamInfo") or ""),
+        "sonos_now_playing_artist": str(artist.get("name") or ""),
+        "sonos_now_playing_album": str(album.get("name") or ""),
+        "sonos_now_playing_artwork": str(track.get("imageUrl") or container.get("imageUrl") or ""),
+        "sonos_source_name": str(service.get("name") or container.get("type") or ""),
+        "sonos_source_type": str(container.get("type") or ""),
+        "sonos_track_duration_ms": track.get("durationMillis"),
+        "sonos_next_title": str(next_track.get("name") or ""),
+        "sonos_can_next": bool(next_track),
+        "sonos_can_previous": bool(track),
+    }
+
+
+def sonos_playback_status_attributes(payload: dict) -> dict:
+    """Keep the UI limited to controls explicitly allowed by Sonos for this source."""
+    actions = payload.get("availablePlaybackActions") if isinstance(payload.get("availablePlaybackActions"), dict) else {}
+    play_modes = payload.get("playModes") if isinstance(payload.get("playModes"), dict) else {}
+    return {
+        "sonos_playback_state": str(payload.get("playbackState") or ""),
+        "sonos_can_next": bool(actions.get("canSkip")),
+        "sonos_can_previous": bool(actions.get("canSkipBack")),
+        "sonos_can_shuffle": bool(actions.get("canShuffle")),
+        "sonos_can_repeat": bool(actions.get("canRepeat")),
+        "sonos_shuffle": bool(play_modes.get("shuffle")),
+        "sonos_repeat": bool(play_modes.get("repeat")),
+        "sonos_repeat_one": bool(play_modes.get("repeatOne")),
+        "sonos_crossfade": bool(play_modes.get("crossfade")),
+        "sonos_position_ms": payload.get("positionMillis"),
+    }
+
+
+def _sonos_favorites(payload: dict) -> list[dict]:
+    """Persist a small, safe picker cache instead of exposing raw API payloads."""
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    favorites = []
+    for item in items[:70]:
+        if not isinstance(item, dict):
+            continue
+        favorite_id = str(item.get("id") or item.get("favoriteId") or "")
+        if not favorite_id:
+            continue
+        favorites.append(
+            {
+                "id": favorite_id,
+                "name": str(item.get("name") or item.get("title") or item.get("description") or "Sonos-favoriet"),
+            }
+        )
+    return favorites
+
+
+def sync_sonos(connection: IntegrationConnection) -> dict:
+    from integrations.services import get_app_config
+
+    households = _sonos_request(connection, "GET", "/households").get("households", [])
+    if not isinstance(households, list) or not households:
+        raise ProviderError("Sonos leverde geen huishoudens op.")
+    household_ids = [str(item.get("id") or "") for item in households if isinstance(item, dict) and item.get("id")]
+    selected = str(connection.settings.get("sonos_household_id") or "")
+    if selected not in household_ids:
+        selected = household_ids[0]
+    seen = set()
+    all_groups, all_players = [], []
+    favorites_by_household = {
+        sonos_household_id: _sonos_favorites(_sonos_optional_request(connection, "GET", f"/households/{sonos_household_id}/favorites"))
+        for sonos_household_id in household_ids
+    }
+    for sonos_household_id in household_ids:
+        payload = _sonos_request(connection, "GET", f"/households/{sonos_household_id}/groups")
+        groups = payload.get("groups", []) if isinstance(payload, dict) else []
+        players = payload.get("players", []) if isinstance(payload, dict) else []
+        groups = groups if isinstance(groups, list) else []
+        players = players if isinstance(players, list) else []
+        all_groups.extend(groups)
+        all_players.extend(players)
+        player_groups = {
+            str(player_id): group
+            for group in groups if isinstance(group, dict)
+            for player_id in group.get("playerIds", [])
+        }
+        for group in groups:
+            if not isinstance(group, dict) or not group.get("id"):
+                continue
+            group_id = str(group["id"])
+            playback = str(group.get("playbackState") or "")
+            group_volume = _sonos_optional_request(connection, "GET", f"/groups/{group_id}/groupVolume")
+            playback_status = _sonos_optional_request(connection, "GET", f"/groups/{group_id}/playback")
+            playback_metadata = _sonos_optional_request(connection, "GET", f"/groups/{group_id}/playbackMetadata")
+            member_ids = {str(item) for item in group.get("playerIds", [])}
+            member_names = [str(player.get("name") or "Sonos-speaker") for player in players if isinstance(player, dict) and str(player.get("id") or "") in member_ids]
+            entity_id = f"sonos.{connection.id}.group.{group_id}"
+            HomeEntity.objects.update_or_create(
+                household=connection.household,
+                entity_id=entity_id,
+                defaults={
+                    "connection": connection,
+                    "source": HomeEntity.Source.SONOS,
+                    "domain": "media_player",
+                    "name": str(group.get("name") or "Sonos-groep"),
+                    "state": "on" if str(playback_status.get("playbackState") or playback) == "PLAYBACK_STATE_PLAYING" else "off",
+                    "attributes": {"sonos_entity_type": "group", "sonos_household_id": sonos_household_id, "sonos_group_id": group_id, "sonos_coordinator_id": group.get("coordinatorId"), "sonos_player_ids": group.get("playerIds", []), "sonos_member_names": member_names, "sonos_favorites": favorites_by_household.get(sonos_household_id, []), "sonos_volume": group_volume.get("volume"), "sonos_muted": group_volume.get("muted", False), **sonos_playback_status_attributes({"playbackState": playback, **playback_status}), **sonos_playback_metadata_attributes(playback_metadata)},
+                    "is_available": True,
+                    "is_supported": True,
+                },
+            )
+            seen.add(entity_id)
+        for player in players:
+            if not isinstance(player, dict) or not player.get("id"):
+                continue
+            player_id = str(player["id"])
+            group = player_groups.get(player_id, {})
+            group_id = str(group.get("id") or "") if isinstance(group, dict) else ""
+            player_volume = _sonos_optional_request(connection, "GET", f"/players/{player_id}/playerVolume")
+            entity_id = f"sonos.{connection.id}.player.{player_id}"
+            HomeEntity.objects.update_or_create(
+                household=connection.household,
+                entity_id=entity_id,
+                defaults={
+                    "connection": connection,
+                    "source": HomeEntity.Source.SONOS,
+                    "domain": "speaker",
+                    "name": str(player.get("name") or "Sonos-speaker"),
+                    "state": "on" if str(group.get("playbackState") or "") == "PLAYBACK_STATE_PLAYING" else "off",
+                    "attributes": {"sonos_entity_type": "player", "sonos_household_id": sonos_household_id, "sonos_player_id": player_id, "sonos_group_id": group_id, "sonos_group_name": group.get("name") if isinstance(group, dict) else "", "sonos_icon": player.get("icon"), "sonos_capabilities": player.get("capabilities", []), "sonos_device_ids": player.get("deviceIds", []), "sonos_api_version": player.get("apiVersion"), "sonos_volume": player_volume.get("volume"), "sonos_muted": player_volume.get("muted", False), "sonos_volume_fixed": player_volume.get("fixed", False)},
+                    "is_available": True,
+                    "is_supported": not bool(player_volume.get("fixed", False)),
+                },
+            )
+            seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.SONOS, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    settings = dict(connection.settings)
+    settings["sonos_household_id"] = selected
+    settings["sonos_household_ids"] = household_ids
+    _, _, sonos_config = get_app_config(connection.household, "sonos")
+    if sonos_config.get("events_enabled"):
+        try:
+            for sonos_household_id in household_ids:
+                _sonos_request(connection, "POST", f"/households/{sonos_household_id}/groups/subscription")
+            for group in all_groups:
+                if isinstance(group, dict) and group.get("id"):
+                    _sonos_request(connection, "POST", f"/groups/{group['id']}/playback/subscription")
+                    _sonos_request(connection, "POST", f"/groups/{group['id']}/groupVolume/subscription")
+                    _sonos_request(connection, "POST", f"/groups/{group['id']}/playbackMetadata/subscription")
+            for player in all_players:
+                if isinstance(player, dict) and player.get("id"):
+                    _sonos_request(connection, "POST", f"/players/{player['id']}/playerVolume/subscription")
+            settings["sonos_events_status"] = "active"
+            settings.pop("sonos_events_error", None)
+        except ProviderError as error:
+            # Events improve freshness but must not block normal speaker control.
+            settings["sonos_events_status"] = "waiting"
+            settings["sonos_events_error"] = str(error)[:240]
+    else:
+        settings["sonos_events_status"] = "disabled"
+        settings.pop("sonos_events_error", None)
+    connection.settings = settings
+    connection.save(update_fields=["settings", "updated_at"])
+    return {"households": len(household_ids), "groups": len(all_groups), "players": len(all_players)}
+
+
+def _google_home_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
+    from integrations.services import GOOGLE_OAUTH_TOKEN_URL
+
+    token = _refresh_connection_token(connection, "Google Home", GOOGLE_OAUTH_TOKEN_URL)
+    try:
+        response = requests.request(method, f"https://smartdevicemanagement.googleapis.com/v1{path}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=20)
+    except requests.RequestException as error:
+        raise ProviderError("Google Home is tijdelijk niet bereikbaar.") from error
+    return _oauth_response(response, "Google Home")
+
+
+def sync_google_home(connection: IntegrationConnection) -> dict:
+    project_id = str(connection.settings.get("project_id") or "")
+    if not project_id:
+        raise ProviderError("Google Home Device Access project ID ontbreekt.")
+    payload = _google_home_request(connection, "GET", f"/enterprises/{project_id}/devices")
+    devices = payload.get("devices", []) if isinstance(payload, dict) else []
+    seen = set()
+    for device in devices if isinstance(devices, list) else []:
+        if not isinstance(device, dict) or not device.get("name"):
+            continue
+        resource_name = str(device["name"])
+        device_id = resource_name.rsplit("/", 1)[-1]
+        traits = device.get("traits") if isinstance(device.get("traits"), dict) else {}
+        info = traits.get("sdm.devices.traits.Info", {}) if isinstance(traits.get("sdm.devices.traits.Info"), dict) else {}
+        on_off = traits.get("sdm.devices.traits.OnOff", {}) if isinstance(traits.get("sdm.devices.traits.OnOff"), dict) else {}
+        temperature = traits.get("sdm.devices.traits.Temperature", {}) if isinstance(traits.get("sdm.devices.traits.Temperature"), dict) else {}
+        setpoint = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {}) if isinstance(traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint"), dict) else {}
+        is_climate = bool(temperature or setpoint)
+        room_names = [str(item.get("displayName")) for item in device.get("parentRelations", []) if isinstance(item, dict) and item.get("displayName")]
+        entity_id = f"google_home.{connection.id}.{device_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.GOOGLE_HOME,
+                "domain": "climate" if is_climate else "device",
+                "name": str(info.get("customName") or info.get("name") or device.get("type") or "Google Nest-apparaat"),
+                "state": "on" if on_off.get("on") else "off",
+                "attributes": {"google_resource_name": resource_name, "google_traits": traits, "google_locations": room_names, "current_temperature": temperature.get("ambientTemperatureCelsius"), "temperature": setpoint.get("heatCelsius") or setpoint.get("coolCelsius"), "min_temp": 9, "max_temp": 32, "supports_on_off": bool(on_off), "supports_temperature": bool(setpoint)},
+                "is_available": True,
+                "is_supported": bool(on_off or setpoint),
+            },
+        )
+        seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.GOOGLE_HOME, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    return {"devices": len(seen)}
+
+
+def sync_lg_thinq(connection: IntegrationConnection) -> dict:
+    data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+    api_base_url = str(data.get("api_base_url") or "").rstrip("/")
+    devices_path = str(data.get("devices_path") or "/devices")
+    if not api_base_url:
+        raise ProviderError("LG ThinQ API base URL ontbreekt.")
+    from integrations.services import get_app_config
+
+    _, _, config = get_app_config(connection.household, "lg_thinq")
+    token_url = str(config.get("token_url") or "")
+    if not token_url:
+        raise ProviderError("LG ThinQ token URL ontbreekt.")
+    token = _refresh_connection_token(connection, "LG ThinQ", token_url)
+    try:
+        response = requests.get(f"{api_base_url}/{devices_path.lstrip('/')}", headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    except requests.RequestException as error:
+        raise ProviderError("LG ThinQ is tijdelijk niet bereikbaar.") from error
+    payload = _oauth_response(response, "LG ThinQ")
+    devices = payload.get("devices") or payload.get("data") or []
+    if not isinstance(devices, list):
+        raise ProviderError("LG ThinQ leverde geen apparatenlijst.")
+    seen = set()
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        device_id = str(device.get("deviceId") or device.get("id") or "")
+        if not device_id:
+            continue
+        entity_id = f"lg_thinq.{connection.id}.{device_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={"connection": connection, "source": HomeEntity.Source.LG_THINQ, "domain": "device", "name": str(device.get("alias") or device.get("name") or device.get("deviceName") or "LG ThinQ-apparaat"), "state": str(device.get("state") or "unknown"), "attributes": {"lg_device_id": device_id, "lg_device_type": device.get("deviceType") or device.get("type"), "lg_raw_status": device.get("snapshot") or device.get("status") or {}}, "is_available": True, "is_supported": False},
+        )
+        seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.LG_THINQ, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    return {"devices": len(seen)}
+
+
+def control_connected_home_entity(entity: HomeEntity, action: str, value=None) -> str:
+    connection = entity.connection
+    if not connection:
+        raise ProviderError("De koppeling voor dit apparaat ontbreekt.")
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    if entity.source == HomeEntity.Source.SONOS:
+        group_id = str(attributes.get("sonos_group_id") or "")
+        household_id = str(attributes.get("sonos_household_id") or "")
+        player_id = str(attributes.get("sonos_player_id") or "")
+        is_player = attributes.get("sonos_entity_type") == "player"
+        if not household_id or (is_player and not player_id) or (not is_player and not group_id):
+            raise ProviderError("Dit Sonos-apparaat heeft geen geldige identificatie.")
+        if action in {"set_volume", "volume_up", "volume_down", "mute", "unmute"}:
+            target = f"/players/{player_id}/playerVolume" if is_player else f"/groups/{group_id}/groupVolume"
+            if action == "set_volume":
+                try:
+                    volume = max(0, min(100, int(float(value))))
+                except (TypeError, ValueError) as error:
+                    raise ProviderError("Kies een volume tussen 0 en 100.") from error
+                _sonos_request(connection, "POST", target, {"volume": volume})
+                return f"Volume ingesteld op {volume}%."
+            if action in {"volume_up", "volume_down"}:
+                delta = 5 if action == "volume_up" else -5
+                _sonos_request(connection, "POST", f"{target}/relative", {"volumeDelta": delta})
+                return "Volume verhoogd." if delta > 0 else "Volume verlaagd."
+            _sonos_request(connection, "POST", f"{target}/mute", {"muted": action == "mute"})
+            return "Sonos is gedempt." if action == "mute" else "Sonos is niet meer gedempt."
+        if is_player:
+            raise ProviderError("Afspelen en pauzeren worden door Sonos op groepsniveau bediend.")
+        if action in {"next", "previous"}:
+            command = "skipToNextTrack" if action == "next" else "skipToPreviousTrack"
+            _sonos_request(connection, "POST", f"/groups/{group_id}/playback/{command}", {})
+            return "Volgende nummer gekozen." if action == "next" else "Vorige nummer gekozen."
+        if action == "load_favorite":
+            favorite_id = str(value or "")
+            favorites = attributes.get("sonos_favorites") if isinstance(attributes.get("sonos_favorites"), list) else []
+            if favorite_id not in {str(item.get("id")) for item in favorites if isinstance(item, dict)}:
+                raise ProviderError("Kies een geldige Sonos-favoriet.")
+            _sonos_request(connection, "POST", f"/groups/{group_id}/favorites", {"favoriteId": favorite_id, "action": "PLAY_NOW", "playOnCompletion": True})
+            return "Sonos-favoriet gestart."
+        if action == "set_group":
+            player_ids = [str(player_id) for player_id in value if str(player_id)] if isinstance(value, (list, tuple)) else []
+            if not player_ids or len(player_ids) > 32:
+                raise ProviderError("Kies een geldige set Sonos-speakers.")
+            known_players = {
+                str(item.attributes.get("sonos_player_id"))
+                for item in HomeEntity.objects.filter(
+                    household=entity.household,
+                    connection=connection,
+                    source=HomeEntity.Source.SONOS,
+                    domain="speaker",
+                )
+                if isinstance(item.attributes, dict) and item.attributes.get("sonos_household_id") == household_id
+            }
+            if not set(player_ids).issubset(known_players):
+                raise ProviderError("Een geselecteerde speaker hoort niet bij dit Sonos-huishouden.")
+            _sonos_request(
+                connection,
+                "POST",
+                f"/households/{household_id}/groups/createGroup",
+                {"playerIds": player_ids, "musicContextGroupId": group_id},
+            )
+            return "Sonos-groep bijgewerkt."
+        if action in {"toggle_shuffle", "toggle_repeat"}:
+            mode_key = "shuffle" if action == "toggle_shuffle" else "repeat"
+            mode_value = not bool(attributes.get(f"sonos_{mode_key}"))
+            _sonos_request(connection, "POST", f"/groups/{group_id}/playback/playMode", {"playModes": {mode_key: mode_value}})
+            label = "Shuffle" if mode_key == "shuffle" else "Herhalen"
+            return f"{label} {'ingeschakeld' if mode_value else 'uitgeschakeld'}."
+        command = "play" if action in {"on", "play_pause"} and entity.state != "on" else "pause"
+        if action == "off":
+            command = "pause"
+        if action not in {"on", "off", "play_pause"}:
+            raise ProviderError("Deze Sonos-bediening is niet beschikbaar.")
+        _sonos_request(connection, "POST", f"/groups/{group_id}/playback/{command}", {})
+        return "Sonos speelt af." if command == "play" else "Sonos is gepauzeerd."
+    if entity.source == HomeEntity.Source.GOOGLE_HOME:
+        resource_name = str(attributes.get("google_resource_name") or "")
+        traits = attributes.get("google_traits") if isinstance(attributes.get("google_traits"), dict) else {}
+        if not resource_name:
+            raise ProviderError("Dit Google Home-apparaat heeft geen geldige identificatie.")
+        if action in {"on", "off"} and "sdm.devices.traits.OnOff" in traits:
+            payload = {"command": "sdm.devices.commands.OnOff", "params": {"on": action == "on"}}
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", payload)
+            return "Ingeschakeld." if action == "on" else "Uitgeschakeld."
+        if action == "set_temperature" and "sdm.devices.traits.ThermostatTemperatureSetpoint" in traits:
+            try:
+                temperature = float(value)
+            except (TypeError, ValueError) as error:
+                raise ProviderError("Kies een geldige temperatuur.") from error
+            setpoint = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"]
+            if setpoint.get("heatCelsius") is not None:
+                payload = {"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat", "params": {"heatCelsius": temperature}}
+            elif setpoint.get("coolCelsius") is not None:
+                payload = {"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool", "params": {"coolCelsius": temperature}}
+            else:
+                raise ProviderError("Google Home meldt geen instelbare thermostaatmodus.")
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", payload)
+            return f"Temperatuur ingesteld op {temperature:g} °C."
+        raise ProviderError("Deze Google Home-bediening is niet beschikbaar voor dit apparaat.")
+    if entity.source == HomeEntity.Source.LG_THINQ:
+        raise ProviderError("LG ThinQ-apparaten worden na synchronisatie veilig als status getoond. Bedieningscommando's verschillen per apparaat en worden toegevoegd zodra de Smart Solution API de device-capabilities levert.")
+    raise ProviderError("Deze bediening is niet beschikbaar.")
 
 
 def _stored_hue_token_is_current(data: dict) -> bool:
@@ -97,10 +540,13 @@ def _hue_response(response):
     except ValueError as error:
         raise ProviderError("Philips Hue gaf geen geldige reactie.") from error
     if not response.ok:
-        raise ProviderError("Philips Hue weigerde de aanvraag. Koppel de bridge opnieuw als dit blijft gebeuren.")
+        raise HueProviderError(
+            "Philips Hue weigerde de aanvraag. Koppel de bridge opnieuw als dit blijft gebeuren.",
+            getattr(response, "status_code", None),
+        )
     if isinstance(payload, dict) and payload.get("errors"):
         first_error = next((item for item in payload["errors"] if isinstance(item, dict)), {})
-        raise ProviderError(str(first_error.get("description") or "Philips Hue kon de aanvraag niet uitvoeren.")[:240])
+        raise HueProviderError(str(first_error.get("description") or "Philips Hue kon de aanvraag niet uitvoeren.")[:240])
     return payload
 
 
@@ -156,6 +602,161 @@ def _hue_request(connection: IntegrationConnection, method: str, path: str, payl
     return _hue_response(response)
 
 
+def _hue_optional_resource(connection: IntegrationConnection, resource_type: str) -> list[dict]:
+    """Return an optional V2 resource list without making older bridges fail sync."""
+    try:
+        payload = _hue_request(connection, "GET", f"/route/clip/v2/resource/{resource_type}")
+    except HueProviderError as error:
+        if error.status_code == 404:
+            return []
+        raise
+    resources = payload.get("data") if isinstance(payload, dict) else []
+    return [item for item in resources if isinstance(item, dict)] if isinstance(resources, list) else []
+
+
+def _hue_sensor_state(resource_type: str, resource: dict) -> tuple[str, bool]:
+    if resource_type == "motion":
+        motion = resource.get("motion") if isinstance(resource.get("motion"), dict) else {}
+        active = bool(motion.get("motion"))
+        return ("Beweging" if active else "Geen beweging"), active
+    if resource_type == "temperature":
+        temperature = resource.get("temperature") if isinstance(resource.get("temperature"), dict) else {}
+        value = temperature.get("temperature")
+        try:
+            celsius = float(value)
+            # Hue V2 reports modern bridges directly in degrees Celsius. Some
+            # older payloads use hundredths, so retain compatibility there.
+            if abs(celsius) > 100:
+                celsius /= 100
+            return f"{celsius:.1f} °C".replace(".", ","), False
+        except (TypeError, ValueError):
+            return "Temperatuur onbekend", False
+    if resource_type == "light_level":
+        light = resource.get("light") if isinstance(resource.get("light"), dict) else {}
+        value = light.get("light_level")
+        return (f"Lichtniveau {value}" if value is not None else "Lichtniveau onbekend"), False
+    if resource_type == "contact":
+        report = resource.get("contact_report") if isinstance(resource.get("contact_report"), dict) else {}
+        changed = report.get("changed")
+        if changed is True:
+            return "Contact geopend", True
+        if changed is False:
+            return "Contact gesloten", False
+        return "Contactstatus onbekend", False
+    if resource_type == "button":
+        report = resource.get("button_report") if isinstance(resource.get("button_report"), dict) else {}
+        event = report.get("event")
+        return (f"Laatste knopactie: {event}" if event else "Nog geen knopactie"), False
+    return "Status onbekend", False
+
+
+def _gamut_point(value) -> tuple[float, float] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return float(value["x"]), float(value["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _point_is_in_gamut(point: tuple[float, float], gamut: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]) -> bool:
+    def cross(origin, first, second):
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (first[1] - origin[1]) * (second[0] - origin[0])
+
+    red, green, blue = gamut
+    first, second, third = cross(point, red, green), cross(point, green, blue), cross(point, blue, red)
+    return (first >= 0 and second >= 0 and third >= 0) or (first <= 0 and second <= 0 and third <= 0)
+
+
+def _nearest_point_on_segment(point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]) -> tuple[float, float]:
+    delta_x, delta_y = end[0] - start[0], end[1] - start[1]
+    length_squared = delta_x * delta_x + delta_y * delta_y
+    if not length_squared:
+        return start
+    factor = max(0, min(1, ((point[0] - start[0]) * delta_x + (point[1] - start[1]) * delta_y) / length_squared))
+    return start[0] + factor * delta_x, start[1] + factor * delta_y
+
+
+def _clamp_to_hue_gamut(point: tuple[float, float], raw_gamut) -> tuple[float, float]:
+    if not isinstance(raw_gamut, dict):
+        return point
+    gamut = tuple(_gamut_point(raw_gamut.get(color)) for color in ("red", "green", "blue"))
+    if any(item is None for item in gamut):
+        return point
+    typed_gamut = gamut  # All entries are validated points after the check above.
+    if _point_is_in_gamut(point, typed_gamut):
+        return point
+    candidates = [_nearest_point_on_segment(point, typed_gamut[index], typed_gamut[(index + 1) % 3]) for index in range(3)]
+    return min(candidates, key=lambda candidate: (candidate[0] - point[0]) ** 2 + (candidate[1] - point[1]) ** 2)
+
+
+def _hue_xy_from_hex(value, gamut=None) -> dict[str, float]:
+    """Convert browser sRGB to CIE XY and constrain it to the lamp's Hue gamut."""
+    raw = str(value or "").strip().lstrip("#")
+    if len(raw) != 6 or any(character not in "0123456789abcdefABCDEF" for character in raw):
+        raise ProviderError("Kies een geldige kleur.")
+    channels = [int(raw[index:index + 2], 16) / 255 for index in range(0, 6, 2)]
+    red, green, blue = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
+    x_value = red * 0.4124 + green * 0.3576 + blue * 0.1805
+    y_value = red * 0.2126 + green * 0.7152 + blue * 0.0722
+    z_value = red * 0.0193 + green * 0.1192 + blue * 0.9505
+    total = x_value + y_value + z_value
+    if total <= 0:
+        raise ProviderError("Zwart kan niet als Hue-kleur worden ingesteld. Schakel de lamp uit om zwart te gebruiken.")
+    x, y = _clamp_to_hue_gamut((x_value / total, y_value / total), gamut)
+    return {"x": round(x, 4), "y": round(y, 4)}
+
+
+def _hue_hex_from_xy(raw_xy, brightness=None) -> str:
+    """Convert a Hue XY color back to a browser color picker value."""
+    point = _gamut_point(raw_xy)
+    if not point or point[1] <= 0:
+        return ""
+    x, y = point
+    try:
+        luminance = max(0.01, min(1.0, float(brightness) / 100))
+    except (TypeError, ValueError):
+        luminance = 1.0
+    z = 1.0 - x - y
+    x_value, z_value = luminance * x / y, luminance * z / y
+    # Inverse of the sRGB D65 matrix used in _hue_xy_from_hex.
+    red = x_value * 3.2406 - luminance * 1.5372 - z_value * 0.4986
+    green = -x_value * 0.9689 + luminance * 1.8758 + z_value * 0.0415
+    blue = x_value * 0.0557 - luminance * 0.204 + z_value * 1.057
+    largest = max(red, green, blue)
+    if largest > 1:
+        red, green, blue = red / largest, green / largest, blue / largest
+    channels = [channel * 12.92 if channel <= 0.0031308 else 1.055 * channel ** (1 / 2.4) - 0.055 for channel in (red, green, blue)]
+    return "#" + "".join(f"{round(max(0, min(1, channel)) * 255):02x}" for channel in channels)
+
+
+def _hue_effect_attributes(light: dict) -> dict:
+    """Expose only the effect values that a Hue light explicitly advertises."""
+    for resource_name, action_key in (("effects_v2", "action"), ("effects", "effect")):
+        effects = light.get(resource_name)
+        if not isinstance(effects, dict):
+            continue
+        values = [str(value) for value in effects.get("effect_values", []) if isinstance(value, str)]
+        if values:
+            return {
+                "supports_effects": True,
+                "effect_values": values,
+                "effect_current": str(effects.get("status") or "no_effect"),
+                "effects_resource": resource_name,
+                "effects_action_key": action_key,
+            }
+    return {"supports_effects": False, "effect_values": [], "effect_current": "", "effects_resource": "", "effects_action_key": ""}
+
+
+def _hue_supports_color(resource: dict) -> bool:
+    """Hue advertises color support by including the color capability object.
+
+    Some bridge firmware versions return an empty object until a color is set,
+    so its presence is more reliable than its current contents.
+    """
+    return isinstance(resource.get("color"), dict)
+
+
 def arm_hue_bridge_link(connection: IntegrationConnection) -> None:
     if connection.provider != IntegrationConnection.Provider.HUE:
         raise ProviderError("Dit is geen Philips Hue-koppeling.")
@@ -188,18 +789,102 @@ def sync_hue(connection: IntegrationConnection) -> dict:
         raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
     lights_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/light")
     devices_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/device")
+    rooms_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/room")
+    zones_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/zone")
+    grouped_lights_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/grouped_light")
+    scenes_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/scene")
+    sensor_resources = {
+        resource_type: _hue_optional_resource(connection, resource_type)
+        for resource_type in ("motion", "temperature", "light_level", "contact", "button")
+    }
+    device_power_resources = _hue_optional_resource(connection, "device_power")
+    connectivity_resources = _hue_optional_resource(connection, "zigbee_connectivity")
     lights = lights_payload.get("data") if isinstance(lights_payload, dict) else None
     devices = devices_payload.get("data") if isinstance(devices_payload, dict) else None
     if not isinstance(lights, list):
         raise ProviderError("Philips Hue leverde geen lampenlijst.")
-    device_names = {
-        str(service.get("rid")): str(device.get("metadata", {}).get("name") or "Hue lamp")
+    power_by_device, connectivity_by_device = {}, {}
+    for power in device_power_resources:
+        owner = power.get("owner") if isinstance(power.get("owner"), dict) else {}
+        device_id = str(owner.get("rid") or "") if owner.get("rtype") == "device" else ""
+        power_state = power.get("power_state") if isinstance(power.get("power_state"), dict) else {}
+        if device_id:
+            power_by_device[device_id] = {
+                "hue_battery_level": power_state.get("battery_level"),
+                "hue_battery_state": str(power_state.get("battery_state") or ""),
+            }
+    for connectivity in connectivity_resources:
+        owner = connectivity.get("owner") if isinstance(connectivity.get("owner"), dict) else {}
+        device_id = str(owner.get("rid") or "") if owner.get("rtype") == "device" else ""
+        if device_id:
+            connectivity_by_device[device_id] = {"hue_connectivity": str(connectivity.get("status") or "")}
+
+    device_details, device_resource_details = {}, {}
+    for device in devices if isinstance(devices, list) else []:
+        if not isinstance(device, dict):
+            continue
+        metadata = device.get("metadata") if isinstance(device.get("metadata"), dict) else {}
+        product_data = device.get("product_data") if isinstance(device.get("product_data"), dict) else {}
+        details = {
+            "hue_device_id": str(device.get("id") or ""),
+            "hue_device_name": str(metadata.get("name") or "Hue lamp"),
+            "hue_product_name": str(product_data.get("product_name") or product_data.get("model_id") or ""),
+            "hue_model_id": str(product_data.get("model_id") or ""),
+            "hue_manufacturer": str(product_data.get("manufacturer_name") or ""),
+            **power_by_device.get(str(device.get("id") or ""), {}),
+            **connectivity_by_device.get(str(device.get("id") or ""), {}),
+        }
+        for service in device.get("services", []):
+            if not isinstance(service, dict) or not service.get("rtype") or not service.get("rid"):
+                continue
+            resource_type, resource_id = str(service["rtype"]), str(service["rid"])
+            device_resource_details[(resource_type, resource_id)] = details
+            if resource_type == "light":
+                device_details[resource_id] = details
+    device_lights = {
+        str(device.get("id")): [str(service.get("rid")) for service in device.get("services", []) if isinstance(service, dict) and service.get("rtype") == "light" and service.get("rid")]
         for device in (devices if isinstance(devices, list) else [])
-        if isinstance(device, dict)
-        for service in device.get("services", [])
-        if isinstance(service, dict) and service.get("rtype") == "light" and service.get("rid")
+        if isinstance(device, dict) and device.get("id")
     }
-    seen, count = set(), 0
+    group_names, group_members, device_locations = {}, {}, {}
+    for resource_type, payload in (("room", rooms_payload), ("zone", zones_payload)):
+        for group in payload.get("data", []) if isinstance(payload, dict) else []:
+            if not isinstance(group, dict) or not group.get("id"):
+                continue
+            group_id = str(group["id"])
+            group_names[(resource_type, group_id)] = str(group.get("metadata", {}).get("name") or ("Hue kamer" if resource_type == "room" else "Hue zone"))
+            members = []
+            for child in group.get("children", []):
+                if not isinstance(child, dict):
+                    continue
+                if child.get("rtype") == "device":
+                    device_id = str(child.get("rid") or "")
+                    members.extend(device_lights.get(device_id, []))
+                    device_locations.setdefault(device_id, set()).add(group_names[(resource_type, group_id)])
+                elif resource_type == "zone" and child.get("rtype") == "room":
+                    room_member_ids = group_members.get(("room", str(child.get("rid") or "")), [])
+                    members.extend(room_member_ids)
+                    for device_id, light_ids in device_lights.items():
+                        if set(light_ids).intersection(room_member_ids):
+                            device_locations.setdefault(device_id, set()).add(group_names[(resource_type, group_id)])
+            group_members[(resource_type, group_id)] = members
+
+    light_profiles = {}
+    for light in lights:
+        if not isinstance(light, dict) or not light.get("id"):
+            continue
+        light_id = str(light["id"])
+        device_details_for_light = device_details.get(light_id, {})
+        light_profiles[light_id] = {
+            "name": device_details_for_light.get("hue_device_name") or str(light.get("metadata", {}).get("name") or f"Hue lamp {light_id}"),
+            "supports_color": _hue_supports_color(light),
+            "color_hex": _hue_hex_from_xy(
+                light.get("color", {}).get("xy") if isinstance(light.get("color"), dict) else None,
+                light.get("dimming", {}).get("brightness") if isinstance(light.get("dimming"), dict) else None,
+            ),
+        }
+
+    seen, lights_count, groups_count, scenes_count, sensors_count = set(), 0, 0, 0, 0
     for light in lights:
         if not isinstance(light, dict):
             continue
@@ -208,11 +893,29 @@ def sync_hue(connection: IntegrationConnection) -> dict:
             continue
         on = light.get("on") if isinstance(light.get("on"), dict) else {}
         dimming = light.get("dimming") if isinstance(light.get("dimming"), dict) else {}
+        color_temperature = light.get("color_temperature") if isinstance(light.get("color_temperature"), dict) else {}
+        mirek_schema = color_temperature.get("mirek_schema") if isinstance(color_temperature.get("mirek_schema"), dict) else {}
+        gradient = light.get("gradient") if isinstance(light.get("gradient"), dict) else {}
         attributes = {
             "hue_light_id": light_id,
             "brightness": dimming.get("brightness"),
+            "supports_dimming": bool(dimming),
+            "color_temperature": color_temperature.get("mirek"),
+            "supports_color_temperature": bool(mirek_schema),
+            "color_temperature_min": mirek_schema.get("mirek_minimum"),
+            "color_temperature_max": mirek_schema.get("mirek_maximum"),
+            "supports_color": _hue_supports_color(light),
+            "color_gamut": light.get("color", {}).get("gamut") if isinstance(light.get("color"), dict) else None,
+            "color_xy": light.get("color", {}).get("xy") if isinstance(light.get("color"), dict) else None,
+            "color_hex": _hue_hex_from_xy(light.get("color", {}).get("xy"), dimming.get("brightness")) if isinstance(light.get("color"), dict) else "",
+            "gradient_points": len(gradient.get("points", [])) if isinstance(gradient.get("points"), list) else 0,
+            "hue_resource_type": "light",
             "type": light.get("type", "light"),
+            **device_details.get(light_id, {}),
+            **_hue_effect_attributes(light),
         }
+        if attributes.get("hue_device_id"):
+            attributes["hue_locations"] = sorted(device_locations.get(attributes["hue_device_id"], []))
         entity_id = f"hue.{connection.id}.{light_id}"
         HomeEntity.objects.update_or_create(
             household=connection.household,
@@ -221,30 +924,164 @@ def sync_hue(connection: IntegrationConnection) -> dict:
                 "connection": connection,
                 "source": HomeEntity.Source.HUE,
                 "domain": "light",
-                "name": device_names.get(light_id, str(light.get("metadata", {}).get("name") or f"Hue lamp {light_id}")),
+                "name": device_details.get(light_id, {}).get("hue_device_name") or str(light.get("metadata", {}).get("name") or f"Hue lamp {light_id}"),
                 "state": "on" if on.get("on") else "off",
                 "attributes": attributes,
+                "is_available": attributes.get("hue_connectivity") != "disconnected",
+                "is_supported": True,
+            },
+        )
+        seen.add(entity_id)
+        lights_count += 1
+
+    grouped_lights = grouped_lights_payload.get("data") if isinstance(grouped_lights_payload, dict) else []
+    for grouped_light in grouped_lights if isinstance(grouped_lights, list) else []:
+        if not isinstance(grouped_light, dict) or not grouped_light.get("id"):
+            continue
+        owner = grouped_light.get("owner") if isinstance(grouped_light.get("owner"), dict) else {}
+        owner_type, owner_id = str(owner.get("rtype") or ""), str(owner.get("rid") or "")
+        if owner_type not in {"room", "zone"} or not owner_id:
+            continue
+        group_id = str(grouped_light["id"])
+        on = grouped_light.get("on") if isinstance(grouped_light.get("on"), dict) else {}
+        dimming = grouped_light.get("dimming") if isinstance(grouped_light.get("dimming"), dict) else {}
+        color_temperature = grouped_light.get("color_temperature") if isinstance(grouped_light.get("color_temperature"), dict) else {}
+        mirek_schema = color_temperature.get("mirek_schema") if isinstance(color_temperature.get("mirek_schema"), dict) else {}
+        color = grouped_light.get("color") if isinstance(grouped_light.get("color"), dict) else {}
+        name = group_names.get((owner_type, owner_id), "Hue kamer" if owner_type == "room" else "Hue zone")
+        member_profiles = [light_profiles[light_id] for light_id in group_members.get((owner_type, owner_id), []) if light_id in light_profiles]
+        member_names = [profile["name"] for profile in member_profiles]
+        supports_member_color = any(profile["supports_color"] for profile in member_profiles)
+        member_color_hexes = sorted({profile["color_hex"] for profile in member_profiles if profile["color_hex"]})
+        group_color_hex = _hue_hex_from_xy(color.get("xy"), dimming.get("brightness")) or (member_color_hexes[0] if len(member_color_hexes) == 1 else "")
+        entity_id = f"hue.{connection.id}.grouped_light.{group_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.HUE,
+                "domain": "group",
+                "name": name,
+                "state": "on" if on.get("on") else "off",
+                "attributes": {
+                    "hue_grouped_light_id": group_id,
+                    "hue_resource_type": "grouped_light",
+                    "hue_group_type": owner_type,
+                    "brightness": dimming.get("brightness"),
+                    "supports_dimming": bool(dimming),
+                    "color_temperature": color_temperature.get("mirek"),
+                    "supports_color_temperature": bool(mirek_schema),
+                    "color_temperature_min": mirek_schema.get("mirek_minimum"),
+                    "color_temperature_max": mirek_schema.get("mirek_maximum"),
+                    # Some bridges omit color on a grouped_light while the
+                    # individual member lights do advertise it. Group control
+                    # still supports a color command in that situation.
+                    "supports_color": _hue_supports_color(grouped_light) or supports_member_color,
+                    "color_gamut": color.get("gamut"),
+                    "color_xy": color.get("xy"),
+                    "color_hex": group_color_hex,
+                    "color_mixed": len(member_color_hexes) > 1,
+                    "member_color_hexes": member_color_hexes,
+                    "member_count": len(group_members.get((owner_type, owner_id), [])),
+                    "member_light_ids": group_members.get((owner_type, owner_id), []),
+                    "member_names": member_names,
+                    **_hue_effect_attributes(grouped_light),
+                },
                 "is_available": True,
                 "is_supported": True,
             },
         )
         seen.add(entity_id)
-        count += 1
+        groups_count += 1
+
+    sensor_labels = {
+        "motion": "Beweging",
+        "temperature": "Temperatuur",
+        "light_level": "Lichtniveau",
+        "contact": "Contact",
+        "button": "Knop",
+    }
+    for resource_type, resources in sensor_resources.items():
+        for resource in resources:
+            resource_id = str(resource.get("id") or "")
+            if not resource_id:
+                continue
+            details = device_resource_details.get((resource_type, resource_id), {})
+            sensor_name = details.get("hue_device_name") or str(resource.get("metadata", {}).get("name") or "Hue sensor")
+            state, active = _hue_sensor_state(resource_type, resource)
+            attributes = {
+                "hue_sensor_id": resource_id,
+                "hue_resource_type": resource_type,
+                "hue_sensor_kind": sensor_labels[resource_type],
+                "sensor_active": active,
+                **details,
+            }
+            if attributes.get("hue_device_id"):
+                attributes["hue_locations"] = sorted(device_locations.get(attributes["hue_device_id"], []))
+            entity_id = f"hue.{connection.id}.sensor.{resource_type}.{resource_id}"
+            HomeEntity.objects.update_or_create(
+                household=connection.household,
+                entity_id=entity_id,
+                defaults={
+                    "connection": connection,
+                    "source": HomeEntity.Source.HUE,
+                    "domain": "sensor",
+                    "name": f"{sensor_name} · {sensor_labels[resource_type]}",
+                    "state": state,
+                    "attributes": attributes,
+                    "is_available": attributes.get("hue_connectivity") != "disconnected",
+                    "is_supported": False,
+                },
+            )
+            seen.add(entity_id)
+            sensors_count += 1
+
+    scenes = scenes_payload.get("data") if isinstance(scenes_payload, dict) else []
+    for scene in scenes if isinstance(scenes, list) else []:
+        if not isinstance(scene, dict) or not scene.get("id"):
+            continue
+        scene_id = str(scene["id"])
+        group = scene.get("group") if isinstance(scene.get("group"), dict) else {}
+        group_name = group_names.get((str(group.get("rtype") or ""), str(group.get("rid") or "")), "Hue")
+        status = scene.get("status") if isinstance(scene.get("status"), dict) else {}
+        entity_id = f"hue.{connection.id}.scene.{scene_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.HUE,
+                "domain": "scene",
+                "name": str(scene.get("metadata", {}).get("name") or "Hue scène"),
+                "state": "active" if status.get("active") else "idle",
+                "attributes": {"hue_scene_id": scene_id, "hue_resource_type": "scene", "hue_group_name": group_name},
+                "is_available": True,
+                "is_supported": True,
+            },
+        )
+        seen.add(entity_id)
+        scenes_count += 1
     HomeEntity.objects.for_household(connection.household).filter(
         source=HomeEntity.Source.HUE,
         connection=connection,
     ).exclude(entity_id__in=seen).update(is_available=False)
-    return {"lights": count}
+    return {"lights": lights_count, "groups": groups_count, "sensors": sensors_count, "scenes": scenes_count}
 
 
 def control_hue_light(entity: HomeEntity, action: str, brightness=None) -> str:
     connection = entity.connection
     if entity.source != HomeEntity.Source.HUE or not connection:
         raise ProviderError("Deze Hue-lamp is niet beschikbaar.")
-    light_id = str(entity.attributes.get("hue_light_id") or "")
-    if not light_id:
+    resource_type = str(entity.attributes.get("hue_resource_type") or "light")
+    resource_id = str(entity.attributes.get("hue_light_id") or entity.attributes.get("hue_grouped_light_id") or entity.attributes.get("hue_scene_id") or "")
+    if not resource_id:
         raise ProviderError("Deze Hue-lamp heeft geen geldige apparaatidentificatie.")
-    if action == "on":
+    if resource_type == "scene":
+        if action != "activate":
+            raise ProviderError("Deze Philips Hue-bediening is niet beschikbaar.")
+        path, payload, detail = f"/route/clip/v2/resource/scene/{resource_id}", {"recall": {"action": "active"}}, "Scène gestart."
+    elif action == "on":
         payload, detail = {"on": {"on": True}}, "Ingeschakeld."
     elif action == "off":
         payload, detail = {"on": {"on": False}}, "Uitgeschakeld."
@@ -256,11 +1093,39 @@ def control_hue_light(entity: HomeEntity, action: str, brightness=None) -> str:
         if not 0 <= value <= 100:
             raise ProviderError("Helderheid moet tussen 0 en 100 liggen.")
         payload, detail = {"on": {"on": True}, "dimming": {"brightness": value}}, f"Helderheid ingesteld op {round(value)}%."
+    elif action == "color_temperature":
+        try:
+            value = int(float(brightness))
+        except (TypeError, ValueError) as error:
+            raise ProviderError("Kies een geldige kleurtemperatuur.") from error
+        minimum = int(entity.attributes.get("color_temperature_min") or 153)
+        maximum = int(entity.attributes.get("color_temperature_max") or 500)
+        if not minimum <= value <= maximum:
+            raise ProviderError("Kies een kleurtemperatuur binnen het bereik van deze lamp.")
+        payload, detail = {"on": {"on": True}, "color_temperature": {"mirek": value}}, "Kleurtemperatuur ingesteld."
+    elif action == "color":
+        if not entity.attributes.get("supports_color"):
+            raise ProviderError("Deze lamp ondersteunt geen kleurbediening.")
+        payload, detail = {"on": {"on": True}, "color": {"xy": _hue_xy_from_hex(brightness, entity.attributes.get("color_gamut"))}}, "Kleur ingesteld."
+    elif action == "effect":
+        effect = str(brightness or "")
+        values = entity.attributes.get("effect_values") if isinstance(entity.attributes.get("effect_values"), list) else []
+        if effect not in values:
+            raise ProviderError("Dit lichteffect is niet beschikbaar voor deze lamp.")
+        resource_name = str(entity.attributes.get("effects_resource") or "")
+        action_key = str(entity.attributes.get("effects_action_key") or "")
+        if resource_name not in {"effects_v2", "effects"} or action_key not in {"action", "effect"}:
+            raise ProviderError("Deze lamp ondersteunt geen lichteffecten.")
+        payload = {resource_name: {action_key: effect}}
+        detail = "Lichteffect uitgeschakeld." if effect == "no_effect" else f"Lichteffect {effect.replace('_', ' ')} ingesteld."
     else:
         raise ProviderError("Deze Philips Hue-bediening is niet beschikbaar.")
     if not connection.settings.get("bridge_username"):
         raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
-    _hue_request(connection, "PUT", f"/route/clip/v2/resource/light/{light_id}", payload)
+    if resource_type != "scene":
+        resource_type = "grouped_light" if resource_type == "grouped_light" else "light"
+        path = f"/route/clip/v2/resource/{resource_type}/{resource_id}"
+    _hue_request(connection, "PUT", path, payload)
     return detail
 
 
