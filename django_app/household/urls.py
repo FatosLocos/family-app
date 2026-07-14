@@ -19,6 +19,7 @@ urlpatterns = [
     path("maaltijden/<int:meal_id>/aanpassen/", views.update_meal, name="update_meal"),
     path("maaltijden/<int:meal_id>/verwijderen/", views.delete_meal, name="delete_meal"),
     path("routines/toevoegen/", views.add_routine, name="add_routine"),
+    path("routines/<int:routine_id>/afronden/", views.complete_routine, name="complete_routine"),
     path("routines/<int:routine_id>/aanpassen/", views.update_routine, name="update_routine"),
     path("routines/<int:routine_id>/verwijderen/", views.delete_routine, name="delete_routine"),
 ]

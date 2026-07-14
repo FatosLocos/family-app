@@ -51,7 +51,7 @@ class HouseholdIsolationTests(TestCase):
         self.client.post(reverse("household:update_task", args=[self.task.pk]), {"title": "Privé taak aangepast", "priority": 3, "notes": "Voor vrijdag"})
         self.client.post(reverse("household:update_shopping_item", args=[item.pk]), {"name": "Havermelk", "quantity": "2 pakken", "recurrence_days": 7})
         self.client.post(reverse("household:update_meal", args=[meal.pk]), {"title": "Risotto", "planned_for": timezone.localdate(), "notes": "Met salade"})
-        self.client.post(reverse("household:update_routine", args=[routine.pk]), {"title": "Papier wegbrengen", "cadence": "wekelijks"})
+        self.client.post(reverse("household:update_routine", args=[routine.pk]), {"title": "Papier wegbrengen", "cadence": "wekelijks", "interval_days": 7, "next_due_on": timezone.localdate()})
 
         self.task.refresh_from_db()
         item.refresh_from_db()
@@ -70,6 +70,22 @@ class HouseholdIsolationTests(TestCase):
         self.assertFalse(ShoppingItem.objects.filter(pk=item.pk).exists())
         self.assertFalse(MealPlan.objects.filter(pk=meal.pk).exists())
         self.assertFalse(Routine.objects.filter(pk=routine.pk).exists())
+
+    def test_routine_completion_schedules_the_next_occurrence(self):
+        self.client.force_login(self.owner)
+        routine = Routine.objects.create(
+            household=self.first_household,
+            title="Afval buiten",
+            interval_days=7,
+            next_due_on=timezone.localdate() - timedelta(days=2),
+        )
+
+        response = self.client.post(reverse("household:complete_routine", args=[routine.id]))
+
+        self.assertRedirects(response, f"{reverse('household:index')}?tab=routines")
+        routine.refresh_from_db()
+        self.assertIsNotNone(routine.last_completed_at)
+        self.assertEqual(routine.next_due_on, timezone.localdate() + timedelta(days=7))
 
     def test_member_cannot_update_or_delete_records_from_another_household(self):
         self.client.force_login(self.child)

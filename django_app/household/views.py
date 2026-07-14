@@ -1,6 +1,8 @@
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from datetime import timedelta
+
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
@@ -51,7 +53,7 @@ def index(request):
             ],
         })
     context = {
-        "tab": tab, "task_filter": task_filter,
+        "tab": tab, "task_filter": task_filter, "today": timezone.localdate(),
         "task_form": task_form, "shopping_form": ShoppingItemForm(), "meal_form": MealPlanForm(), "routine_form": routine_form,
         "tasks": tasks[:50],
         "shopping_items": ShoppingItem.objects.for_household(household).filter(list=default_list)[:50],
@@ -63,7 +65,7 @@ def index(request):
         "receipts": receipts,
         "receipt_form": ReceiptForm(),
         "meals": MealPlan.objects.for_household(household).order_by("planned_for")[:14],
-        "routines": Routine.objects.for_household(household).filter(is_active=True).select_related("assigned_to"),
+        "routines": Routine.objects.for_household(household).filter(is_active=True).select_related("assigned_to").order_by("next_due_on", "title"),
         "members": members,
     }
     return render(request, "household/index.html", context)
@@ -147,6 +149,17 @@ def add_routine(request):
         routine.save()
         messages.success(request, "Routine toegevoegd.")
     return redirect("household:index")
+
+
+@household_required
+@require_POST
+def complete_routine(request, routine_id):
+    routine = get_object_or_404(Routine.objects.for_household(request.household), pk=routine_id, is_active=True)
+    routine.last_completed_at = timezone.now()
+    routine.next_due_on = timezone.localdate() + timedelta(days=routine.interval_days)
+    routine.save(update_fields=["last_completed_at", "next_due_on", "updated_at"])
+    messages.success(request, f"{routine.title} is afgerond. Volgende keer: {routine.next_due_on:%d-%m}.")
+    return _household_tab_redirect("routines")
 
 
 def _household_tab_redirect(tab: str):

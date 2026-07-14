@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from common.scoping import HouseholdManager
 from households.models import Household
@@ -65,6 +66,9 @@ class MealPlan(HouseholdRecord):
 class Routine(HouseholdRecord):
     title = models.CharField(max_length=200)
     cadence = models.CharField(max_length=80, default="wekelijks")
+    interval_days = models.PositiveSmallIntegerField(default=7)
+    next_due_on = models.DateField(default=timezone.localdate)
+    last_completed_at = models.DateTimeField(null=True, blank=True)
     assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     is_active = models.BooleanField(default=True)
 

@@ -27,7 +27,11 @@ class MealPlanForm(forms.ModelForm):
 class RoutineForm(forms.ModelForm):
     class Meta:
         model = Routine
-        fields = ("title", "cadence", "assigned_to")
+        fields = ("title", "cadence", "interval_days", "next_due_on", "assigned_to")
+        widgets = {
+            "interval_days": forms.NumberInput(attrs={"min": 1, "max": 365}),
+            "next_due_on": forms.DateInput(attrs={"type": "date"}),
+        }
 
 
 class ShoppingPriceForm(forms.ModelForm):
