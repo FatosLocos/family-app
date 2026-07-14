@@ -183,6 +183,44 @@ class HouseholdIsolationTests(TestCase):
         self.assertEqual(str(results[0].price), "4.29")
         self.assertEqual(results[0].product_url, "https://ah.example.test/nutella-400")
 
+    @patch("household.price_providers.requests.get")
+    def test_checkjebon_skips_prepared_variants_for_a_single_fresh_product(self, get):
+        from household import price_providers
+
+        price_providers._checkjebon_cache = None
+        get.return_value.json.return_value = [
+            {"n": "ah", "u": "https://ah.example.test", "d": [
+                {"n": "AH Kopsoep tomaat", "p": 0.99, "s": "3 stuks", "l": "/kopsoep"},
+                {"n": "AH Hummus tomaat", "p": 1.99, "s": "200 g", "l": "/hummus"},
+                {"n": "AH Trostomaten", "p": 2.49, "s": "500 g", "l": "/trostomaten"},
+            ]},
+        ]
+        get.return_value.raise_for_status.return_value = None
+        item = ShoppingItem.objects.create(household=self.first_household, list=ShoppingList.objects.create(household=self.first_household, name="Boodschappen"), name="Tomaat", quantity="5")
+
+        results = fetch_checkjebon_prices([item])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].matched_product_name, "AH Trostomaten")
+
+    @patch("household.price_providers.fetch_prijsprofeet_offers", return_value=[])
+    @patch("household.price_providers.fetch_checkjebon_prices", return_value=[])
+    def test_price_sync_removes_stale_checkjebon_matches(self, _base_prices, _offers):
+        shopping_list = ShoppingList.objects.create(household=self.first_household, name="Boodschappen")
+        item = ShoppingItem.objects.create(household=self.first_household, list=shopping_list, name="Tomaat")
+        ShoppingPrice.objects.create(
+            household=self.first_household,
+            item=item,
+            retailer=ShoppingPrice.Retailer.ALBERT_HEIJN,
+            price="0.99",
+            source=ShoppingPrice.Source.CHECKJEBON,
+            matched_product_name="AH Kopsoep tomaat",
+        )
+
+        refresh_household_prices(self.first_household)
+
+        self.assertFalse(ShoppingPrice.objects.filter(item=item).exists())
+
     @patch("household.price_providers.fetch_prijsprofeet_offers")
     @patch("household.price_providers.fetch_checkjebon_prices")
     def test_price_sync_uses_offers_but_preserves_manual_prices(self, base_prices, offers):
