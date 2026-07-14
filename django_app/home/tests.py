@@ -87,6 +87,11 @@ class HomeAssistantTests(TestCase):
         self.assertContains(response, "Zolder")
         self.assertContains(self.client.get(reverse("home:index"), {"tab": "onderhoud"}), "Cv-ketel")
 
+    def test_home_assistant_interface_names_the_rest_api_integration(self):
+        self.client.force_login(self.parent)
+        response = self.client.get(reverse("home:index"))
+        self.assertContains(response, "Home Assistant REST API")
+
     def test_household_document_is_downloadable_only_inside_household(self):
         self.client.force_login(self.parent)
         uploaded = SimpleUploadedFile("polis.pdf", b"document", content_type="application/pdf")
