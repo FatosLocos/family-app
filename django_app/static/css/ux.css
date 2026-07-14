@@ -122,6 +122,10 @@ button.is-pending::after {
   font-size: 13px;
 }
 
+.network-status[hidden] {
+  display: none;
+}
+
 .network-status svg {
   width: 17px;
   color: var(--negative);
