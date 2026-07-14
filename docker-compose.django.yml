@@ -26,6 +26,10 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - family_app-redis:/data
+    networks:
+      default:
+        aliases:
+          - family-app-redis
 
   web:
     image: family-app:local
@@ -34,6 +38,8 @@ services:
     env_file: ./django_app/.env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      CELERY_BROKER_URL: redis://family-app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
     command: >-
       sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
       gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
@@ -56,6 +62,8 @@ services:
     env_file: ./django_app/.env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      CELERY_BROKER_URL: redis://family-app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
     command: celery -A config worker --loglevel=INFO
     depends_on:
       postgres:
@@ -69,6 +77,8 @@ services:
     env_file: ./django_app/.env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      CELERY_BROKER_URL: redis://family-app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
     command: celery -A config beat --loglevel=INFO
     depends_on:
       postgres:
