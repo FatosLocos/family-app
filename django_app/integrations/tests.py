@@ -256,6 +256,15 @@ class SettingsAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Wacht op toestemming")
 
+    def test_hue_help_is_available_from_settings(self):
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("integrations:index"))
+
+        self.assertContains(response, 'data-open-dialog="hue-help-dialog"')
+        self.assertContains(response, "Philips Hue koppelen")
+        self.assertContains(response, "https://app.ligtvoet.tech/instellingen/hue/callback/")
+
     def test_parent_can_authorize_hue_without_exposing_tokens(self):
         save_app_config(
             self.household,
