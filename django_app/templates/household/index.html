@@ -107,7 +107,7 @@
     <div class="panel-heading"><h2>Actieve routines</h2></div>
     <ul class="clean-list">
       {% for routine in routines %}
-        <li><i data-lucide="repeat-2"></i><div><strong>{{ routine.title }}</strong><small>{{ routine.cadence }}{% if routine.assigned_to %} · {{ routine.assigned_to }}{% endif %}</small></div><button class="icon-button row-action" type="button" data-open-dialog="routine-edit-{{ routine.id }}" title="Routine aanpassen" aria-label="{{ routine.title }} aanpassen"><i data-lucide="pencil"></i></button></li>
+        <li><i data-lucide="repeat-2"></i><div><strong>{{ routine.title }}</strong><small>{{ routine.cadence }} · elke {{ routine.interval_days }} dagen{% if routine.assigned_to %} · {{ routine.assigned_to }}{% endif %} · volgende keer {{ routine.next_due_on|date:'d M' }}</small></div>{% if routine.next_due_on <= today %}<span class="status-pill">Nu</span>{% endif %}<form method="post" action="{% url 'household:complete_routine' routine.id %}">{% csrf_token %}<button class="icon-button" title="Routine afronden" aria-label="{{ routine.title }} afronden"><i data-lucide="check"></i></button></form><button class="icon-button row-action" type="button" data-open-dialog="routine-edit-{{ routine.id }}" title="Routine aanpassen" aria-label="{{ routine.title }} aanpassen"><i data-lucide="pencil"></i></button></li>
       {% empty %}<li class="empty-copy">Nog geen routines ingesteld.</li>{% endfor %}
     </ul>
   </section>
@@ -117,7 +117,7 @@
         {% csrf_token %}
         <div class="dialog-title"><h2>Routine aanpassen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
         <label>Routine<input name="title" value="{{ routine.title }}" required></label>
-        <div class="field-grid"><label>Herhaling<input name="cadence" value="{{ routine.cadence }}" required></label><label>Wie<select name="assigned_to"><option value="">Niet toegewezen</option>{% for member in members %}<option value="{{ member.id }}" {% if routine.assigned_to_id == member.id %}selected{% endif %}>{{ member }}</option>{% endfor %}</select></label></div>
+        <div class="field-grid"><label>Herhaling<input name="cadence" value="{{ routine.cadence }}" required></label><label>Elke dagen<input type="number" min="1" max="365" name="interval_days" value="{{ routine.interval_days }}" required></label></div><div class="field-grid"><label>Volgende keer<input type="date" name="next_due_on" value="{{ routine.next_due_on|date:'Y-m-d' }}" required></label><label>Wie<select name="assigned_to"><option value="">Niet toegewezen</option>{% for member in members %}<option value="{{ member.id }}" {% if routine.assigned_to_id == member.id %}selected{% endif %}>{{ member }}</option>{% endfor %}</select></label></div>
         <button class="button button-primary" type="submit">Opslaan</button>
       </form>
       <form class="dialog-danger-form" method="post" action="{% url 'household:delete_routine' routine.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Routine verwijderen</button></form>
@@ -138,7 +138,7 @@
     {% elif tab == 'inzicht' %}
       {{ receipt_form.as_p }}
     {% else %}
-      <label>Routine{{ routine_form.title }}</label><div class="field-grid"><label>Herhaling{{ routine_form.cadence }}</label><label>Wie{{ routine_form.assigned_to }}</label></div>
+      <label>Routine{{ routine_form.title }}</label><div class="field-grid"><label>Herhaling{{ routine_form.cadence }}</label><label>Elke dagen{{ routine_form.interval_days }}</label></div><div class="field-grid"><label>Volgende keer{{ routine_form.next_due_on }}</label><label>Wie{{ routine_form.assigned_to }}</label></div>
     {% endif %}
     <button class="button button-primary" type="submit">Opslaan</button>
   </form>
