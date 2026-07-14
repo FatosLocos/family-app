@@ -1,8 +1,12 @@
+from datetime import date
+from unittest.mock import patch
+
 from django.test import TestCase
 from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
+from family.birthdays import upcoming_birthdays
 from households.models import Household, Membership
 from identity.models import User
 
@@ -123,3 +127,37 @@ class FamilyWishlistTests(TestCase):
         response = self.client.get(f"{reverse('family:index')}?tab=contacten")
         self.assertContains(response, f'contact-edit-{contact.id}')
         self.assertContains(response, f'person-edit-{person.id}')
+
+    def test_upcoming_birthdays_are_sorted_by_next_occurrence_and_show_age(self):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        later = ContactPerson.objects.create(household=self.household, contact=contact, name="Later", birth_date=date(1990, 8, 1))
+        tomorrow = ContactPerson.objects.create(household=self.household, contact=contact, name="Morgen", birth_date=date(2000, 7, 15))
+        last_week = ContactPerson.objects.create(household=self.household, contact=contact, name="Volgend jaar", birth_date=date(1985, 7, 7))
+
+        birthdays = upcoming_birthdays([later, last_week, tomorrow], date(2026, 7, 14))
+
+        self.assertEqual([birthday["person"].name for birthday in birthdays], ["Morgen", "Later", "Volgend jaar"])
+        self.assertEqual(birthdays[0]["next_date"], date(2026, 7, 15))
+        self.assertEqual(birthdays[0]["turning_age"], 26)
+
+    def test_leap_day_birthday_uses_february_twenty_eighth_in_non_leap_years(self):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        leap_day = ContactPerson.objects.create(household=self.household, contact=contact, name="Schrikkel", birth_date=date(2000, 2, 29))
+
+        birthday = upcoming_birthdays([leap_day], date(2025, 2, 1))[0]
+
+        self.assertEqual(birthday["next_date"], date(2025, 2, 28))
+        self.assertEqual(birthday["turning_age"], 25)
+
+    @patch("family.views.timezone.localdate", return_value=date(2026, 7, 14))
+    def test_birthdays_tab_renders_the_next_birthday_first(self, _localdate):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        ContactPerson.objects.create(household=self.household, contact=contact, name="Later", birth_date=date(1990, 8, 1))
+        ContactPerson.objects.create(household=self.household, contact=contact, name="Morgen", birth_date=date(2000, 7, 15))
+
+        response = self.client.get(reverse("family:index"), {"tab": "verjaardagen"})
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(content.index("Morgen"), content.index("Later"))
+        self.assertContains(response, "wordt 26")

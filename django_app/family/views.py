@@ -1,15 +1,15 @@
-from datetime import date
-
 from django.contrib import messages
 from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 import secrets
 from urllib.parse import urlencode
 from django.views.decorators.http import require_POST
 
 from family.forms import BulletinPostForm, ContactForm, ContactPersonForm, VCardImportForm, WishItemForm
+from family.birthdays import upcoming_birthdays
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
 from family.vcard import contacts_as_vcard, parse_vcards
 from households.decorators import household_required, parent_required
@@ -25,7 +25,10 @@ def index(request):
     contacts = Contact.objects.for_household(household).prefetch_related("people")
     if query:
         contacts = contacts.filter(Q(name__icontains=query) | Q(people__name__icontains=query)).distinct()
-    birthdays = ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).order_by("birth_date")
+    birthdays = upcoming_birthdays(
+        ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).select_related("contact"),
+        timezone.localdate(),
+    )
     memberships = Membership.objects.filter(household=household).select_related("user").order_by("role", "user__display_name", "user__email")
     wishlist_owner = request.user
     requested_owner = request.GET.get("wishlist_for")
