@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from django.utils import timezone
 
 from finance.models import BankAccount, BankConnection, Transaction
+from home.models import HomeEntity
 from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationConnection
 from planning.models import CalendarEvent, CalendarSource
@@ -72,7 +73,175 @@ def sync_connection(connection: IntegrationConnection) -> dict:
         return sync_outlook(connection)
     if connection.provider == "bunq":
         return sync_bunq(connection)
+    if connection.provider == "hue":
+        return sync_hue(connection)
     raise ProviderError("Onbekende koppeling.")
+
+
+def _stored_hue_token_is_current(data: dict) -> bool:
+    expires_at = data.get("expires_at", "")
+    if not data.get("access_token") or not expires_at:
+        return False
+    try:
+        expires = timezone.datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return False
+    if timezone.is_naive(expires):
+        expires = timezone.make_aware(expires, timezone.get_current_timezone())
+    return expires > timezone.now() + timedelta(seconds=45)
+
+
+def _hue_response(response):
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError as error:
+        raise ProviderError("Philips Hue gaf geen geldige reactie.") from error
+    if not response.ok:
+        raise ProviderError("Philips Hue weigerde de aanvraag. Koppel de bridge opnieuw als dit blijft gebeuren.")
+    return payload
+
+
+def _hue_token(connection: IntegrationConnection) -> str:
+    data = connection.settings
+    if _stored_hue_token_is_current(data):
+        return decrypt(data["access_token"])
+    refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+    if not refresh_token:
+        raise ProviderError("Philips Hue moet opnieuw worden geautoriseerd.")
+    from integrations.services import HUE_OAUTH_TOKEN_URL, get_app_config
+
+    client_id, client_secret, _ = get_app_config(connection.household, "hue")
+    if not client_id or not client_secret:
+        raise ProviderError("Philips Hue-clientgegevens ontbreken.")
+    response = requests.post(
+        HUE_OAUTH_TOKEN_URL,
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    payload = _hue_response(response)
+    if not payload.get("access_token"):
+        raise ProviderError("Philips Hue-token vernieuwen mislukt.")
+    connection.secret_encrypted = encrypt(payload.get("refresh_token") or refresh_token)
+    connection.settings = {
+        **data,
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+    }
+    connection.save(update_fields=["secret_encrypted", "settings", "updated_at"])
+    return payload["access_token"]
+
+
+def _hue_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None):
+    token = _hue_token(connection)
+    try:
+        response = requests.request(
+            method,
+            f"https://api.meethue.com{path}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise ProviderError("Philips Hue is tijdelijk niet bereikbaar.") from error
+    return _hue_response(response)
+
+
+def arm_hue_bridge_link(connection: IntegrationConnection) -> None:
+    if connection.provider != IntegrationConnection.Provider.HUE:
+        raise ProviderError("Dit is geen Philips Hue-koppeling.")
+    _hue_request(connection, "PUT", "/bridge/0/config", {"linkbutton": True})
+    connection.status = "awaiting_bridge_link"
+    connection.last_error = ""
+    connection.save(update_fields=["status", "last_error", "updated_at"])
+
+
+def finish_hue_bridge_link(connection: IntegrationConnection) -> None:
+    if connection.provider != IntegrationConnection.Provider.HUE:
+        raise ProviderError("Dit is geen Philips Hue-koppeling.")
+    app_id = str(connection.settings.get("app_id") or "family-app")[:32]
+    payload = _hue_request(connection, "POST", "/bridge/", {"devicetype": f"{app_id}#family-app"})
+    entries = payload if isinstance(payload, list) else []
+    username = next(
+        (entry.get("success", {}).get("username") for entry in entries if isinstance(entry, dict) and entry.get("success", {}).get("username")),
+        "",
+    )
+    if not username:
+        raise ProviderError("De Hue Bridge is nog niet bevestigd. Druk op de fysieke knop en probeer opnieuw.")
+    connection.settings = {**connection.settings, "bridge_username": username}
+    connection.status = "needs_sync"
+    connection.last_error = ""
+    connection.save(update_fields=["settings", "status", "last_error", "updated_at"])
+
+
+def sync_hue(connection: IntegrationConnection) -> dict:
+    username = str(connection.settings.get("bridge_username") or "")
+    if not username:
+        raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
+    payload = _hue_request(connection, "GET", f"/bridge/{username}/lights")
+    if not isinstance(payload, dict):
+        raise ProviderError("Philips Hue leverde geen lampenlijst.")
+    seen, count = set(), 0
+    for light_id, light in payload.items():
+        if not isinstance(light, dict):
+            continue
+        state = light.get("state") if isinstance(light.get("state"), dict) else {}
+        attributes = {
+            "hue_light_id": str(light_id),
+            "brightness": state.get("bri"),
+            "reachable": state.get("reachable", True),
+            "type": light.get("type", ""),
+        }
+        entity_id = f"hue.{connection.id}.{light_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.HUE,
+                "domain": "light",
+                "name": str(light.get("name") or f"Hue lamp {light_id}"),
+                "state": "on" if state.get("on") else "off",
+                "attributes": attributes,
+                "is_available": bool(state.get("reachable", True)),
+                "is_supported": True,
+            },
+        )
+        seen.add(entity_id)
+        count += 1
+    HomeEntity.objects.for_household(connection.household).filter(
+        source=HomeEntity.Source.HUE,
+        connection=connection,
+    ).exclude(entity_id__in=seen).update(is_available=False)
+    return {"lights": count}
+
+
+def control_hue_light(entity: HomeEntity, action: str, brightness=None) -> str:
+    connection = entity.connection
+    if entity.source != HomeEntity.Source.HUE or not connection:
+        raise ProviderError("Deze Hue-lamp is niet beschikbaar.")
+    light_id = str(entity.attributes.get("hue_light_id") or "")
+    if not light_id.isdigit():
+        raise ProviderError("Deze Hue-lamp heeft geen geldig apparaatnummer.")
+    if action == "on":
+        payload, detail = {"on": True}, "Ingeschakeld."
+    elif action == "off":
+        payload, detail = {"on": False}, "Uitgeschakeld."
+    elif action == "brightness":
+        try:
+            value = int(brightness)
+        except (TypeError, ValueError) as error:
+            raise ProviderError("Kies een geldige helderheid.") from error
+        if not 1 <= value <= 254:
+            raise ProviderError("Helderheid moet tussen 1 en 254 liggen.")
+        payload, detail = {"on": True, "bri": value}, f"Helderheid ingesteld op {round(value / 254 * 100)}%."
+    else:
+        raise ProviderError("Deze Philips Hue-bediening is niet beschikbaar.")
+    username = str(connection.settings.get("bridge_username") or "")
+    if not username:
+        raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
+    _hue_request(connection, "PUT", f"/bridge/{username}/lights/{light_id}/state", payload)
+    return detail
 
 
 def _outlook_token(connection: IntegrationConnection) -> str:

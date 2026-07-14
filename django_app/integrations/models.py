@@ -21,6 +21,7 @@ class IntegrationConnection(models.Model):
     class Provider(models.TextChoices):
         OUTLOOK = "outlook", "Outlook"
         BUNQ = "bunq", "bunq"
+        HUE = "hue", "Philips Hue"
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)

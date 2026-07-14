@@ -14,6 +14,11 @@ urlpatterns = [
     path("bunq/configuratie/", views.save_bunq_config, name="save_bunq_config"),
     path("bunq/start/", views.start_bunq, name="start_bunq"),
     path("bunq/callback/", views.bunq_callback, name="bunq_callback"),
+    path("hue/configuratie/", views.save_hue_config, name="save_hue_config"),
+    path("hue/start/", views.start_hue, name="start_hue"),
+    path("hue/callback/", views.hue_callback, name="hue_callback"),
+    path("hue/<int:connection_id>/bridge/start/", views.arm_hue_bridge, name="arm_hue_bridge"),
+    path("hue/<int:connection_id>/bridge/voltooien/", views.finish_hue_bridge, name="finish_hue_bridge"),
     path("<int:connection_id>/synchroniseren/", views.sync_connection, name="sync_connection"),
     path("<int:connection_id>/ontkoppelen/", views.disconnect_connection, name="disconnect_connection"),
 ]

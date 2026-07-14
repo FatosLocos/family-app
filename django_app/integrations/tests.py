@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from django.test import TestCase
 from django.urls import reverse
@@ -11,8 +12,9 @@ from household.models import Task
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
-from integrations.models import IntegrationAudit, IntegrationConnection, SyncRun
-from integrations.providers import sync_bunq, sync_outlook
+from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, SyncRun
+from integrations.providers import arm_hue_bridge_link, finish_hue_bridge_link, sync_bunq, sync_hue, sync_outlook
+from integrations.services import save_app_config
 from integrations.tasks import sync_connection_task
 from planning.models import CalendarEvent, CalendarSource
 
@@ -127,6 +129,66 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(result, {"status": "already_running"})
         sync.assert_not_called()
 
+    def test_hue_sync_stores_lights_as_household_entities(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={
+                "access_token": encrypt("access-token"),
+                "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+                "bridge_username": "bridge-user",
+            },
+        )
+        lights = {
+            "1": {
+                "name": "Keuken",
+                "type": "Extended color light",
+                "state": {"on": True, "bri": 127, "reachable": True},
+            },
+            "2": {
+                "name": "Hal",
+                "type": "Dimmable light",
+                "state": {"on": False, "bri": 80, "reachable": False},
+            },
+        }
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse(lights)):
+            result = sync_hue(connection)
+
+        self.assertEqual(result, {"lights": 2})
+        from home.models import HomeEntity
+
+        kitchen = HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.1")
+        self.assertEqual(kitchen.source, HomeEntity.Source.HUE)
+        self.assertEqual(kitchen.connection, connection)
+        self.assertEqual(kitchen.state, "on")
+        self.assertEqual(kitchen.attributes["brightness"], 127)
+        self.assertFalse(HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.2").is_available)
+
+    def test_hue_bridge_confirmation_creates_the_bridge_username(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"app_id": "family-app"},
+        )
+        with patch(
+            "integrations.providers._hue_request",
+            side_effect=[{}, [{"success": {"username": "bridge-user"}}]],
+        ) as hue_request:
+            arm_hue_bridge_link(connection)
+            finish_hue_bridge_link(connection)
+
+        connection.refresh_from_db()
+        self.assertEqual(connection.status, "needs_sync")
+        self.assertEqual(connection.settings["bridge_username"], "bridge-user")
+        self.assertEqual(hue_request.call_args_list[0].args[1:3], ("PUT", "/bridge/0/config"))
+        self.assertEqual(hue_request.call_args_list[1].args[1:3], ("POST", "/bridge/"))
+
 
 class SettingsAccessTests(TestCase):
     def setUp(self):
@@ -193,6 +255,45 @@ class SettingsAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Wacht op toestemming")
+
+    def test_parent_can_authorize_hue_without_exposing_tokens(self):
+        save_app_config(
+            self.household,
+            "hue",
+            "hue-client-id",
+            "hue-client-secret",
+            {"app_id": "family-app", "device_name": "Family App"},
+        )
+        self.client.force_login(self.owner)
+
+        start = self.client.get(reverse("integrations:start_hue"))
+        self.assertEqual(start.status_code, 302)
+        params = parse_qs(urlparse(start["Location"]).query)
+        self.assertEqual(params["client_id"], ["hue-client-id"])
+        self.assertIn("state", params)
+
+        token_response = FakeResponse({"access_token": "hue-access-token", "refresh_token": "hue-refresh-token", "expires_in": 3600})
+        with patch("integrations.services.requests.post", return_value=token_response):
+            callback = self.client.get(reverse("integrations:hue_callback"), {"code": "authorization-code", "state": params["state"][0]})
+
+        self.assertRedirects(callback, reverse("integrations:index"))
+        connection = IntegrationConnection.objects.get(household=self.household, provider=IntegrationConnection.Provider.HUE)
+        self.assertEqual(connection.status, "needs_bridge_link")
+        self.assertNotIn("hue-access-token", connection.settings["access_token"])
+        self.assertNotIn("hue-refresh-token", connection.secret_encrypted)
+        self.assertFalse(IntegrationAppConfig.objects.get(household=self.household, provider="hue").client_secret_encrypted.endswith("hue-client-secret"))
+
+    def test_child_cannot_change_or_start_the_hue_connection(self):
+        self.client.force_login(self.child)
+
+        self.assertEqual(
+            self.client.post(
+                reverse("integrations:save_hue_config"),
+                {"client_id": "client", "client_secret": "secret", "app_id": "family-app", "device_name": "Family App"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(self.client.get(reverse("integrations:start_hue")).status_code, 403)
 
 
 class HouseholdDataExportTests(TestCase):

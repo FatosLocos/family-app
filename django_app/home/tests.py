@@ -9,6 +9,7 @@ from home.services import HomeAssistantError, control_entity, sync_entities
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
+from integrations.models import IntegrationConnection
 
 
 class FakeResponse:
@@ -91,6 +92,34 @@ class HomeAssistantTests(TestCase):
         self.client.force_login(self.parent)
         response = self.client.get(reverse("home:index"))
         self.assertContains(response, "Home Assistant REST API")
+
+    def test_hue_light_control_is_server_side_and_audited(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"bridge_username": "bridge-user"},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id=f"hue.{connection.id}.1",
+            domain="light",
+            name="Keuken",
+            is_supported=True,
+            attributes={"hue_light_id": "1", "brightness": 120},
+        )
+
+        with patch("integrations.providers.control_hue_light", return_value="Helderheid ingesteld op 50%.") as control, patch("integrations.providers.sync_hue") as sync:
+            control_entity(self.household, entity, "brightness", "127")
+
+        control.assert_called_once_with(entity, "brightness", "127")
+        sync.assert_called_once_with(connection)
+        audit = HomeActionAudit.objects.get(entity=entity)
+        self.assertTrue(audit.succeeded)
+        self.assertEqual(audit.detail, "Helderheid ingesteld op 50%.")
 
     def test_household_document_is_downloadable_only_inside_household(self):
         self.client.force_login(self.parent)

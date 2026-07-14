@@ -127,6 +127,17 @@ def _action_detail(action, payload):
 
 
 def control_entity(household, entity, action, target_temperature=None):
+    if entity.source == HomeEntity.Source.HUE:
+        from integrations.providers import ProviderError, control_hue_light, sync_hue
+
+        try:
+            detail = control_hue_light(entity, action, target_temperature)
+            sync_hue(entity.connection)
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail=detail)
+            return
+        except ProviderError as error:
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
+            raise HomeAssistantError(str(error)) from error
     config = HomeAssistantConfig.objects.for_household(household).first()
     if not config:
         raise HomeAssistantError("Home Assistant is nog niet gekoppeld.")
