@@ -31,7 +31,7 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
     if provider == "bunq":
         return settings.BUNQ_OAUTH_CLIENT_ID, settings.BUNQ_OAUTH_CLIENT_SECRET, {"environment": "production"}
     if provider == "hue":
-        return "", "", {"app_id": "family-app", "device_name": "Family App"}
+        return "", "", {}
     return "", "", {}
 
 
@@ -123,18 +123,12 @@ def start_hue_connection(request) -> str:
         defaults={"display_name": "Philips Hue"},
     )
     state = secrets.token_urlsafe(24)
-    device_id = connection.settings.get("device_id") or secrets.token_hex(16)
-    request.session["hue_oauth"] = {"state": state, "connection_id": connection.id, "device_id": device_id}
-    app_id = config.get("app_id") or "family-app"
+    request.session["hue_oauth"] = {"state": state, "connection_id": connection.id}
     params = urlencode({
         "client_id": client_id,
-        "clientid": client_id,
         "response_type": "code",
         "redirect_uri": f"{public_origin(request)}/instellingen/hue/callback/",
         "state": state,
-        "appid": app_id,
-        "deviceid": device_id,
-        "devicename": config.get("device_name") or "Family App",
     })
     return f"{HUE_OAUTH_AUTHORIZE_URL}?{params}"
 
@@ -168,8 +162,6 @@ def finish_hue_connection(request, code: str, state: str) -> IntegrationConnecti
     connection.settings = {
         "access_token": encrypt(payload["access_token"]),
         "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
-        "app_id": config.get("app_id") or "family-app",
-        "device_id": session["device_id"],
     }
     connection.status = "needs_bridge_link"
     connection.last_error = ""

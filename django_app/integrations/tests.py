@@ -13,7 +13,7 @@ from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, SyncRun
-from integrations.providers import arm_hue_bridge_link, finish_hue_bridge_link, sync_bunq, sync_hue, sync_outlook
+from integrations.providers import arm_hue_bridge_link, control_hue_light, finish_hue_bridge_link, sync_bunq, sync_hue, sync_outlook
 from integrations.services import save_app_config
 from integrations.tasks import sync_connection_task
 from planning.models import CalendarEvent, CalendarSource
@@ -142,31 +142,31 @@ class ProviderSyncTests(TestCase):
                 "bridge_username": "bridge-user",
             },
         )
-        lights = {
-            "1": {
-                "name": "Keuken",
-                "type": "Extended color light",
-                "state": {"on": True, "bri": 127, "reachable": True},
-            },
-            "2": {
-                "name": "Hal",
-                "type": "Dimmable light",
-                "state": {"on": False, "bri": 80, "reachable": False},
-            },
-        }
+        lights = {"data": [
+            {"id": "light-1", "on": {"on": True}, "dimming": {"brightness": 50.0}},
+            {"id": "light-2", "on": {"on": False}, "dimming": {"brightness": 31.5}},
+        ]}
+        devices = {"data": [
+            {"metadata": {"name": "Keuken"}, "services": [{"rtype": "light", "rid": "light-1"}]},
+            {"metadata": {"name": "Hal"}, "services": [{"rtype": "light", "rid": "light-2"}]},
+        ]}
 
-        with patch("integrations.providers.requests.request", return_value=FakeResponse(lights)):
+        with patch("integrations.providers.requests.request", side_effect=[FakeResponse(lights), FakeResponse(devices)]) as request:
             result = sync_hue(connection)
 
         self.assertEqual(result, {"lights": 2})
         from home.models import HomeEntity
 
-        kitchen = HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.1")
+        kitchen = HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.light-1")
         self.assertEqual(kitchen.source, HomeEntity.Source.HUE)
         self.assertEqual(kitchen.connection, connection)
+        self.assertEqual(kitchen.name, "Keuken")
         self.assertEqual(kitchen.state, "on")
-        self.assertEqual(kitchen.attributes["brightness"], 127)
-        self.assertFalse(HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.2").is_available)
+        self.assertEqual(kitchen.attributes["brightness"], 50.0)
+        self.assertTrue(HomeEntity.objects.get(household=self.household, entity_id=f"hue.{connection.id}.light-2").is_available)
+        self.assertEqual(request.call_args_list[0].args[1], "https://api.meethue.com/route/clip/v2/resource/light")
+        self.assertEqual(request.call_args_list[1].args[1], "https://api.meethue.com/route/clip/v2/resource/device")
+        self.assertEqual(request.call_args_list[0].kwargs["headers"]["hue-application-key"], "bridge-user")
 
     def test_hue_bridge_confirmation_creates_the_bridge_username(self):
         connection = IntegrationConnection.objects.create(
@@ -174,7 +174,7 @@ class ProviderSyncTests(TestCase):
             user=self.user,
             provider=IntegrationConnection.Provider.HUE,
             display_name="Philips Hue",
-            settings={"app_id": "family-app"},
+            settings={},
         )
         with patch(
             "integrations.providers._hue_request",
@@ -186,8 +186,41 @@ class ProviderSyncTests(TestCase):
         connection.refresh_from_db()
         self.assertEqual(connection.status, "needs_sync")
         self.assertEqual(connection.settings["bridge_username"], "bridge-user")
-        self.assertEqual(hue_request.call_args_list[0].args[1:3], ("PUT", "/bridge/0/config"))
-        self.assertEqual(hue_request.call_args_list[1].args[1:3], ("POST", "/bridge/"))
+        self.assertEqual(hue_request.call_args_list[0].args[1:3], ("PUT", "/route/api/0/config"))
+        self.assertEqual(hue_request.call_args_list[1].args[1:3], ("POST", "/route/api"))
+
+    def test_hue_light_control_uses_the_v2_resource_and_application_key(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={
+                "access_token": encrypt("access-token"),
+                "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+                "bridge_username": "bridge-user",
+            },
+        )
+        from home.models import HomeEntity
+
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id=f"hue.{connection.id}.light-1",
+            domain="light",
+            name="Keuken",
+            attributes={"hue_light_id": "light-1"},
+        )
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            detail = control_hue_light(entity, "brightness", "42.5")
+
+        self.assertEqual(detail, "Helderheid ingesteld op 42%.")
+        self.assertEqual(request.call_args.args[1], "https://api.meethue.com/route/clip/v2/resource/light/light-1")
+        self.assertEqual(request.call_args.kwargs["headers"]["hue-application-key"], "bridge-user")
+        self.assertEqual(request.call_args.kwargs["json"], {"on": {"on": True}, "dimming": {"brightness": 42.5}})
 
 
 class SettingsAccessTests(TestCase):
@@ -271,7 +304,7 @@ class SettingsAccessTests(TestCase):
             "hue",
             "hue-client-id",
             "hue-client-secret",
-            {"app_id": "family-app", "device_name": "Family App"},
+            {},
         )
         self.client.force_login(self.owner)
 
@@ -280,6 +313,7 @@ class SettingsAccessTests(TestCase):
         params = parse_qs(urlparse(start["Location"]).query)
         self.assertEqual(params["client_id"], ["hue-client-id"])
         self.assertIn("state", params)
+        self.assertEqual(set(params), {"client_id", "response_type", "redirect_uri", "state"})
 
         token_response = FakeResponse({"access_token": "hue-access-token", "refresh_token": "hue-refresh-token", "expires_in": 3600})
         with patch("integrations.services.requests.post", return_value=token_response):
@@ -298,7 +332,7 @@ class SettingsAccessTests(TestCase):
         self.assertEqual(
             self.client.post(
                 reverse("integrations:save_hue_config"),
-                {"client_id": "client", "client_secret": "secret", "app_id": "family-app", "device_name": "Family App"},
+                {"client_id": "client", "client_secret": "secret"},
             ).status_code,
             403,
         )

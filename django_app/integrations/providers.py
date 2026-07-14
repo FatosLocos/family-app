@@ -98,6 +98,9 @@ def _hue_response(response):
         raise ProviderError("Philips Hue gaf geen geldige reactie.") from error
     if not response.ok:
         raise ProviderError("Philips Hue weigerde de aanvraag. Koppel de bridge opnieuw als dit blijft gebeuren.")
+    if isinstance(payload, dict) and payload.get("errors"):
+        first_error = next((item for item in payload["errors"] if isinstance(item, dict)), {})
+        raise ProviderError(str(first_error.get("description") or "Philips Hue kon de aanvraag niet uitvoeren.")[:240])
     return payload
 
 
@@ -134,11 +137,17 @@ def _hue_token(connection: IntegrationConnection) -> str:
 
 def _hue_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None):
     token = _hue_token(connection)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    # The V1 bridge-registration calls only use the bearer token. Every V2
+    # resource request also needs the application key returned by that step.
+    application_key = str(connection.settings.get("bridge_username") or "")
+    if application_key:
+        headers["hue-application-key"] = application_key
     try:
         response = requests.request(
             method,
             f"https://api.meethue.com{path}",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers=headers,
             json=payload,
             timeout=20,
         )
@@ -150,7 +159,7 @@ def _hue_request(connection: IntegrationConnection, method: str, path: str, payl
 def arm_hue_bridge_link(connection: IntegrationConnection) -> None:
     if connection.provider != IntegrationConnection.Provider.HUE:
         raise ProviderError("Dit is geen Philips Hue-koppeling.")
-    _hue_request(connection, "PUT", "/bridge/0/config", {"linkbutton": True})
+    _hue_request(connection, "PUT", "/route/api/0/config", {"linkbutton": True})
     connection.status = "awaiting_bridge_link"
     connection.last_error = ""
     connection.save(update_fields=["status", "last_error", "updated_at"])
@@ -159,8 +168,7 @@ def arm_hue_bridge_link(connection: IntegrationConnection) -> None:
 def finish_hue_bridge_link(connection: IntegrationConnection) -> None:
     if connection.provider != IntegrationConnection.Provider.HUE:
         raise ProviderError("Dit is geen Philips Hue-koppeling.")
-    app_id = str(connection.settings.get("app_id") or "family-app")[:32]
-    payload = _hue_request(connection, "POST", "/bridge/", {"devicetype": f"{app_id}#family-app"})
+    payload = _hue_request(connection, "POST", "/route/api", {"devicetype": "family-app#server"})
     entries = payload if isinstance(payload, list) else []
     username = next(
         (entry.get("success", {}).get("username") for entry in entries if isinstance(entry, dict) and entry.get("success", {}).get("username")),
@@ -178,19 +186,32 @@ def sync_hue(connection: IntegrationConnection) -> dict:
     username = str(connection.settings.get("bridge_username") or "")
     if not username:
         raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
-    payload = _hue_request(connection, "GET", f"/bridge/{username}/lights")
-    if not isinstance(payload, dict):
+    lights_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/light")
+    devices_payload = _hue_request(connection, "GET", "/route/clip/v2/resource/device")
+    lights = lights_payload.get("data") if isinstance(lights_payload, dict) else None
+    devices = devices_payload.get("data") if isinstance(devices_payload, dict) else None
+    if not isinstance(lights, list):
         raise ProviderError("Philips Hue leverde geen lampenlijst.")
+    device_names = {
+        str(service.get("rid")): str(device.get("metadata", {}).get("name") or "Hue lamp")
+        for device in (devices if isinstance(devices, list) else [])
+        if isinstance(device, dict)
+        for service in device.get("services", [])
+        if isinstance(service, dict) and service.get("rtype") == "light" and service.get("rid")
+    }
     seen, count = set(), 0
-    for light_id, light in payload.items():
+    for light in lights:
         if not isinstance(light, dict):
             continue
-        state = light.get("state") if isinstance(light.get("state"), dict) else {}
+        light_id = str(light.get("id") or "")
+        if not light_id:
+            continue
+        on = light.get("on") if isinstance(light.get("on"), dict) else {}
+        dimming = light.get("dimming") if isinstance(light.get("dimming"), dict) else {}
         attributes = {
-            "hue_light_id": str(light_id),
-            "brightness": state.get("bri"),
-            "reachable": state.get("reachable", True),
-            "type": light.get("type", ""),
+            "hue_light_id": light_id,
+            "brightness": dimming.get("brightness"),
+            "type": light.get("type", "light"),
         }
         entity_id = f"hue.{connection.id}.{light_id}"
         HomeEntity.objects.update_or_create(
@@ -200,10 +221,10 @@ def sync_hue(connection: IntegrationConnection) -> dict:
                 "connection": connection,
                 "source": HomeEntity.Source.HUE,
                 "domain": "light",
-                "name": str(light.get("name") or f"Hue lamp {light_id}"),
-                "state": "on" if state.get("on") else "off",
+                "name": device_names.get(light_id, str(light.get("metadata", {}).get("name") or f"Hue lamp {light_id}")),
+                "state": "on" if on.get("on") else "off",
                 "attributes": attributes,
-                "is_available": bool(state.get("reachable", True)),
+                "is_available": True,
                 "is_supported": True,
             },
         )
@@ -221,26 +242,25 @@ def control_hue_light(entity: HomeEntity, action: str, brightness=None) -> str:
     if entity.source != HomeEntity.Source.HUE or not connection:
         raise ProviderError("Deze Hue-lamp is niet beschikbaar.")
     light_id = str(entity.attributes.get("hue_light_id") or "")
-    if not light_id.isdigit():
-        raise ProviderError("Deze Hue-lamp heeft geen geldig apparaatnummer.")
+    if not light_id:
+        raise ProviderError("Deze Hue-lamp heeft geen geldige apparaatidentificatie.")
     if action == "on":
-        payload, detail = {"on": True}, "Ingeschakeld."
+        payload, detail = {"on": {"on": True}}, "Ingeschakeld."
     elif action == "off":
-        payload, detail = {"on": False}, "Uitgeschakeld."
+        payload, detail = {"on": {"on": False}}, "Uitgeschakeld."
     elif action == "brightness":
         try:
-            value = int(brightness)
+            value = float(brightness)
         except (TypeError, ValueError) as error:
             raise ProviderError("Kies een geldige helderheid.") from error
-        if not 1 <= value <= 254:
-            raise ProviderError("Helderheid moet tussen 1 en 254 liggen.")
-        payload, detail = {"on": True, "bri": value}, f"Helderheid ingesteld op {round(value / 254 * 100)}%."
+        if not 0 <= value <= 100:
+            raise ProviderError("Helderheid moet tussen 0 en 100 liggen.")
+        payload, detail = {"on": {"on": True}, "dimming": {"brightness": value}}, f"Helderheid ingesteld op {round(value)}%."
     else:
         raise ProviderError("Deze Philips Hue-bediening is niet beschikbaar.")
-    username = str(connection.settings.get("bridge_username") or "")
-    if not username:
+    if not connection.settings.get("bridge_username"):
         raise ProviderError("Bevestig eerst de Philips Hue Bridge.")
-    _hue_request(connection, "PUT", f"/bridge/{username}/lights/{light_id}/state", payload)
+    _hue_request(connection, "PUT", f"/route/clip/v2/resource/light/{light_id}", payload)
     return detail
 
 

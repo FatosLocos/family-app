@@ -29,7 +29,7 @@ def index(request):
         "recent_audits": IntegrationAudit.objects.for_household(request.household).select_related("user")[:8],
         "outlook_form": OutlookConfigForm(initial={"client_id": outlook_client_id, "tenant_id": outlook_settings.get("tenant_id", "consumers")}),
         "bunq_form": BunqConfigForm(initial={"client_id": bunq_client_id, "environment": bunq_settings.get("environment", "production")}),
-        "hue_form": HueConfigForm(initial={"client_id": hue_client_id, "app_id": hue_settings.get("app_id", "family-app"), "device_name": hue_settings.get("device_name", "Family App")}),
+        "hue_form": HueConfigForm(initial={"client_id": hue_client_id}),
         "profile_form": ProfileForm(instance=request.user),
         "household_form": HouseholdSettingsForm(instance=request.household),
     })
@@ -93,7 +93,7 @@ def save_hue_config(request):
             "hue",
             form.cleaned_data["client_id"],
             form.cleaned_data["client_secret"],
-            {"app_id": form.cleaned_data["app_id"], "device_name": form.cleaned_data["device_name"]},
+            {},
         )
         messages.success(request, "Philips Hue-configuratie veilig opgeslagen.")
     return redirect("integrations:index")
