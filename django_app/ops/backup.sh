@@ -5,6 +5,16 @@ backup_dir="${BACKUP_DIR:-/var/backups/family_app}"
 retain_days="${BACKUP_RETAIN_DAYS:-14}"
 compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
 env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
+compose() {
+  docker compose --env-file "$env_file" -f "$compose_file" "$@"
+}
+app_db_name="${APP_DB_NAME:-$(compose exec -T postgres printenv APP_DB_NAME)}"
+case "$app_db_name" in
+  ''|*[!A-Za-z0-9_]* )
+    echo "Ongeldige PostgreSQL-databasenaam." >&2
+    exit 64
+    ;;
+esac
 mkdir -p "$backup_dir"
 timestamp="$(date +%Y-%m-%dT%H-%M-%S)"
 backup_file="$backup_dir/family_app-$timestamp.dump"
@@ -15,9 +25,8 @@ temporary_media_file="$media_file.partial"
 umask 077
 trap 'rm -f "$temporary_file" "$temporary_media_file"' EXIT HUP INT TERM
 
-docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-  pg_dump -U postgres -d family_app -Fc > "$temporary_file"
-docker compose --env-file "$env_file" -f "$compose_file" exec -T web \
+compose exec -T postgres pg_dump -U postgres -d "$app_db_name" -Fc > "$temporary_file"
+compose exec -T web \
   sh -c 'mkdir -p /app/media && tar -C /app/media -cf - .' > "$temporary_media_file"
 mv "$temporary_file" "$backup_file"
 mv "$temporary_media_file" "$media_file"

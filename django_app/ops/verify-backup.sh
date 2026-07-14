@@ -20,19 +20,17 @@ fi
 
 compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
 env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
-app_db_name="${APP_DB_NAME:-family_app}"
-
+compose() {
+  docker compose --env-file "$env_file" -f "$compose_file" "$@"
+}
+app_db_name="${APP_DB_NAME:-$(compose exec -T postgres printenv APP_DB_NAME)}"
 case "$app_db_name" in
   ''|*[!A-Za-z0-9_]* )
     echo "Ongeldige PostgreSQL-databasenaam." >&2
     exit 64
     ;;
 esac
-
 check_database="${app_db_name}_restore_check_$(date +%s)"
-compose() {
-  docker compose --env-file "$env_file" -f "$compose_file" "$@"
-}
 cleanup() {
   compose exec -T postgres dropdb -U postgres --if-exists "$check_database" >/dev/null 2>&1 || true
 }
