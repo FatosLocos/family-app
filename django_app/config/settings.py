@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from celery.schedules import crontab
+
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 
@@ -125,11 +127,15 @@ X_FRAME_OPTIONS = "DENY"
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0") == "1"
+CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
     "sync-active-calendar-connections": {"task": "integrations.tasks.sync_active_connections", "schedule": 900.0},
     "sync-ics-subscriptions": {"task": "planning.tasks.sync_ics_subscriptions", "schedule": 900.0},
     "replenish-recurring-shopping-items": {"task": "household.tasks.replenish_recurring_shopping_items", "schedule": 86400.0},
-    "refresh-shopping-prices": {"task": "household.tasks.refresh_shopping_prices", "schedule": 86400.0},
+    "refresh-shopping-prices": {
+        "task": "household.tasks.refresh_shopping_prices",
+        "schedule": crontab(hour=3, minute=15),
+    },
     "refresh-household-notifications": {"task": "notifications.tasks.refresh_household_notifications", "schedule": 1800.0},
     "refresh-recurring-finance-rules": {"task": "finance.tasks.refresh_recurring_rules", "schedule": 21600.0},
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
