@@ -64,6 +64,11 @@ class HouseholdSearchTests(TestCase):
         self.assertEqual(response["Service-Worker-Allowed"], "/")
         self.assertContains(response, 'const OFFLINE_URL = "/offline/"')
 
+    def test_authenticated_pages_reject_embedding_in_a_frame(self):
+        response = self.client.get(reverse("today"))
+
+        self.assertEqual(response["X-Frame-Options"], "DENY")
+
     @patch("config.views.timezone.localdate", return_value=date(2026, 7, 14))
     def test_today_shows_upcoming_birthdays_from_the_active_household(self, _localdate):
         contact = Contact.objects.create(household=self.household, name="Familie Jansen")

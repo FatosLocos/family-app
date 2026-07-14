@@ -7,8 +7,17 @@ import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "development-only-change-me")
+DEVELOPMENT_SECRET_KEY = "development-only-change-me"
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", DEVELOPMENT_SECRET_KEY)
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "")
+
+if not DEBUG:
+    if SECRET_KEY == DEVELOPMENT_SECRET_KEY or len(SECRET_KEY) < 50:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY moet in productie minimaal 50 willekeurige tekens bevatten.")
+    if len(FIELD_ENCRYPTION_KEY) < 50:
+        raise ImproperlyConfigured("FIELD_ENCRYPTION_KEY moet in productie minimaal 50 willekeurige tekens bevatten.")
+
 ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if host.strip()]
 CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if origin.strip()]
 
@@ -111,6 +120,7 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 SECURE_HSTS_PRELOAD = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -125,7 +135,6 @@ CELERY_BEAT_SCHEDULE = {
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
 }
 
-FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "")
 BUNQ_OAUTH_CLIENT_ID = os.environ.get("BUNQ_OAUTH_CLIENT_ID", "")
 BUNQ_OAUTH_CLIENT_SECRET = os.environ.get("BUNQ_OAUTH_CLIENT_SECRET", "")
 OUTLOOK_CALENDAR_CLIENT_ID = os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID", "")
