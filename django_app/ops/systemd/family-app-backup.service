@@ -1,0 +1,13 @@
+[Unit]
+Description=Maak een lokale PostgreSQL-back-up van Family
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/family-app
+Environment=BACKUP_DIR=/var/backups/family_app
+Environment=COMPOSE_FILE=/opt/family-app/docker-compose.django.yml
+Environment=ENV_FILE=/opt/family-app/django_app/.env
+ExecStart=/opt/family-app/django_app/ops/backup.sh

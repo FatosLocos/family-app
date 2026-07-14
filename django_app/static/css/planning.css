@@ -1,0 +1,36 @@
+.source-manager { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+.source-manager-item { display:flex; align-items:center; gap:1px; padding:2px 5px 2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:12px; }
+.source-manager-item form { margin:0; }
+.source-manager-item.is-disabled { opacity:.58; }
+.source-manager .icon-button { width:24px; height:24px; }
+
+.agenda-panel { max-width:1120px; }
+.planner-actions { display:flex; align-items:center; gap:2px; }
+.agenda-grid { display:grid; border-top:1px solid var(--line); border-left:1px solid var(--line); }
+.agenda-grid-day { grid-template-columns:1fr; }
+.agenda-grid-week,
+.agenda-grid-month { grid-template-columns:repeat(7, minmax(0, 1fr)); }
+.agenda-day { min-height:156px; padding:8px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--surface); }
+.agenda-grid-day .agenda-day { min-height:400px; }
+.agenda-day header { display:flex; align-items:baseline; gap:5px; margin-bottom:7px; color:var(--muted); font-size:11px; }
+.agenda-day header strong { font-size:14px; color:var(--text); }
+.agenda-day.is-today header strong { display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:var(--accent); color:#fff; }
+.agenda-day-events { display:grid; gap:4px; }
+.agenda-event { display:block; width:100%; overflow:hidden; text-align:left; padding:5px 6px; border:1px solid var(--line); border-radius:4px; background:var(--surface-alt); color:var(--text); }
+.agenda-event:hover { border-color:var(--accent); background:var(--accent-soft); }
+.agenda-event time { display:block; color:var(--accent-strong); font-size:10px; font-weight:700; }
+.agenda-event strong,
+.agenda-event span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.agenda-event strong { font-size:12px; }
+.agenda-event span { color:var(--muted); font-size:10px; }
+.agenda-grid-day .agenda-event { max-width:560px; padding:9px; }
+.agenda-grid-day .agenda-event strong { font-size:14px; }
+.event-detail [data-event-detail-notes] { color:var(--muted); white-space:pre-wrap; }
+
+@media (max-width:760px) {
+  .agenda-panel { overflow:auto; }
+  .agenda-grid-week,
+  .agenda-grid-month { min-width:650px; }
+  .agenda-day { min-height:128px; }
+  .agenda-grid-day .agenda-day { min-height:320px; }
+}

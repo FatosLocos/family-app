@@ -1,0 +1,10 @@
+[Unit]
+Description=Dagelijkse Family PostgreSQL-back-up
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=family-app-backup.service
+
+[Install]
+WantedBy=timers.target

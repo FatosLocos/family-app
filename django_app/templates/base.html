@@ -1,0 +1,58 @@
+{% load static %}
+<!doctype html>
+<html lang="nl" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#087e8b">
+  <title>{% block title %}Family App{% endblock %}</title>
+  <link rel="manifest" href="{% static 'manifest.webmanifest' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'css/planning.css' %}">
+  <link rel="stylesheet" href="{% static 'css/family.css' %}">
+  <link rel="stylesheet" href="{% static 'css/household.css' %}">
+  <link rel="stylesheet" href="{% static 'css/finance.css' %}">
+  <link rel="stylesheet" href="{% static 'css/search.css' %}">
+  <link rel="stylesheet" href="{% static 'css/home.css' %}">
+  <script src="https://unpkg.com/htmx.org@2.0.8" defer></script>
+  <script src="https://unpkg.com/lucide@0.468.0" defer></script>
+  <script src="{% static 'js/app.js' %}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#inhoud">Naar inhoud</a>
+  {% if user.is_authenticated %}
+  <header class="app-header">
+    <a class="wordmark" href="{% url 'today' %}" aria-label="Family App, naar vandaag">Family App</a>
+    <nav class="desktop-dock" aria-label="Hoofdnavigatie">
+      <a href="{% url 'today' %}" title="Vandaag"><i data-lucide="house"></i><span>Vandaag</span></a>
+      <a href="{% url 'family:index' %}" title="Gezin"><i data-lucide="users-round"></i><span>Gezin</span></a>
+      <a href="{% url 'household:index' %}" title="Huishouden"><i data-lucide="list-checks"></i><span>Huishouden</span></a>
+      <a href="{% url 'planning:index' %}" title="Planning"><i data-lucide="calendar-days"></i><span>Planning</span></a>
+      <a href="{% url 'finance:index' %}" title="Geld"><i data-lucide="wallet-cards"></i><span>Geld</span></a>
+      <a href="{% url 'home:index' %}" title="Huis"><i data-lucide="house-heart"></i><span>Huis</span></a>
+      <details class="nav-more"><summary title="Meer"><i data-lucide="ellipsis"></i><span>Meer</span></summary><div class="speed-panel"><a href="{% url 'integrations:index' %}"><i data-lucide="settings-2"></i>Instellingen</a></div></details>
+    </nav>
+    <div class="header-tools">
+      <button class="icon-button" type="button" data-theme-toggle aria-label="Thema wisselen"><i data-lucide="sun-moon"></i></button>
+      <button class="icon-button" type="button" data-command-open aria-label="Zoeken en snel toevoegen"><i data-lucide="search"></i></button>
+      <details class="account-menu"><summary class="avatar" title="Account">{{ user.display_name|default:user.email|slice:":1"|upper }}</summary><div class="speed-panel account-panel"><span>{{ user.display_name|default:user.email }}</span>{% if active_household %}<small>{{ active_household.name }}</small>{% endif %}<a href="{% url 'identity:logout' %}"><i data-lucide="log-out"></i>Uitloggen</a></div></details>
+    </div>
+  </header>
+  {% endif %}
+  <main id="inhoud" class="app-main {% if not user.is_authenticated %}auth-main{% endif %}">
+    {% if messages %}<div class="toast-stack" aria-live="polite">{% for message in messages %}<div class="toast toast-{{ message.tags|default:'info' }}"><i data-lucide="{% if message.tags == 'error' %}circle-alert{% else %}circle-check{% endif %}"></i>{{ message }}</div>{% endfor %}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% if user.is_authenticated %}
+  <nav class="mobile-dock" aria-label="Hoofdnavigatie">
+    <a href="{% url 'today' %}" title="Vandaag"><i data-lucide="house"></i><span>Vandaag</span></a>
+    <a href="{% url 'household:index' %}" title="Huishouden"><i data-lucide="list-checks"></i><span>Doen</span></a>
+    <a href="{% url 'planning:index' %}" title="Planning"><i data-lucide="calendar-days"></i><span>Plan</span></a>
+    <a href="{% url 'finance:index' %}" title="Geld"><i data-lucide="wallet-cards"></i><span>Geld</span></a>
+    <details><summary title="Meer"><i data-lucide="menu"></i><span>Meer</span></summary><div class="speed-panel mobile-more"><a href="{% url 'family:index' %}"><i data-lucide="users-round"></i>Gezin</a><a href="{% url 'home:index' %}"><i data-lucide="house-heart"></i>Huis</a><a href="{% url 'integrations:index' %}"><i data-lucide="settings-2"></i>Instellingen</a></div></details>
+  </nav>
+  <dialog id="command-palette" class="command-palette"><form method="dialog"><div class="dialog-title"><strong>Snel zoeken</strong><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Waar zoek je naar?<input autofocus type="search" name="q" placeholder="Taken, agenda, boodschappen…" hx-get="{% url 'search' %}" hx-trigger="keyup changed delay:220ms" hx-target="#command-results" hx-swap="innerHTML"></label><div id="command-results" class="command-results"><a href="{% url 'household:index' %}"><i data-lucide="plus"></i>Taak of boodschap toevoegen</a><a href="{% url 'planning:index' %}"><i data-lucide="calendar-plus"></i>Afspraak plannen</a><a href="{% url 'family:index' %}"><i data-lucide="contact-round"></i>Contact of wens beheren</a><a href="{% url 'search' %}"><i data-lucide="search"></i>Uitgebreid zoeken</a></div></form></dialog>
+  {% endif %}
+</body>
+</html>

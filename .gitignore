@@ -1,0 +1,20 @@
+.next
+node_modules
+.env
+.env.*
+!.env.example
+!django_app/.env.example
+dist
+coverage
+*.log
+*.swp
+*.tsbuildinfo
+.DS_Store
+/.venv-django/
+
+# Django runtime data
+__pycache__/
+*.py[cod]
+*.sqlite3
+staticfiles/
+media/

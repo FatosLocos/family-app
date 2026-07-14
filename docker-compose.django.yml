@@ -1,0 +1,97 @@
+name: family-app
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set-in-django_app/.env}
+      APP_DB_NAME: family_app
+      APP_DB_USER: family_app
+      APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?set-in-django_app/.env}
+    volumes:
+      - family_app-postgres:/var/lib/postgresql/data
+      - ./django_app/ops/init-postgres.sh:/docker-entrypoint-initdb.d/10-family-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U family_app -d family_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - family_app-redis:/data
+
+  web:
+    image: family-app:local
+    build: ./django_app
+    restart: unless-stopped
+    env_file: ./django_app/.env
+    environment:
+      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+    command: >-
+      sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
+      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - family_app-media:/app/media
+    networks:
+      default:
+      edge:
+        aliases:
+          - family-app-web
+
+  celery-worker:
+    image: family-app:local
+    restart: unless-stopped
+    env_file: ./django_app/.env
+    environment:
+      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+    command: celery -A config worker --loglevel=INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  celery-beat:
+    image: family-app:local
+    restart: unless-stopped
+    env_file: ./django_app/.env
+    environment:
+      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+    command: celery -A config beat --loglevel=INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8088:80"
+    volumes:
+      - ./django_app/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+
+volumes:
+  family_app-postgres:
+  family_app-redis:
+  family_app-media:
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-family-app-edge}

@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block title %}Geld · Family App{% endblock %}
+{% block content %}
+{% include 'components/module_header.html' with title='Geld' description='Rekeningen, terugkerende kosten en grip op de maand.' action_id='finance-add-dialog' action_label='Toevoegen of importeren' %}
+<nav class="module-tabs"><a href="?tab=transacties" class="{% if tab == 'transacties' %}active{% endif %}">Transacties</a><a href="?tab=planning" class="{% if tab == 'planning' %}active{% endif %}">Terugkerend & budget</a></nav>
+
+{% if tab == 'transacties' %}
+  <section class="content-panel transaction-panel">
+    <div class="panel-heading">
+      <div><h2>Recente transacties</h2><small>Uitgaven deze maand <span class="amount-negative">€ {{ monthly_total }}</span></small></div>
+      <form class="transaction-filters" method="get"><input type="hidden" name="tab" value="transacties"><input type="search" name="q" value="{{ query }}" placeholder="Zoek omschrijving, type of tegenpartij" data-live-search><select name="bron" onchange="this.form.submit()"><option value="">Alle bronnen</option>{% for provider_code, provider_label in providers %}<option value="{{ provider_code }}" {% if provider == provider_code %}selected{% endif %}>{{ provider_label }}</option>{% endfor %}</select><select name="rekening" onchange="this.form.submit()"><option value="">Alle rekeningen</option>{% for account in accounts %}<option value="{{ account.id }}" {% if account_id == account.id|stringformat:'s' %}selected{% endif %}>{{ account.connection.display_name }} · {{ account.name }}</option>{% endfor %}</select></form>
+    </div>
+    <div class="transaction-table" role="table">
+      <div class="transaction-head" role="row"><span>Datum</span><span>Omschrijving</span><span>Rekening</span><span>Bedrag</span><span aria-label="Acties"></span></div>
+      {% for transaction in transactions %}
+        <article class="transaction-row" role="row">
+          <time>{{ transaction.booked_at|date:'d M Y' }}</time>
+          <div><strong>{{ transaction.counterparty|default:transaction.description }}</strong><small>{{ transaction.payment_type }}{% for key,value in transaction.metadata.items %}{% if key != 'raw' and key != 'source' %} · {{ key }}: {{ value }}{% endif %}{% endfor %}</small></div>
+          <span>{{ transaction.account.name }}</span>
+          <strong class="{% if transaction.amount < 0 %}amount-negative{% else %}amount-positive{% endif %}">{% if transaction.amount > 0 %}+{% endif %}€ {{ transaction.amount }}</strong>
+          <div class="transaction-recurring-actions">{% if transaction.recurring_override is not True %}<form method="post" action="{% url 'finance:set_recurring_override' transaction.id %}">{% csrf_token %}<input type="hidden" name="value" value="yes"><button class="icon-button" title="Als terugkerend markeren" aria-label="Als terugkerend markeren"><i data-lucide="repeat-2"></i></button></form>{% endif %}{% if transaction.recurring_override is not False %}<form method="post" action="{% url 'finance:set_recurring_override' transaction.id %}">{% csrf_token %}<input type="hidden" name="value" value="no"><button class="icon-button" title="Niet terugkerend" aria-label="Niet terugkerend"><i data-lucide="ban"></i></button></form>{% endif %}</div>
+        </article>
+      {% empty %}<p class="empty-copy">Nog geen transacties. Importeer een ABN AMRO-afschrift of koppel bunq.</p>{% endfor %}
+    </div>
+  </section>
+
+{% else %}
+  <section class="finance-summary">
+    <div class="content-panel">
+      <div class="panel-heading"><h2>Terugkerende posten</h2><span class="status-pill">{{ recurring|length }} herkend</span></div>
+      <div class="recurring-groups">
+        {% for group in recurring_groups %}
+          <details open><summary><strong>{{ group.label }}</strong><span class="{% if group.total < 0 %}amount-negative{% else %}amount-positive{% endif %}">{% if group.total > 0 %}+{% endif %}€ {{ group.total }}</span></summary>
+          {% for rule in group.rules %}<div class="recurring-row"><div><strong>{{ rule.merchant }}</strong><small>Elke {{ rule.cadence_days }} dagen · {{ rule.occurrence_count }} keer gezien</small></div><span class="{% if rule.direction == 'income' %}amount-positive{% else %}amount-negative{% endif %}">{% if rule.direction == 'income' %}+{% else %}-{% endif %}€ {{ rule.expected_amount }}</span><div class="recurring-row-actions"><button class="icon-button" type="button" data-open-dialog="recurring-edit-{{ rule.id }}" title="Post aanpassen" aria-label="{{ rule.merchant }} aanpassen"><i data-lucide="pencil"></i></button></div></div>{% endfor %}</details>
+        {% empty %}<p class="empty-copy">Na de eerste imports verschijnen hier voorgestelde terugkerende posten.</p>{% endfor %}
+      </div>
+    </div>
+    <div class="content-panel">
+      <div class="panel-heading"><h2>Budgetten</h2></div>
+      <ul class="clean-list">{% for budget in budgets %}<li><i data-lucide="piggy-bank"></i><div><strong>{{ budget.name }}</strong><small>{{ budget.category }}</small></div><span>€ {{ budget.monthly_limit }}</span><div class="budget-row-actions"><button class="icon-button" type="button" data-open-dialog="budget-edit-{{ budget.id }}" title="Budget aanpassen" aria-label="{{ budget.name }} aanpassen"><i data-lucide="pencil"></i></button></div></li>{% empty %}<p class="empty-copy">Maak een budget om grip te houden.</p>{% endfor %}</ul>
+    </div>
+  </section>
+  {% for rule in recurring %}
+    <dialog id="recurring-edit-{{ rule.id }}" class="modal"><form method="post" action="{% url 'finance:update_recurring_rule' rule.id %}">{% csrf_token %}<div class="dialog-title"><h2>Terugkerende post</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><p class="empty-copy">{{ rule.merchant }}</p><label>Groep<select name="group">{% for group_code, group_label in group_choices %}<option value="{{ group_code }}" {% if rule.group == group_code %}selected{% endif %}>{{ group_label }}</option>{% endfor %}</select></label><label class="check-label"><input type="checkbox" name="is_excluded" {% if rule.is_excluded %}checked{% endif %}>Niet meenemen als terugkerende post</label><button class="button button-primary" type="submit">Opslaan</button></form></dialog>
+  {% endfor %}
+  {% for budget in budgets %}
+    <dialog id="budget-edit-{{ budget.id }}" class="modal"><form method="post" action="{% url 'finance:update_budget' budget.id %}">{% csrf_token %}<div class="dialog-title"><h2>Budget aanpassen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Naam<input name="name" value="{{ budget.name }}" required></label><div class="field-grid"><label>Limiet<input type="number" step="0.01" name="monthly_limit" value="{{ budget.monthly_limit }}" required></label><label>Categorie<input name="category" value="{{ budget.category }}"></label></div><button class="button button-primary" type="submit">Opslaan</button></form><form class="dialog-danger-form" method="post" action="{% url 'finance:delete_budget' budget.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Budget verwijderen</button></form></dialog>
+  {% endfor %}
+{% endif %}
+
+<dialog id="finance-add-dialog" class="modal"><div class="dialog-title"><h2>Geld toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><div class="modal-sections"><form method="post" action="{% url 'finance:import_abn' %}" enctype="multipart/form-data">{% csrf_token %}<h3>ABN AMRO-afschrift</h3><label>Naam rekening{{ upload_form.account_name }}</label><label>Bestand{{ upload_form.statement }}</label><button class="button button-primary">Importeren</button></form><form method="post" action="{% url 'finance:add_budget' %}">{% csrf_token %}<h3>Budget</h3><label>Naam{{ budget_form.name }}</label><div class="field-grid"><label>Limiet{{ budget_form.monthly_limit }}</label><label>Categorie{{ budget_form.category }}</label></div><button class="button button-secondary">Budget toevoegen</button></form><a class="integration-callout" href="{% url 'integrations:index' %}"><i data-lucide="landmark"></i><span><strong>Bank koppelen</strong><small>Stel bunq OAuth in via Instellingen</small></span><i data-lucide="chevron-right"></i></a></div></dialog>
+{% endblock %}

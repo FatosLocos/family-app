@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block title %}Planning · Family App{% endblock %}
+{% block content %}
+{% include 'components/module_header.html' with title='Planning' description='Eén rustig overzicht voor het hele gezin.' action_id='event-dialog' action_label='Afspraak toevoegen' %}
+
+<section class="planner-toolbar">
+  <nav class="module-tabs" aria-label="Agendaweergave">
+    <a href="?view=day&date={{ anchor|date:'Y-m-d' }}" class="{% if view == 'day' %}active{% endif %}">Dag</a>
+    <a href="?view=week&date={{ anchor|date:'Y-m-d' }}" class="{% if view == 'week' %}active{% endif %}">Week</a>
+    <a href="?view=month&date={{ anchor|date:'Y-m-d' }}" class="{% if view == 'month' %}active{% endif %}">Maand</a>
+  </nav>
+  <form method="get" class="source-filter"><input type="hidden" name="view" value="{{ view }}">{% for source in sources %}{% if source.is_enabled %}<label class="source-check"><input type="checkbox" name="source" value="{{ source.id }}" {% if not selected_sources or source.id|stringformat:'s' in selected_sources %}checked{% endif %} onchange="this.form.submit()">{{ source.name }}</label>{% endif %}{% endfor %}</form>
+</section>
+
+<section class="content-panel agenda-panel">
+  <div class="panel-heading">
+    <div><h2>{{ range_start|date:'d M' }} – {{ range_end|date:'d M Y' }}</h2><small>{{ view|capfirst }}weergave</small></div>
+    <div class="planner-actions"><a class="icon-button" href="?view={{ view }}&date={{ previous_anchor|date:'Y-m-d' }}" title="Vorige periode"><i data-lucide="chevron-left"></i></a><a class="icon-button" href="?view={{ view }}" title="Vandaag"><i data-lucide="calendar-days"></i></a><a class="icon-button" href="?view={{ view }}&date={{ next_anchor|date:'Y-m-d' }}" title="Volgende periode"><i data-lucide="chevron-right"></i></a><button class="icon-button" type="button" data-open-dialog="ics-dialog" title="ICS toevoegen"><i data-lucide="rss"></i></button></div>
+  </div>
+  <div class="agenda-grid agenda-grid-{{ view }}" role="grid" aria-label="{{ view|capfirst }}agenda">
+    {% for day in planner_days %}
+      <section class="agenda-day {% if day.is_today %}is-today{% endif %}" role="gridcell">
+        <header><span>{{ day.date|date:'D' }}</span><strong>{{ day.date|date:'j' }}</strong></header>
+        <div class="agenda-day-events">
+          {% for event in day.events %}
+            <button type="button" class="agenda-event" data-event-title="{{ event.title }}" data-event-meta="{{ event.starts_at|date:'d F H:i' }}{% if event.location %} · {{ event.location }}{% endif %}" data-event-notes="{{ event.notes }}" {% if not event.source or event.source.provider == 'local' %}data-event-edit-dialog="event-edit-{{ event.id }}"{% endif %}>
+              <time datetime="{{ event.starts_at|date:'c' }}">{% if event.is_all_day %}Hele dag{% else %}{{ event.starts_at|date:'H:i' }}{% endif %}</time><strong>{{ event.title }}</strong><span>{% if event.source %}{{ event.source.name }}{% else %}Gezinsagenda{% endif %}</span>
+            </button>
+          {% empty %}{% if view == 'day' %}<p class="empty-copy">Geen afspraken.</p>{% endif %}{% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+  </div>
+  {% if sources %}<div class="source-manager">{% for source in sources %}{% if source.provider != 'local' %}<div class="source-manager-item {% if not source.is_enabled %}is-disabled{% endif %}"><span>{{ source.name }}</span><form method="post" action="{% url 'planning:toggle_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} {% if source.is_enabled %}verbergen{% else %}tonen{% endif %}"><i data-lucide="{% if source.is_enabled %}eye{% else %}eye-off{% endif %}"></i></button></form><form method="post" action="{% url 'planning:remove_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} verwijderen"><i data-lucide="trash-2"></i></button></form></div>{% endif %}{% endfor %}</div>{% endif %}
+</section>
+
+{% for event in events %}
+  {% if not event.source or event.source.provider == 'local' %}
+    <dialog id="event-edit-{{ event.id }}" class="modal">
+      <form method="post" action="{% url 'planning:update_event' event.id %}">
+        {% csrf_token %}
+        <div class="dialog-title"><h2>Afspraak aanpassen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+        <label>Titel<input name="title" value="{{ event.title }}" required></label>
+        <div class="field-grid"><label>Begint<input type="datetime-local" name="starts_at" value="{{ event.starts_at|date:'Y-m-d\TH:i' }}" required></label><label>Eindigt<input type="datetime-local" name="ends_at" value="{{ event.ends_at|date:'Y-m-d\TH:i' }}" required></label></div>
+        <label class="check-label"><input type="checkbox" name="is_all_day" {% if event.is_all_day %}checked{% endif %}>Hele dag</label>
+        <label>Locatie<input name="location" value="{{ event.location }}"></label>
+        <label>Wie zijn erbij?<select name="participants" multiple>{% for member in members %}<option value="{{ member.id }}" {% if member in event.participants.all %}selected{% endif %}>{{ member }}</option>{% endfor %}</select></label>
+        <label>Notitie<textarea name="notes" rows="2">{{ event.notes }}</textarea></label>
+        <button class="button button-primary" type="submit">Opslaan</button>
+      </form>
+      <form class="dialog-danger-form" method="post" action="{% url 'planning:delete_event' event.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Afspraak verwijderen</button></form>
+    </dialog>
+  {% endif %}
+{% endfor %}
+
+<dialog id="event-dialog" class="modal"><form method="post" action="{% url 'planning:add_event' %}">{% csrf_token %}<div class="dialog-title"><h2>Afspraak toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Titel{{ event_form.title }}</label><div class="field-grid"><label>Begint{{ event_form.starts_at }}</label><label>Eindigt{{ event_form.ends_at }}</label></div><label class="check-label">{{ event_form.is_all_day }}Hele dag</label><label>Locatie{{ event_form.location }}</label><label>Wie zijn erbij?{{ event_form.participants }}</label><label>Notitie{{ event_form.notes }}</label><button class="button button-primary">Opslaan</button></form></dialog>
+<dialog id="ics-dialog" class="modal"><div class="dialog-title"><h2>ICS toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><div class="modal-sections"><form method="post" action="{% url 'planning:add_ics_subscription' %}">{% csrf_token %}<h3>Abonnement</h3><label>Naam{{ ics_form.name }}</label><label>ICS-link{{ ics_form.url }}</label><button class="button button-primary">Toevoegen</button></form><form method="post" enctype="multipart/form-data" action="{% url 'planning:import_ics_file' %}">{% csrf_token %}<h3>Bestand importeren</h3><label>Naam{{ ics_file_form.name }}</label><label>ICS-bestand{{ ics_file_form.calendar_file }}</label><button class="button button-secondary">Importeren</button></form></div></dialog>
+<dialog id="event-detail-dialog" class="modal event-detail"><form method="dialog"><div class="dialog-title"><h2 data-event-detail-title>Afspraak</h2><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><p data-event-detail-meta></p><p data-event-detail-notes></p><button class="button button-secondary" type="button" data-event-detail-edit hidden><i data-lucide="pencil"></i>Aanpassen</button></form></dialog>
+{% endblock %}

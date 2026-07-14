@@ -1,0 +1,5 @@
+<header class="module-header">
+  <div><p class="eyebrow">{{ eyebrow|default:'Family App' }}</p><h1>{{ title }}</h1>{% if description %}<p class="module-description">{{ description }}</p>{% endif %}</div>
+  <div class="module-metrics">{% for metric in metrics %}<span><strong>{{ metric.value }}</strong>{{ metric.label }}</span>{% endfor %}</div>
+  {% if action_id %}<button type="button" class="primary-icon-action" data-open-dialog="{{ action_id }}" aria-label="{{ action_label }}" title="{{ action_label }}"><i data-lucide="plus"></i></button>{% endif %}
+</header>

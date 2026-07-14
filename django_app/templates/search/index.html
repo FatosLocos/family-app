@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block title %}Zoeken · Family App{% endblock %}
+{% block content %}
+{% include 'components/module_header.html' with title='Zoeken' description='Doorzoek taken, agenda, gezin, wensen en geld.' %}
+<section class="content-panel search-page"><label>Zoeken in jullie huishouden<input name="q" value="{{ query }}" placeholder="Bijv. tandarts, Albert Heijn of verjaardag" hx-get="{% url 'search' %}" hx-trigger="keyup changed delay:220ms" hx-target="#search-results" hx-swap="innerHTML" hx-push-url="true"></label><div id="search-results">{% include 'search/partials/results.html' %}</div></section>
+{% endblock %}
