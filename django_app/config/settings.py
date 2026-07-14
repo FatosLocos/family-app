@@ -119,6 +119,7 @@ CELERY_BEAT_SCHEDULE = {
     "sync-active-calendar-connections": {"task": "integrations.tasks.sync_active_connections", "schedule": 900.0},
     "sync-ics-subscriptions": {"task": "planning.tasks.sync_ics_subscriptions", "schedule": 900.0},
     "replenish-recurring-shopping-items": {"task": "household.tasks.replenish_recurring_shopping_items", "schedule": 86400.0},
+    "refresh-shopping-prices": {"task": "household.tasks.refresh_shopping_prices", "schedule": 86400.0},
     "refresh-household-notifications": {"task": "notifications.tasks.refresh_household_notifications", "schedule": 1800.0},
     "refresh-recurring-finance-rules": {"task": "finance.tasks.refresh_recurring_rules", "schedule": 21600.0},
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},

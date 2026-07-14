@@ -2,6 +2,8 @@ from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from datetime import timedelta
+from decimal import Decimal
+import re
 
 from django.utils import timezone
 from django.views.decorators.http import require_POST
@@ -11,7 +13,13 @@ from household.forms import MealPlanForm, ReceiptForm, RoutineForm, ShoppingItem
 from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, Task
 from household.receipt_matching import match_receipt_to_transaction
 from notifications.models import Notification
-from household.tasks import process_receipt_ocr
+from household.tasks import process_receipt_ocr, refresh_household_shopping_prices
+
+
+def _shopping_item_multiplier(item):
+    """Use an explicit count such as '2 pakken'; weights stay one product."""
+    match = re.match(r"^\s*(\d+)\s*(?:x\b|stuks?\b|pakken?\b|flessen?\b|zakken?\b|dozen?\b)", item.quantity.casefold())
+    return Decimal(match.group(1)) if match else Decimal("1")
 
 
 @household_required
@@ -36,15 +44,19 @@ def index(request):
     for receipt in receipts:
         receipt.bank_amount = abs(receipt.transaction.amount) if receipt.transaction_id else None
         receipt.amount_difference = abs(receipt.bank_amount - receipt.total_amount) if receipt.transaction_id and receipt.total_amount else None
-    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list).prefetch_related("prices")[:50])
+    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices")[:50])
     retailer_choices = ShoppingPrice.Retailer.choices
     price_rows = []
     latest_price_at = None
+    retailer_totals = {retailer: {"retailer": retailer, "label": label, "total": Decimal("0"), "priced_items": 0} for retailer, label in retailer_choices}
     for item in price_items:
         prices_by_retailer = {price.retailer: price for price in item.prices.all()}
         for price in prices_by_retailer.values():
             if latest_price_at is None or price.observed_at > latest_price_at:
                 latest_price_at = price.observed_at
+            totals = retailer_totals[price.retailer]
+            totals["total"] += price.price * _shopping_item_multiplier(item)
+            totals["priced_items"] += 1
         price_rows.append({
             "item": item,
             "cells": [
@@ -60,6 +72,10 @@ def index(request):
         "price_items": price_items,
         "price_rows": price_rows,
         "retailer_choices": retailer_choices,
+        "price_totals": [
+            {**total, "missing_items": len(price_items) - total["priced_items"]}
+            for total in retailer_totals.values()
+        ],
         "latest_price_at": latest_price_at,
         "price_form": ShoppingPriceForm(),
         "receipts": receipts,
@@ -109,7 +125,8 @@ def add_shopping_item(request):
         item.household = request.household
         item.list = shopping_list
         item.save()
-        messages.success(request, "Boodschap toegevoegd.")
+        refresh_household_shopping_prices.delay(request.household.id)
+        messages.success(request, "Boodschap toegevoegd. Prijzen worden bijgewerkt.")
     else:
         messages.error(request, "Vul een productnaam in.")
     return redirect("household:index")
@@ -196,6 +213,7 @@ def update_shopping_item(request, item_id):
     form = ShoppingItemForm(request.POST, instance=item)
     if form.is_valid():
         form.save()
+        refresh_household_shopping_prices.delay(request.household.id)
         messages.success(request, "Boodschap aangepast.")
     else:
         messages.error(request, "Controleer de productvelden.")
@@ -221,6 +239,14 @@ def save_shopping_price(request, item_id):
         messages.success(request, "Prijswaarneming opgeslagen.")
     else:
         messages.error(request, "Controleer de prijsgegevens.")
+    return _household_tab_redirect("prijzen")
+
+
+@household_required
+@require_POST
+def refresh_prices(request):
+    refresh_household_shopping_prices.delay(request.household.id)
+    messages.success(request, "Prijscontrole is gestart. De vergelijking wordt zo bijgewerkt.")
     return _household_tab_redirect("prijzen")
 
 

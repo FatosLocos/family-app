@@ -14,6 +14,7 @@ urlpatterns = [
     path("boodschappen/<int:item_id>/aanpassen/", views.update_shopping_item, name="update_shopping_item"),
     path("boodschappen/<int:item_id>/verwijderen/", views.delete_shopping_item, name="delete_shopping_item"),
     path("boodschappen/<int:item_id>/prijs/", views.save_shopping_price, name="save_shopping_price"),
+    path("boodschappen/prijzen/verversen/", views.refresh_prices, name="refresh_prices"),
     path("boodschappen/bonnen/toevoegen/", views.add_receipt, name="add_receipt"),
     path("maaltijden/toevoegen/", views.add_meal, name="add_meal"),
     path("maaltijden/<int:meal_id>/aanpassen/", views.update_meal, name="update_meal"),

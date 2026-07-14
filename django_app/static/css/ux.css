@@ -127,6 +127,16 @@ button.is-pending::after {
   color: var(--negative);
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.panel-actions form {
+  margin: 0;
+}
+
 .offline-page {
   display: flex;
   align-items: flex-start;

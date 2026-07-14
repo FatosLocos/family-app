@@ -74,6 +74,11 @@ class Routine(HouseholdRecord):
 
 
 class ShoppingPrice(HouseholdRecord):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Handmatig"
+        CHECKJEBON = "checkjebon", "Checkjebon"
+        PRIJSPROFEET = "prijsprofeet", "PrijsProfeet"
+
     class Retailer(models.TextChoices):
         ALBERT_HEIJN = "ah", "Albert Heijn"
         JUMBO = "jumbo", "Jumbo"
@@ -86,7 +91,11 @@ class ShoppingPrice(HouseholdRecord):
     unit_label = models.CharField(max_length=60, blank=True)
     is_offer = models.BooleanField(default=False)
     offer_label = models.CharField(max_length=160, blank=True)
+    regular_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    offer_valid_until = models.DateField(null=True, blank=True)
     product_url = models.URLField(blank=True)
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.MANUAL)
+    matched_product_name = models.CharField(max_length=240, blank=True)
     observed_at = models.DateTimeField(auto_now=True)
 
     class Meta:
