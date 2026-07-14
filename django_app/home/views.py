@@ -140,6 +140,14 @@ def _hue_locations(entity):
     return []
 
 
+def _entity_locations(entity):
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    ha_area = str(attributes.get("ha_area") or "")
+    if entity.source == HomeEntity.Source.HOME_ASSISTANT and ha_area:
+        return [ha_area]
+    return _hue_locations(entity)
+
+
 def _decorate_home_entities(entities):
     def sort_key(entity):
         attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
@@ -163,12 +171,81 @@ def _decorate_home_entities(entities):
     return decorated
 
 
+def _local_sonos_duplicate_ids(entities):
+    """Prefer a locally discovered Sonos group over its cloud representation."""
+    sonos_entities = list(entities.filter(source=HomeEntity.Source.SONOS))
+    local_member_sets = []
+    for entity in sonos_entities:
+        attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+        if not attributes.get("probe_id") or attributes.get("sonos_entity_type") != "group":
+            continue
+        members = {str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id}
+        if members:
+            local_member_sets.append(members)
+    if not local_member_sets:
+        return set()
+
+    hidden_ids = set()
+    for entity in sonos_entities:
+        attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+        if attributes.get("probe_id"):
+            continue
+        entity_type = attributes.get("sonos_entity_type")
+        if entity_type == "player":
+            player_id = str(attributes.get("sonos_player_id") or "")
+            if any(player_id in members for members in local_member_sets):
+                hidden_ids.add(entity.pk)
+        elif entity_type == "group":
+            member_ids = {str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id}
+            coordinator_id = str(attributes.get("sonos_coordinator_id") or "")
+            if any(member_ids & members or coordinator_id in members for members in local_member_sets):
+                hidden_ids.add(entity.pk)
+    return hidden_ids
+
+
+def _norm_entity_key(value):
+    return "".join(str(value or "").casefold().split())
+
+
+def _ha_duplicate_ids(entities):
+    """Prefer Home Assistant cards while keeping direct integrations available."""
+    all_entities = list(entities)
+    ha_entities = [entity for entity in all_entities if entity.source == HomeEntity.Source.HOME_ASSISTANT]
+    if not ha_entities:
+        return set()
+    ha_name_domain_keys = {(_norm_entity_key(entity.domain), _norm_entity_key(entity.name)) for entity in ha_entities if entity.name}
+    ha_identifiers = {
+        str(identifier)
+        for entity in ha_entities
+        for identifier in ((entity.attributes or {}).get("ha_device_identifiers", []) if isinstance(entity.attributes, dict) else [])
+        if identifier
+    }
+    hidden_ids = set()
+    for entity in all_entities:
+        if entity.source == HomeEntity.Source.HOME_ASSISTANT:
+            continue
+        attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+        direct_values = {
+            str(attributes.get(key))
+            for key in ("hue_light_id", "hue_grouped_light_id", "hue_scene_id", "sonos_player_id", "sonos_group_id", "google_resource_name", "lg_device_id", "probe_local_key")
+            if attributes.get(key)
+        }
+        if direct_values and any(value and any(value in identifier for identifier in ha_identifiers) for value in direct_values):
+            hidden_ids.add(entity.pk)
+            continue
+        if (_norm_entity_key(entity.domain), _norm_entity_key(entity.name)) in ha_name_domain_keys:
+            hidden_ids.add(entity.pk)
+    return hidden_ids
+
+
 @household_required
 def index(request):
     tab = request.GET.get("tab", "apparaten")
     config = HomeAssistantConfig.objects.for_household(request.household).first()
     all_entities = HomeEntity.objects.for_household(request.household)
-    source_entities = all_entities
+    hidden_ids = _local_sonos_duplicate_ids(all_entities) | _ha_duplicate_ids(all_entities)
+    visible_entities = all_entities.exclude(pk__in=hidden_ids)
+    source_entities = visible_entities
     source = request.GET.get("source", "alles")
     if source in set(HomeEntity.Source.values):
         source_entities = source_entities.filter(source=source)
@@ -183,15 +260,14 @@ def index(request):
     search_query = request.GET.get("q", "").strip()[:120]
     if search_query:
         entities = entities.filter(Q(name__icontains=search_query) | Q(state__icontains=search_query))
-    hue_entities = all_entities.filter(source=HomeEntity.Source.HUE)
-    locations = sorted({location for entity in hue_entities for location in _hue_locations(entity)}, key=str.lower)
+    locations = sorted({location for entity in visible_entities for location in _entity_locations(entity)}, key=str.lower)
     selected_location = request.GET.get("location", "alles")
     if selected_location not in locations:
         selected_location = "alles"
     if selected_location != "alles":
-        matching_entity_ids = [entity.id for entity in source_entities if selected_location in _hue_locations(entity)]
+        matching_entity_ids = [entity.id for entity in source_entities if selected_location in _entity_locations(entity)]
         entities = entities.filter(id__in=matching_entity_ids)
-    all_sonos_players = list(all_entities.filter(source=HomeEntity.Source.SONOS, domain="speaker", is_available=True).select_related("connection"))
+    all_sonos_players = list(visible_entities.filter(source=HomeEntity.Source.SONOS, domain="speaker", is_available=True).select_related("connection"))
     display_entities, hue_sensor_groups = _group_hue_sensors(_decorate_home_entities(entities))
     for entity in display_entities:
         attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
@@ -223,7 +299,7 @@ def index(request):
         and hue_connection.last_sync_at
         and hue_connection.last_sync_at < timezone.now() - timedelta(minutes=20)
     )
-    return render(request, "home/index.html", {"tab": tab, "config": config, "hue_connection": hue_connection, "home_connections": home_connections, "hue_sync_run": hue_sync_run, "hue_sync_summary": _hue_sync_summary(hue_sync_run), "hue_sync_is_stale": hue_sync_is_stale, "entities": entities, "display_entities": display_entities, "hue_sensor_groups": hue_sensor_groups, "search_query": search_query, "selected_source": source, "sources": all_entities.values_list("source", flat=True).distinct().order_by("source"), "selected_domain": domain, "domains": source_entities.values_list("domain", flat=True).distinct().order_by("domain"), "locations": locations, "selected_location": selected_location, "audits": HomeActionAudit.objects.for_household(request.household).select_related("entity")[:6], "config_form": HomeAssistantConfigForm(initial={"base_url": config.base_url if config else ""}), "maintenance": maintenance, "emergency_contacts": EmergencyContact.objects.for_household(request.household), "rooms": rooms.prefetch_related("items"), "documents": HouseholdDocument.objects.for_household(request.household), "maintenance_form": MaintenanceItemForm(), "emergency_form": EmergencyContactForm(), "room_form": RoomForm(), "furnishing_form": FurnishingItemForm(), "document_form": HouseholdDocumentForm(), "metrics": [{"value": entities.filter(is_available=True).count(), "label": "beschikbaar"}, {"value": maintenance.filter(due_date__lte=timezone.localdate()).count(), "label": "onderhoud"}]})
+    return render(request, "home/index.html", {"tab": tab, "config": config, "hue_connection": hue_connection, "home_connections": home_connections, "hue_sync_run": hue_sync_run, "hue_sync_summary": _hue_sync_summary(hue_sync_run), "hue_sync_is_stale": hue_sync_is_stale, "entities": entities, "display_entities": display_entities, "hue_sensor_groups": hue_sensor_groups, "search_query": search_query, "selected_source": source, "sources": visible_entities.values_list("source", flat=True).distinct().order_by("source"), "selected_domain": domain, "domains": source_entities.values_list("domain", flat=True).distinct().order_by("domain"), "locations": locations, "selected_location": selected_location, "audits": HomeActionAudit.objects.for_household(request.household).select_related("entity")[:6], "config_form": HomeAssistantConfigForm(initial={"base_url": config.base_url if config else ""}), "maintenance": maintenance, "emergency_contacts": EmergencyContact.objects.for_household(request.household), "rooms": rooms.prefetch_related("items"), "documents": HouseholdDocument.objects.for_household(request.household), "maintenance_form": MaintenanceItemForm(), "emergency_form": EmergencyContactForm(), "room_form": RoomForm(), "furnishing_form": FurnishingItemForm(), "document_form": HouseholdDocumentForm(), "metrics": [{"value": entities.filter(is_available=True).count(), "label": "beschikbaar"}, {"value": maintenance.filter(due_date__lte=timezone.localdate()).count(), "label": "onderhoud"}]})
 
 
 @parent_required
@@ -256,7 +332,12 @@ def sync_home_assistant(request):
 def control(request, entity_id, action):
     entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id)
     try:
-        value = request.POST.getlist("player_ids") if action == "set_group" else request.POST.get("target_temperature") or request.POST.get("brightness") or request.POST.get("volume") or request.POST.get("color") or request.POST.get("effect") or request.POST.get("favorite_id")
+        if action == "set_group":
+            value = request.POST.getlist("player_ids")
+        elif action == "create_alarm":
+            value = json.dumps({"time": request.POST.get("alarm_time", ""), "recurrence": request.POST.get("alarm_recurrence", "DAILY")})
+        else:
+            value = request.POST.get("target_temperature") or request.POST.get("brightness") or request.POST.get("volume") or request.POST.get("color") or request.POST.get("effect") or request.POST.get("favorite_id")
         control_entity(request.household, entity, action, value)
         if request.headers.get("HX-Request") == "true":
             response = HttpResponse("")

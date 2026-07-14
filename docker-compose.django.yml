@@ -59,6 +59,22 @@ services:
         aliases:
           - family-app-web
 
+  ha-listener:
+    image: family-app:local
+    restart: unless-stopped
+    env_file: ./django_app/.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      CELERY_BROKER_URL: redis://family-app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
+      CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
+    command: python manage.py listen_home_assistant
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   celery-worker:
     image: family-app:local
     restart: unless-stopped

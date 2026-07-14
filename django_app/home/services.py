@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 import requests
 from django.utils import timezone
 
+from home.ha_gateway import HomeAssistantRegistries, _upsert_state
 from home.models import HomeActionAudit, HomeAssistantConfig, HomeEntity
 from home.realtime import broadcast_home_entity
 from integrations.crypto import decrypt, encrypt
@@ -60,11 +61,10 @@ def sync_entities(household):
             entity_id = str(item.get("entity_id", ""))
             if "." not in entity_id:
                 continue
-            domain = entity_id.split(".", 1)[0]
-            attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
-            HomeEntity.objects.update_or_create(household=household, entity_id=entity_id, defaults={"domain": domain, "name": attributes.get("friendly_name") or entity_id, "state": str(item.get("state", "")), "attributes": attributes, "is_available": item.get("state") not in {"unavailable", "unknown"}, "is_supported": domain in SUPPORTED_DOMAINS})
-            seen.add(entity_id)
-        HomeEntity.objects.for_household(household).exclude(entity_id__in=seen).update(is_available=False)
+            entity = _upsert_state(household, item, HomeAssistantRegistries({}, {}, {}), should_broadcast=False)
+            if entity:
+                seen.add(entity.entity_id)
+        HomeEntity.objects.for_household(household).filter(source=HomeEntity.Source.HOME_ASSISTANT).exclude(entity_id__in=seen).update(is_available=False)
         config.last_sync_at, config.last_error = timezone.now(), ""
         config.save(update_fields=["last_sync_at", "last_error", "updated_at"])
         return len(seen)
@@ -187,11 +187,60 @@ def control_entity(household, entity, action, target_temperature=None):
     try:
         service, payload = _service_call_for(entity, action, target_temperature)
         _request(config, "POST", f"/api/services/{entity.domain}/{service}", payload)
-        HomeActionAudit.objects.create(household=household, entity=entity, action=service, succeeded=True, detail=_action_detail(action, payload))
+        HomeActionAudit.objects.create(household=household, entity=entity, action=service, succeeded=True, detail=f"Via Home Assistant: {_action_detail(action, payload)}")
         sync_entities(household)
     except HomeAssistantError as error:
+        fallback = _home_assistant_fallback_entity(household, entity) if entity.source == HomeEntity.Source.HOME_ASSISTANT else None
+        if fallback:
+            try:
+                control_entity(household, fallback, action, target_temperature)
+                HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail=f"Via fallback uitgevoerd: {fallback.name}.")
+                return
+            except HomeAssistantError:
+                pass
         HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
         raise
+
+
+def _norm(value):
+    return "".join(str(value or "").casefold().split())
+
+
+def _direct_identifier_values(entity):
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    values = set()
+    for key in (
+        "hue_light_id",
+        "hue_grouped_light_id",
+        "hue_scene_id",
+        "sonos_player_id",
+        "sonos_group_id",
+        "google_resource_name",
+        "lg_device_id",
+        "probe_local_key",
+    ):
+        value = attributes.get(key)
+        if value:
+            values.add(str(value))
+    for key in ("sonos_player_ids", "member_light_ids"):
+        items = attributes.get(key)
+        if isinstance(items, list):
+            values.update(str(item) for item in items if item)
+    return values
+
+
+def _home_assistant_fallback_entity(household, entity):
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    ha_identifiers = {str(item) for item in attributes.get("ha_device_identifiers", []) if item}
+    candidates = HomeEntity.objects.for_household(household).exclude(source=HomeEntity.Source.HOME_ASSISTANT).filter(is_supported=True, is_available=True)
+    name_key = _norm(entity.name)
+    for candidate in candidates:
+        direct_values = _direct_identifier_values(candidate)
+        if direct_values and any(value and any(value in ha_identifier for ha_identifier in ha_identifiers) for value in direct_values):
+            return candidate
+    if name_key:
+        return next((candidate for candidate in candidates if candidate.domain == entity.domain and _norm(candidate.name) == name_key), None)
+    return None
 
 
 def _apply_sonos_control_state(entity, action, value=None):

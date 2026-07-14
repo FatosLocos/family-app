@@ -34,6 +34,8 @@ De bestaande Caddy-edge op de VPS kan vervolgens `app.example.com` naar `family-
 
 De volledige gecontroleerde start-, back-up-, herstel- en rollbackprocedure staat in [DEPLOYMENT.md](DEPLOYMENT.md).
 
+De Home Assistant gateway draait als aparte listener-service naast de web- en Celery-processen. Het runtime- en contractontwerp staat in [docs/home-assistant-gateway.md](docs/home-assistant-gateway.md).
+
 ## Back-up
 
 Installeer de meegeleverde systemd-timer voor een dagelijkse back-up om 03:15:

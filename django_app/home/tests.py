@@ -1,13 +1,17 @@
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from channels.testing import WebsocketCommunicator
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
+from home.ha_contract import FAMILY_APP_HA_DOMAIN, family_app_home_assistant_contract
+from home.ha_gateway import HomeAssistantRegistries, _upsert_state, apply_state_changed, websocket_url
 from home.models import HomeActionAudit, HomeAssistantConfig, HomeEntity
 from home.consumers import HomeLiveConsumer
 from home.realtime import home_entity_payload
@@ -68,7 +72,7 @@ class HomeAssistantTests(TestCase):
         self.assertIn("/api/services/cover/stop_cover", request.call_args_list[0].args[1])
         self.assertEqual(request.call_args_list[2].kwargs["json"], {"entity_id": "climate.woonkamer", "temperature": 21.5})
         self.assertIn("/api/services/climate/set_temperature", request.call_args_list[2].args[1])
-        self.assertEqual(HomeActionAudit.objects.get(entity=climate).detail, "Temperatuur ingesteld op 21.5 °C.")
+        self.assertEqual(HomeActionAudit.objects.get(entity=climate).detail, "Via Home Assistant: Temperatuur ingesteld op 21.5 °C.")
 
     def test_invalid_home_action_is_rejected_and_audited(self):
         entity = HomeEntity.objects.create(household=self.household, entity_id="scene.avondsfeer", domain="scene", name="Avondsfeer", is_supported=True)
@@ -77,6 +81,33 @@ class HomeAssistantTests(TestCase):
         audit = HomeActionAudit.objects.get(entity=entity)
         self.assertFalse(audit.succeeded)
         self.assertEqual(audit.action, "off")
+
+    @patch("integrations.providers.control_hue_light", return_value="Ingeschakeld.")
+    @patch("home.services._request", side_effect=HomeAssistantError("Home Assistant is niet bereikbaar."))
+    def test_home_assistant_control_can_fallback_to_matching_direct_entity(self, request, control_hue_light):
+        ha_entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HOME_ASSISTANT,
+            entity_id="light.koffie",
+            domain="light",
+            name="Koffie",
+            is_supported=True,
+            attributes={"ha_device_identifiers": ["hue:lamp-1"]},
+        )
+        direct_entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.lamp-1",
+            domain="light",
+            name="Koffie",
+            is_supported=True,
+            attributes={"hue_light_id": "lamp-1"},
+        )
+
+        control_entity(self.household, ha_entity, "on")
+
+        control_hue_light.assert_called_once_with(direct_entity, "on", None)
+        self.assertTrue(HomeActionAudit.objects.filter(entity=ha_entity, succeeded=True, detail__startswith="Via fallback").exists())
 
     def test_child_can_view_but_cannot_save_or_control(self):
         entity = HomeEntity.objects.create(household=self.household, entity_id="light.kamer", domain="light", name="Kamer", is_supported=True)
@@ -97,7 +128,70 @@ class HomeAssistantTests(TestCase):
     def test_home_assistant_interface_names_the_rest_api_integration(self):
         self.client.force_login(self.parent)
         response = self.client.get(reverse("home:index"))
-        self.assertContains(response, "Home Assistant REST API")
+        self.assertContains(response, "Home Assistant")
+        self.assertContains(response, "REST + realtime")
+
+    def test_home_assistant_state_stores_registry_metadata(self):
+        registries = HomeAssistantRegistries(
+            entities={"light.keuken": {"entity_id": "light.keuken", "device_id": "device-1", "area_id": "area-1", "platform": "hue", "device_class": "light"}},
+            devices={"device-1": {"id": "device-1", "name": "Hue bridge lamp", "identifiers": [["hue", "lamp-1"]]}},
+            areas={"area-1": {"area_id": "area-1", "name": "Keuken"}},
+        )
+
+        entity = _upsert_state(
+            self.household,
+            {"entity_id": "light.keuken", "state": "on", "last_changed": "2026-07-14T10:00:00Z", "attributes": {"friendly_name": "Keukenlamp"}},
+            registries,
+            should_broadcast=False,
+        )
+
+        self.assertEqual(entity.source, HomeEntity.Source.HOME_ASSISTANT)
+        self.assertEqual(entity.attributes["ha_area"], "Keuken")
+        self.assertEqual(entity.attributes["ha_device_identifiers"], ["hue:lamp-1"])
+        self.assertEqual(entity.attributes["ha_platform"], "hue")
+        self.assertEqual(entity.attributes["ha_last_changed"], "2026-07-14T10:00:00Z")
+
+    def test_home_assistant_state_changed_event_updates_entity(self):
+        event = {"data": {"new_state": {"entity_id": "switch.koffie", "state": "on", "attributes": {"friendly_name": "Koffie"}}}}
+
+        entity = apply_state_changed(HomeAssistantConfig.objects.get(household=self.household), event)
+
+        self.assertEqual(entity.state, "on")
+        self.assertEqual(entity.name, "Koffie")
+
+    def test_home_assistant_websocket_url_uses_matching_scheme(self):
+        self.assertEqual(websocket_url("http://ha.local:8123"), "ws://ha.local:8123/api/websocket")
+        self.assertEqual(websocket_url("https://ha.example.nl"), "wss://ha.example.nl/api/websocket")
+
+    def test_family_app_home_assistant_contract_reserves_expected_namespace(self):
+        contract = family_app_home_assistant_contract()
+
+        self.assertEqual(contract["domain"], FAMILY_APP_HA_DOMAIN)
+        self.assertEqual(contract["version"], 1)
+        self.assertIn("family_open_tasks", {entity["object_id"] for entity in contract["entities"]})
+        self.assertIn("family", {entity["object_id"] for entity in contract["entities"]})
+        self.assertIn("family_shopping", {entity["object_id"] for entity in contract["entities"]})
+        self.assertIn("family_maintenance_due", {entity["object_id"] for entity in contract["entities"]})
+        self.assertIn("family_app.task_completed", {event["event_type"] for event in contract["events"]})
+
+    @patch("home.management.commands.listen_home_assistant.sync_once", return_value=3)
+    def test_listen_home_assistant_once_syncs_configured_households(self, sync_once):
+        output = StringIO()
+
+        call_command("listen_home_assistant", "--once", stdout=output)
+
+        self.assertEqual(sync_once.call_count, 1)
+        self.assertIn("3 Home Assistant-entiteiten bijgewerkt.", output.getvalue())
+
+    @patch("home.management.commands.listen_home_assistant.sync_once", side_effect=RuntimeError("geen verbinding"))
+    def test_listen_home_assistant_once_records_errors(self, sync_once):
+        output = StringIO()
+
+        call_command("listen_home_assistant", "--once", stdout=output)
+
+        config = HomeAssistantConfig.objects.get(household=self.household)
+        self.assertEqual(sync_once.call_count, 1)
+        self.assertEqual(config.last_error, "geen verbinding")
 
     def test_hue_light_control_is_server_side_and_audited(self):
         connection = IntegrationConnection.objects.create(
@@ -303,6 +397,108 @@ class HomeAssistantTests(TestCase):
         self.assertContains(response, "Hue woonkamer")
         self.assertNotContains(response, "Home Assistant koffie")
         self.assertNotContains(response, '>switch<', html=False)
+
+    def test_home_assistant_area_is_available_as_room_filter(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HOME_ASSISTANT,
+            entity_id="light.keuken",
+            domain="light",
+            name="Keukenlamp",
+            attributes={"ha_area": "Keuken"},
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HOME_ASSISTANT,
+            entity_id="light.slaapkamer",
+            domain="light",
+            name="Slaapkamerlamp",
+            attributes={"ha_area": "Slaapkamer"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"location": "Keuken"})
+
+        self.assertContains(response, "Keukenlamp")
+        self.assertNotContains(response, "Slaapkamerlamp")
+        self.assertContains(response, "Keuken")
+
+    def test_home_assistant_entity_hides_matching_direct_entity(self):
+        ha_entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HOME_ASSISTANT,
+            entity_id="light.woonkamer",
+            domain="light",
+            name="Woonkamerlamp",
+            attributes={"ha_device_identifiers": ["hue:lamp-1"]},
+        )
+        direct_entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.lamp-1",
+            domain="light",
+            name="Woonkamerlamp",
+            attributes={"hue_light_id": "lamp-1"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"domain": "alles"})
+
+        displayed_ids = {entity.id for entity in response.context["display_entities"]}
+        self.assertIn(ha_entity.id, displayed_ids)
+        self.assertNotIn(direct_entity.id, displayed_ids)
+
+    def test_local_sonos_group_replaces_matching_cloud_group_and_player(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.SONOS,
+            display_name="Sonos",
+        )
+        cloud_group = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SONOS,
+            entity_id=f"sonos.{connection.id}.group.cloud-woonkamer",
+            domain="media_player",
+            name="Woonkamer cloud",
+            attributes={"sonos_entity_type": "group", "sonos_coordinator_id": "player-woonkamer", "sonos_player_ids": ["player-woonkamer"]},
+        )
+        cloud_player = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SONOS,
+            entity_id=f"sonos.{connection.id}.player.player-woonkamer",
+            domain="speaker",
+            name="Woonkamer speaker",
+            attributes={"sonos_entity_type": "player", "sonos_player_id": "player-woonkamer"},
+        )
+        local_group = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.SONOS,
+            entity_id="probe.local.sonos.group.player-woonkamer",
+            domain="speaker",
+            name="Woonkamer lokaal",
+            attributes={"probe_id": "probe-1", "sonos_entity_type": "group", "sonos_player_ids": ["player-woonkamer", "player-surround"]},
+        )
+        other_group = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SONOS,
+            entity_id=f"sonos.{connection.id}.group.slaapkamer",
+            domain="media_player",
+            name="Slaapkamer",
+            attributes={"sonos_entity_type": "group", "sonos_coordinator_id": "player-slaapkamer", "sonos_player_ids": ["player-slaapkamer"]},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "sonos", "domain": "alles"})
+
+        displayed_ids = {entity.id for entity in response.context["display_entities"]}
+        self.assertIn(local_group.id, displayed_ids)
+        self.assertIn(other_group.id, displayed_ids)
+        self.assertNotIn(cloud_group.id, displayed_ids)
+        self.assertNotIn(cloud_player.id, displayed_ids)
 
 
     def test_home_can_filter_hue_entities_by_room(self):
