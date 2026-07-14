@@ -45,3 +45,19 @@ class HouseholdSearchTests(TestCase):
         homepage = self.client.get(reverse("today"), secure=False)
         self.assertEqual(health.status_code, 200)
         self.assertEqual(homepage.status_code, 301)
+
+    def test_offline_page_is_public_and_has_no_household_content(self):
+        self.client.logout()
+
+        response = self.client.get(reverse("offline"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Family App is tijdelijk offline.")
+        self.assertNotContains(response, "mobile-dock")
+
+    def test_service_worker_has_application_scope(self):
+        response = self.client.get(reverse("service_worker"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Service-Worker-Allowed"], "/")
+        self.assertContains(response, 'const OFFLINE_URL = "/offline/"')

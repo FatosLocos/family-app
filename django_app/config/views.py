@@ -1,6 +1,7 @@
 from django.contrib.auth.decorators import login_required
+from django.conf import settings
 from django.db import DatabaseError, connection
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.db.models import Q
 from django.utils import timezone
@@ -19,6 +20,18 @@ def healthz(request):
     except DatabaseError:
         return JsonResponse({"status": "unavailable", "service": "family-app"}, status=503)
     return JsonResponse({"status": "ok", "service": "family-app"})
+
+
+def offline(request):
+    return render(request, "offline.html")
+
+
+def service_worker(request):
+    content = (settings.BASE_DIR / "static" / "js" / "sw.js").read_text(encoding="utf-8")
+    response = HttpResponse(content, content_type="application/javascript; charset=utf-8")
+    response["Service-Worker-Allowed"] = "/"
+    response["Cache-Control"] = "no-cache"
+    return response
 
 
 @login_required

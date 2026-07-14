@@ -2,11 +2,20 @@
 set -eu
 
 # Runs a transactional PostgreSQL proof without leaving test data behind.
-compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
-env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
+if [ -n "${DATABASE_URL:-}" ]; then
+  run_psql() {
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1
+  }
+else
+  compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
+  env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
+  run_psql() {
+    docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
+      psql -v ON_ERROR_STOP=1 -U family_app -d family_app
+  }
+fi
 
-docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U family_app -d family_app <<'SQL'
+run_psql <<'SQL'
 BEGIN;
 
 DO $$

@@ -18,11 +18,16 @@
       <button class="button button-secondary">Naam wijzigen</button>
     </form>
   </section>
+  <section class="content-panel settings-form">
+    <div class="panel-heading"><h2>Gegevensbeheer</h2></div>
+    <p>Download een JSON-export van dit huishouden. Toegangsgegevens en bestanden blijven uitgesloten.</p>
+    <a class="button button-secondary" href="{% url 'integrations:export_household_data' %}"><i data-lucide="download"></i>Gegevens exporteren</a>
+  </section>
   {% endif %}
   {% if active_membership.can_manage %}
   <section class="content-panel">
     <div class="panel-heading"><h2>Actieve koppelingen</h2></div>
-    <ul class="connection-list">{% for connection in connections %}<li><i data-lucide="{% if connection.provider == 'outlook' %}calendar-days{% else %}landmark{% endif %}"></i><div><strong>{{ connection.display_name }}</strong><small>{{ connection.external_account|default:connection.get_status_display }}{% if connection.last_sync_at %} · {{ connection.last_sync_at|date:'d M H:i' }}{% endif %}</small>{% if connection.last_error %}<em>{{ connection.last_error }}</em>{% endif %}</div><form method="post" action="{% url 'integrations:sync_connection' connection.id %}">{% csrf_token %}<button class="icon-button" title="Nu synchroniseren"><i data-lucide="refresh-cw"></i></button></form><button class="icon-button destructive" type="button" data-open-dialog="disconnect-{{ connection.id }}" title="Koppeling ontkoppelen"><i data-lucide="unlink"></i></button></li>{% empty %}<li class="empty-copy">Nog geen koppelingen geactiveerd.</li>{% endfor %}</ul>
+    <ul class="connection-list">{% for connection in connections %}<li><i data-lucide="{% if connection.provider == 'outlook' %}calendar-days{% else %}landmark{% endif %}"></i><div><strong>{{ connection.display_name }}</strong><small>{% if connection.external_account %}{{ connection.external_account }}{% elif connection.status == 'configured' %}Gekoppeld{% elif connection.status == 'needs_sync' %}Klaar om te synchroniseren{% elif connection.status == 'sync_error' %}Synchronisatie mislukt{% else %}Wacht op toestemming{% endif %}{% if connection.last_sync_at %} · {{ connection.last_sync_at|date:'d M H:i' }}{% endif %}</small>{% if connection.last_error %}<em>{{ connection.last_error }}</em>{% endif %}</div><form method="post" action="{% url 'integrations:sync_connection' connection.id %}">{% csrf_token %}<button class="icon-button" title="Nu synchroniseren"><i data-lucide="refresh-cw"></i></button></form><button class="icon-button destructive" type="button" data-open-dialog="disconnect-{{ connection.id }}" title="Koppeling ontkoppelen"><i data-lucide="unlink"></i></button></li>{% empty %}<li class="empty-copy">Nog geen koppelingen geactiveerd.</li>{% endfor %}</ul>
   </section>
   <section class="content-panel settings-form">
     <div class="panel-heading"><h2>Outlook agenda</h2></div>

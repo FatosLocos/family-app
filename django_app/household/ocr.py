@@ -4,6 +4,7 @@ from PIL import Image
 import pytesseract
 
 from household.models import Receipt
+from household.receipt_matching import match_receipt_to_transaction
 
 
 def process_receipt(receipt_id):
@@ -25,6 +26,7 @@ def process_receipt(receipt_id):
                 from decimal import Decimal
                 receipt.total_amount = Decimal(match.group(1).replace(",", "."))
         receipt.save(update_fields=["ocr_text", "ocr_status", "ocr_error", "total_amount", "updated_at"])
+        match_receipt_to_transaction(receipt)
     except Exception:
         receipt.ocr_status = Receipt.OcrStatus.FAILED
         receipt.ocr_error = "Tekstherkenning kon deze bon niet lezen."

@@ -7,11 +7,18 @@ De volledige herbouw van de gezinsapp. De bestaande Next.js-app in de projectroo
 ```bash
 /opt/homebrew/bin/python3.12 -m venv ../.venv-django
 ../.venv-django/bin/pip install -r requirements.txt
-../.venv-django/bin/python manage.py migrate
-../.venv-django/bin/python manage.py runserver 8000
+cat > .env.local <<'EOF'
+DATABASE_URL=postgresql://family_app@127.0.0.1:5432/family_app
+TEST_DATABASE_URL=postgresql://<lokale-admin>@127.0.0.1:5432/family_app
+DJANGO_DEBUG=1
+DJANGO_FORCE_HTTPS=0
+EOF
+./ops/run-dev.sh 8000
 ```
 
-Open `http://localhost:8000/account/signup/` om een nieuw huishouden te starten.
+De app accepteert uitsluitend PostgreSQL. Open `http://localhost:8000/account/signup/` om een nieuw huishouden te starten.
+
+Gebruik daarna `./ops/run-checks.sh` voor de testdatabase. Productie gebruikt `TEST_DATABASE_URL` nooit.
 
 ## VPS
 

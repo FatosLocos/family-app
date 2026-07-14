@@ -7,6 +7,7 @@ urlpatterns = [
     path("", views.index, name="index"),
     path("profiel/", views.save_profile, name="save_profile"),
     path("huishouden/", views.save_household, name="save_household"),
+    path("gegevens/exporteren/", views.export_household_data, name="export_household_data"),
     path("outlook/configuratie/", views.save_outlook_config, name="save_outlook_config"),
     path("outlook/start/", views.start_outlook, name="start_outlook"),
     path("outlook/callback/", views.outlook_callback, name="outlook_callback"),

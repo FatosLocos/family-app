@@ -1,4 +1,8 @@
+import json
+
 from django.contrib import messages
+from django.core.serializers.json import DjangoJSONEncoder
+from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_POST
 
@@ -7,6 +11,7 @@ from households.forms import HouseholdSettingsForm
 from identity.forms import ProfileForm
 from integrations.forms import BunqConfigForm, OutlookConfigForm
 from integrations.audit import log_integration_event
+from integrations.data_export import household_export
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection
 from planning.models import CalendarSource
 from integrations.services import finish_bunq_connection, finish_outlook_connection, get_app_config, save_app_config, start_bunq_connection, start_outlook_connection
@@ -45,6 +50,14 @@ def save_household(request):
         form.save()
         messages.success(request, "Huishouden bijgewerkt.")
     return redirect("integrations:index")
+
+
+@owner_required
+def export_household_data(request):
+    payload = json.dumps(household_export(request.household), cls=DjangoJSONEncoder, ensure_ascii=False, indent=2)
+    response = HttpResponse(payload, content_type="application/json; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="family-app-gegevens.json"'
+    return response
 
 
 @parent_required
