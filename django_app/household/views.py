@@ -34,12 +34,31 @@ def index(request):
     for receipt in receipts:
         receipt.bank_amount = abs(receipt.transaction.amount) if receipt.transaction_id else None
         receipt.amount_difference = abs(receipt.bank_amount - receipt.total_amount) if receipt.transaction_id and receipt.total_amount else None
+    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list).prefetch_related("prices")[:50])
+    retailer_choices = ShoppingPrice.Retailer.choices
+    price_rows = []
+    latest_price_at = None
+    for item in price_items:
+        prices_by_retailer = {price.retailer: price for price in item.prices.all()}
+        for price in prices_by_retailer.values():
+            if latest_price_at is None or price.observed_at > latest_price_at:
+                latest_price_at = price.observed_at
+        price_rows.append({
+            "item": item,
+            "cells": [
+                {"retailer": retailer, "label": label, "price": prices_by_retailer.get(retailer)}
+                for retailer, label in retailer_choices
+            ],
+        })
     context = {
         "tab": tab, "task_filter": task_filter,
         "task_form": task_form, "shopping_form": ShoppingItemForm(), "meal_form": MealPlanForm(), "routine_form": routine_form,
         "tasks": tasks[:50],
         "shopping_items": ShoppingItem.objects.for_household(household).filter(list=default_list)[:50],
-        "price_items": ShoppingItem.objects.for_household(household).filter(list=default_list).prefetch_related("prices")[:50],
+        "price_items": price_items,
+        "price_rows": price_rows,
+        "retailer_choices": retailer_choices,
+        "latest_price_at": latest_price_at,
         "price_form": ShoppingPriceForm(),
         "receipts": receipts,
         "receipt_form": ReceiptForm(),

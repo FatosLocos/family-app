@@ -101,6 +101,22 @@ class HouseholdIsolationTests(TestCase):
         self.assertEqual(str(price.price), "4.49")
         self.assertTrue(price.is_offer)
 
+    def test_price_comparison_keeps_each_retailer_in_its_own_cell(self):
+        self.client.force_login(self.owner)
+        shopping_list = ShoppingList.objects.create(household=self.first_household, name="Boodschappen")
+        item = ShoppingItem.objects.create(household=self.first_household, list=shopping_list, name="Koffie")
+        ShoppingPrice.objects.create(household=self.first_household, item=item, retailer=ShoppingPrice.Retailer.ALBERT_HEIJN, price="4.49", unit_label="500 g", product_url="https://example.test/koffie")
+        ShoppingPrice.objects.create(household=self.first_household, item=item, retailer=ShoppingPrice.Retailer.KAUFLAND, price="3.99")
+
+        response = self.client.get(reverse("household:index"), {"tab": "prijzen"})
+
+        self.assertContains(response, 'class="price-comparison-cells"')
+        self.assertContains(response, 'retailer-ah')
+        self.assertContains(response, 'retailer-jumbo is-empty')
+        self.assertContains(response, 'retailer-lidl is-empty')
+        self.assertContains(response, 'retailer-kaufland')
+        self.assertContains(response, 'https://example.test/koffie')
+
     def test_receipt_ocr_stores_text_and_detected_total(self):
         receipt = Receipt.objects.create(household=self.first_household, retailer="Jumbo", image=SimpleUploadedFile("bon.jpg", b"image", content_type="image/jpeg"))
         with patch("household.ocr.Image.open") as image_open, patch("household.ocr.pytesseract.image_to_string", return_value="JUMBO\nTOTAAL 12,34"):
