@@ -118,7 +118,7 @@ def _hue_token(connection: IntegrationConnection) -> str:
         raise ProviderError("Philips Hue-clientgegevens ontbreken.")
     response = requests.post(
         HUE_OAUTH_TOKEN_URL,
-        data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
         auth=(client_id, client_secret),
         timeout=20,
     )

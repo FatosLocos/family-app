@@ -304,7 +304,7 @@ class SettingsAccessTests(TestCase):
             "hue",
             "hue-client-id",
             "hue-client-secret",
-            {},
+            {"app_id": "hue-app-id", "device_name": "Family App"},
         )
         self.client.force_login(self.owner)
 
@@ -313,7 +313,10 @@ class SettingsAccessTests(TestCase):
         params = parse_qs(urlparse(start["Location"]).query)
         self.assertEqual(params["client_id"], ["hue-client-id"])
         self.assertIn("state", params)
-        self.assertEqual(set(params), {"client_id", "response_type", "redirect_uri", "state"})
+        self.assertEqual(params["appid"], ["hue-app-id"])
+        self.assertEqual(params["devicename"], ["Family App"])
+        self.assertEqual(params["code_challenge_method"], ["S256"])
+        self.assertIn("code_challenge", params)
 
         token_response = FakeResponse({"access_token": "hue-access-token", "refresh_token": "hue-refresh-token", "expires_in": 3600})
         with patch("integrations.services.requests.post", return_value=token_response):
@@ -332,7 +335,7 @@ class SettingsAccessTests(TestCase):
         self.assertEqual(
             self.client.post(
                 reverse("integrations:save_hue_config"),
-                {"client_id": "client", "client_secret": "secret"},
+                {"client_id": "client", "client_secret": "secret", "app_id": "hue-app-id", "device_name": "Family App"},
             ).status_code,
             403,
         )

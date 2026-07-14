@@ -31,7 +31,7 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
     if provider == "bunq":
         return settings.BUNQ_OAUTH_CLIENT_ID, settings.BUNQ_OAUTH_CLIENT_SECRET, {"environment": "production"}
     if provider == "hue":
-        return "", "", {}
+        return "", "", {"app_id": "", "device_name": "Family App"}
     return "", "", {}
 
 
@@ -123,14 +123,23 @@ def start_hue_connection(request) -> str:
         defaults={"display_name": "Philips Hue"},
     )
     state = secrets.token_urlsafe(24)
-    request.session["hue_oauth"] = {"state": state, "connection_id": connection.id}
-    params = urlencode({
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    device_id = connection.settings.get("device_id") or secrets.token_hex(16)
+    request.session["hue_oauth"] = {"state": state, "verifier": verifier, "connection_id": connection.id, "device_id": device_id}
+    params = {
         "client_id": client_id,
         "response_type": "code",
         "redirect_uri": f"{public_origin(request)}/instellingen/hue/callback/",
         "state": state,
-    })
-    return f"{HUE_OAUTH_AUTHORIZE_URL}?{params}"
+        "deviceid": device_id,
+        "devicename": config.get("device_name") or "Family App",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    if config.get("app_id"):
+        params["appid"] = config["app_id"]
+    return f"{HUE_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
 
 
 def finish_hue_connection(request, code: str, state: str) -> IntegrationConnection:
@@ -145,8 +154,8 @@ def finish_hue_connection(request, code: str, state: str) -> IntegrationConnecti
         data={
             "grant_type": "authorization_code",
             "code": code,
+            "code_verifier": session["verifier"],
             "redirect_uri": f"{public_origin(request)}/instellingen/hue/callback/",
-            "client_id": client_id,
         },
         auth=(client_id, client_secret),
         timeout=20,
@@ -162,6 +171,7 @@ def finish_hue_connection(request, code: str, state: str) -> IntegrationConnecti
     connection.settings = {
         "access_token": encrypt(payload["access_token"]),
         "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+        "device_id": session["device_id"],
     }
     connection.status = "needs_bridge_link"
     connection.last_error = ""
