@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, Task
+from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceSnapshot, Task
 from household.price_providers import PriceResult, fetch_checkjebon_prices, refresh_household_prices
 from household.tasks import replenish_recurring_shopping_items
 from households.models import Household, Membership
@@ -121,6 +121,8 @@ class HouseholdIsolationTests(TestCase):
         price = ShoppingPrice.objects.get(item=item, retailer="ah")
         self.assertEqual(str(price.price), "4.49")
         self.assertTrue(price.is_offer)
+        self.assertEqual(price.source, ShoppingPrice.Source.MANUAL)
+        self.assertEqual(ShoppingPriceSnapshot.objects.filter(item=item, retailer="ah").count(), 2)
 
     def test_price_comparison_keeps_each_retailer_in_its_own_cell(self):
         self.client.force_login(self.owner)
@@ -184,6 +186,10 @@ class HouseholdIsolationTests(TestCase):
         self.assertEqual(price.source, ShoppingPrice.Source.PRIJSPROFEET)
         self.assertEqual(str(price.price), "0.99")
         self.assertEqual(str(ShoppingPrice.objects.get(item=manual, retailer=ShoppingPrice.Retailer.JUMBO).price), "6.50")
+        self.assertEqual(ShoppingPriceSnapshot.objects.filter(item=automatic, retailer=ShoppingPrice.Retailer.JUMBO).count(), 1)
+
+        refresh_household_prices(self.first_household)
+        self.assertEqual(ShoppingPriceSnapshot.objects.filter(item=automatic, retailer=ShoppingPrice.Retailer.JUMBO).count(), 1)
 
     @patch("household.views.refresh_household_shopping_prices.delay")
     def test_parent_can_start_a_price_refresh(self, delay):

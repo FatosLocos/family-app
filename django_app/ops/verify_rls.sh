@@ -27,7 +27,7 @@ BEGIN
   FROM (
     VALUES
       ('family_bulletinpost'), ('family_contact'), ('family_contactperson'), ('family_wishlist'), ('family_wishitem'), ('family_wishreservation'),
-      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_receipt'), ('household_mealplan'), ('household_routine'),
+      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_receipt'), ('household_mealplan'), ('household_routine'),
       ('planning_calendarsource'), ('planning_calendarevent'), ('planning_icssubscription'),
       ('finance_bankconnection'), ('finance_bankaccount'), ('finance_transaction'), ('finance_recurringrule'), ('finance_budget'),
       ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'),

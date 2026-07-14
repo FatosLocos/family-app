@@ -27,7 +27,7 @@ class WishItemForm(forms.ModelForm):
         fields = ("title", "url", "price", "category", "image_url", "repeatable")
         widgets = {
             "url": forms.URLInput(attrs={"placeholder": "https://"}),
-            "category": forms.HiddenInput(),
+            "category": forms.TextInput(attrs={"placeholder": "Bijv. speelgoed"}),
             "image_url": forms.HiddenInput(),
         }
 

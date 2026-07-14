@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 import requests
 
 from household.models import ShoppingItem, ShoppingPrice
+from household.price_history import save_price_observation
 
 
 CHECKJEBON_URL = "https://www.checkjebon.nl/data/supermarkets.json"
@@ -208,6 +209,7 @@ def refresh_household_prices(household) -> dict[str, int]:
     items = list(ShoppingItem.objects.for_household(household).filter(completed_at__isnull=True).order_by("created_at")[:50])
     if not items:
         return {"updated": 0, "offers": 0, "errors": 0}
+    items_by_id = {item.id: item for item in items}
     errors = 0
     try:
         base_prices = fetch_checkjebon_prices(items)
@@ -223,8 +225,7 @@ def refresh_household_prices(household) -> dict[str, int]:
         existing = ShoppingPrice.objects.for_household(household).filter(item_id=result.item_id, retailer=result.retailer).first()
         if existing and existing.source == ShoppingPrice.Source.MANUAL:
             continue
-        defaults = {
-            "household": household,
+        values = {
             "price": result.price,
             "unit_label": result.unit_label,
             "is_offer": result.is_offer,
@@ -235,7 +236,12 @@ def refresh_household_prices(household) -> dict[str, int]:
             "source": result.source,
             "matched_product_name": result.matched_product_name,
         }
-        ShoppingPrice.objects.update_or_create(item_id=result.item_id, retailer=result.retailer, defaults=defaults)
+        save_price_observation(
+            household=household,
+            item=items_by_id[result.item_id],
+            retailer=result.retailer,
+            values=values,
+        )
         updated += 1
         offers_count += int(result.is_offer)
     return {"updated": updated, "offers": offers_count, "errors": errors}

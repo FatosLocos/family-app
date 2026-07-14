@@ -103,6 +103,24 @@ class ShoppingPrice(HouseholdRecord):
         ordering = ("price",)
 
 
+class ShoppingPriceSnapshot(HouseholdRecord):
+    """An immutable observation for a meaningful retailer price change."""
+
+    item = models.ForeignKey(ShoppingItem, on_delete=models.CASCADE, related_name="price_snapshots")
+    retailer = models.CharField(max_length=20, choices=ShoppingPrice.Retailer.choices)
+    price = models.DecimalField(max_digits=8, decimal_places=2)
+    unit_label = models.CharField(max_length=60, blank=True)
+    is_offer = models.BooleanField(default=False)
+    offer_label = models.CharField(max_length=160, blank=True)
+    regular_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    source = models.CharField(max_length=20, choices=ShoppingPrice.Source.choices)
+    observed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-observed_at",)
+        indexes = [models.Index(fields=("item", "retailer", "-observed_at"), name="shopping_price_history_idx")]
+
+
 def receipt_upload_path(instance, filename):
     from pathlib import Path
     from uuid import uuid4

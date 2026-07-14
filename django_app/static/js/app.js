@@ -126,8 +126,17 @@
     document.querySelectorAll("form[data-wish-autofill]").forEach((form) => {
       const urlField = form.elements.namedItem("url");
       const status = form.querySelector("[data-wish-metadata-status]");
+      const preview = form.querySelector("[data-wish-image-preview]");
+      const previewImage = preview?.querySelector("img");
       if (!urlField || !form.dataset.metadataUrl) return;
       let requestNumber = 0;
+      let inputTimer;
+      const showPreview = (imageUrl) => {
+        if (!preview || !previewImage || !imageUrl) return;
+        previewImage.src = imageUrl;
+        preview.hidden = false;
+      };
+      previewImage?.addEventListener("error", () => { preview.hidden = true; });
       const fill = async () => {
         const url = urlField.value.trim();
         if (!/^https?:\/\//i.test(url)) return;
@@ -146,11 +155,16 @@
               field.dataset.autofilled = "true";
             }
           });
+          showPreview(metadata.image_url);
           if (status) status.textContent = `Gevonden: ${metadata.title}${metadata.price ? ` · € ${metadata.price}` : ""}`;
         } catch (error) {
           if (currentRequest === requestNumber && status) status.textContent = error.message || "Productgegevens konden niet worden opgehaald.";
         }
       };
+      urlField.addEventListener("input", () => {
+        window.clearTimeout(inputTimer);
+        if (/^https?:\/\//i.test(urlField.value.trim())) inputTimer = window.setTimeout(fill, 550);
+      });
       urlField.addEventListener("change", fill);
       urlField.addEventListener("blur", fill);
       ["title", "price", "category", "image_url"].forEach((name) => {
@@ -203,5 +217,5 @@
     registerAgendaEvents();
   });
   document.body.addEventListener("htmx:afterSwap", refreshIcons);
-  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=4", { scope: "/" }).catch(() => {}));
+  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=5", { scope: "/" }).catch(() => {}));
 })();

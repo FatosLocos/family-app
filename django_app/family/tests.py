@@ -64,6 +64,29 @@ class FamilyWishlistTests(TestCase):
         self.assertEqual(metadata.category, "Elektronica")
 
     @patch("family.wishlist_metadata.socket.getaddrinfo")
+    @patch("family.wishlist_metadata.requests.get")
+    def test_product_metadata_reads_open_graph_price_and_relative_image(self, get, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        get.return_value.status_code = 200
+        get.return_value.is_redirect = False
+        get.return_value.headers = {"Content-Type": "text/html"}
+        get.return_value.encoding = "utf-8"
+        get.return_value.iter_content.return_value = [b'''<html><head><meta property="og:title" content="Bouwset"><meta property="og:image" content="/media/bouwset.jpg"><meta property="og:price:amount" content="34,95"></head></html>''']
+
+        metadata = fetch_wishlist_metadata("https://shop.example.test/product/bouwset")
+
+        self.assertEqual(metadata.title, "Bouwset")
+        self.assertEqual(str(metadata.price), "34.95")
+        self.assertEqual(metadata.image_url, "https://shop.example.test/media/bouwset.jpg")
+
+    def test_wishlist_form_shows_price_category_and_product_preview(self):
+        response = self.client.get(reverse("family:index"), {"tab": "wensen"})
+
+        self.assertContains(response, 'name="price"')
+        self.assertContains(response, 'name="category"')
+        self.assertContains(response, 'data-wish-image-preview')
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
     def test_product_metadata_refuses_private_addresses(self, getaddrinfo):
         getaddrinfo.return_value = [(2, 1, 6, "", ("192.168.1.2", 0))]
 

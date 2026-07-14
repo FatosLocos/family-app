@@ -4,7 +4,7 @@ from django.utils import timezone
 
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
 from finance.models import BankAccount, Budget, RecurringRule, Transaction
-from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, Task
+from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceSnapshot, Task
 from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource, IcsSubscription
 
@@ -32,6 +32,7 @@ def household_export(household):
             "shopping_lists": list(ShoppingList.objects.for_household(household).values("name", "is_default", "created_at")),
             "shopping_items": list(ShoppingItem.objects.for_household(household).select_related("list").values("list__name", "name", "quantity", "category", "recurring", "recurrence_days", "completed_at", "created_at")),
             "shopping_prices": list(ShoppingPrice.objects.for_household(household).select_related("item").values("item__name", "retailer", "price", "unit_label", "is_offer", "offer_label", "product_url", "observed_at")),
+            "shopping_price_history": list(ShoppingPriceSnapshot.objects.for_household(household).select_related("item").values("item__name", "retailer", "price", "unit_label", "is_offer", "offer_label", "regular_price", "source", "observed_at")),
             "meals": list(MealPlan.objects.for_household(household).values("title", "planned_for", "notes")),
             "routines": list(Routine.objects.for_household(household).select_related("assigned_to").values("title", "cadence", "assigned_to__display_name", "is_active")),
             "receipts": list(Receipt.objects.for_household(household).values("retailer", "purchased_on", "total_amount", "ocr_text", "ocr_status", "ocr_error", "created_at")),

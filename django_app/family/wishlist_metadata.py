@@ -9,7 +9,7 @@ import ipaddress
 import json
 import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -176,6 +176,40 @@ def _parse_price(value) -> Decimal | None:
     return amount if Decimal("0") <= amount <= Decimal("99999.99") else None
 
 
+def _offer_price(offers) -> Decimal | None:
+    candidates = offers if isinstance(offers, list) else [offers]
+    for offer in candidates:
+        if not isinstance(offer, dict):
+            continue
+        for value in (offer.get("price"), offer.get("lowPrice"), offer.get("salePrice")):
+            price = _parse_price(value)
+            if price is not None:
+                return price
+        specification = offer.get("priceSpecification")
+        specifications = specification if isinstance(specification, list) else [specification]
+        for item in specifications:
+            if isinstance(item, dict):
+                price = _parse_price(item.get("price"))
+                if price is not None:
+                    return price
+    return None
+
+
+def _embedded_price(document: str) -> Decimal | None:
+    """Fallback for shops that expose a product price in their serialized page state."""
+    patterns = (
+        r'"(?:salePrice|currentPrice|price)"\s*:\s*"?([0-9][0-9., ]{0,16})',
+        r'"(?:amount|value)"\s*:\s*"?([0-9][0-9., ]{0,16})',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, document, re.I)
+        if match:
+            price = _parse_price(match.group(1))
+            if price is not None:
+                return price
+    return None
+
+
 def _infer_category(title: str, explicit_category: str = "") -> str:
     if explicit_category:
         return _as_text(explicit_category)[:80]
@@ -196,22 +230,28 @@ def _infer_category(title: str, explicit_category: str = "") -> str:
 def fetch_wishlist_metadata(url: str) -> WishlistMetadata:
     """Fetch Open Graph and JSON-LD product details from a public product URL."""
 
-    _, document = _read_page(url)
+    page_url, document = _read_page(url)
     parser = _MetadataParser()
     parser.feed(document)
     parser.close()
     meta = parser.meta
-    product = next(iter(parser.products()), {})
+    products = list(parser.products())
+    product = products[0] if products else {}
     offers = product.get("offers", {}) if isinstance(product, dict) else {}
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
     title = _as_text(meta.get("og:title") or product.get("name") or meta.get("twitter:title") or parser.title)
     image_url = _extract_image(meta.get("og:image") or product.get("image") or meta.get("twitter:image"))
-    price = _parse_price(
-        meta.get("product:price:amount")
-        or meta.get("price")
-        or (offers.get("price") if isinstance(offers, dict) else None)
-    )
+    if image_url:
+        image_url = urljoin(page_url, image_url)
+    price = next((candidate for candidate in (
+        _parse_price(meta.get("product:price:amount")),
+        _parse_price(meta.get("og:price:amount")),
+        _parse_price(meta.get("price")),
+        _parse_price(product.get("price") if isinstance(product, dict) else None),
+        _offer_price(offers),
+        _embedded_price(document),
+    ) if candidate is not None), None)
     category = _infer_category(title, meta.get("product:category") or meta.get("category") or product.get("category", ""))
     if not title:
         raise WishlistMetadataError("Er zijn geen productgegevens gevonden op deze link.")
