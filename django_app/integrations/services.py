@@ -14,6 +14,8 @@ from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationAppConfig, IntegrationConnection
 
 OUTLOOK_SCOPES = "offline_access User.Read Calendars.Read"
+HUE_OAUTH_AUTHORIZE_URL = "https://api.meethue.com/v2/oauth2/authorize"
+HUE_OAUTH_TOKEN_URL = "https://api.meethue.com/v2/oauth2/token"
 
 
 def public_origin(request) -> str:
@@ -28,6 +30,8 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
         return settings.OUTLOOK_CALENDAR_CLIENT_ID, settings.OUTLOOK_CALENDAR_CLIENT_SECRET, {"tenant_id": "consumers"}
     if provider == "bunq":
         return settings.BUNQ_OAUTH_CLIENT_ID, settings.BUNQ_OAUTH_CLIENT_SECRET, {"environment": "production"}
+    if provider == "hue":
+        return "", "", {"app_id": "family-app", "device_name": "Family App"}
     return "", "", {}
 
 
@@ -103,6 +107,71 @@ def finish_bunq_connection(request, code: str, state: str) -> IntegrationConnect
     connection.secret_encrypted = encrypt(payload["access_token"])
     connection.settings = {"environment": environment, "token_type": payload.get("token_type", "bearer")}
     connection.status = "needs_sync"
+    connection.last_error = ""
+    connection.save()
+    return connection
+
+
+def start_hue_connection(request) -> str:
+    client_id, _, config = get_app_config(request.household, "hue")
+    if not client_id:
+        raise ValueError("Vul eerst de Philips Hue-clientgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.HUE,
+        defaults={"display_name": "Philips Hue"},
+    )
+    state = secrets.token_urlsafe(24)
+    device_id = connection.settings.get("device_id") or secrets.token_hex(16)
+    request.session["hue_oauth"] = {"state": state, "connection_id": connection.id, "device_id": device_id}
+    app_id = config.get("app_id") or "family-app"
+    params = urlencode({
+        "client_id": client_id,
+        "clientid": client_id,
+        "response_type": "code",
+        "redirect_uri": f"{public_origin(request)}/instellingen/hue/callback/",
+        "state": state,
+        "appid": app_id,
+        "deviceid": device_id,
+        "devicename": config.get("device_name") or "Family App",
+    })
+    return f"{HUE_OAUTH_AUTHORIZE_URL}?{params}"
+
+
+def finish_hue_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("hue_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Philips Hue-aanmelding.")
+    client_id, client_secret, config = get_app_config(request.household, "hue")
+    if not client_id or not client_secret:
+        raise ValueError("Philips Hue-clientgegevens ontbreken.")
+    response = requests.post(
+        HUE_OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": f"{public_origin(request)}/instellingen/hue/callback/",
+            "client_id": client_id,
+        },
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Philips Hue gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError("Philips Hue gaf geen toegangstoken terug. Controleer de redirect-URL en clientgegevens.")
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+        "app_id": config.get("app_id") or "family-app",
+        "device_id": session["device_id"],
+    }
+    connection.status = "needs_bridge_link"
     connection.last_error = ""
     connection.save()
     return connection

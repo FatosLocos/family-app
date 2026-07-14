@@ -5,10 +5,11 @@ from django.test import TestCase
 from django.urls import reverse
 
 from home.models import HomeActionAudit, HomeAssistantConfig, HomeEntity
-from home.services import control_entity, sync_entities
+from home.services import HomeAssistantError, control_entity, sync_entities
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
+from integrations.models import IntegrationConnection
 
 
 class FakeResponse:
@@ -49,6 +50,28 @@ class HomeAssistantTests(TestCase):
         self.assertIn("/api/services/switch/turn_on", request.call_args_list[0].args[1])
         self.assertTrue(HomeActionAudit.objects.get(entity=entity).succeeded)
 
+    @patch("home.services.requests.request")
+    def test_control_uses_domain_specific_cover_and_climate_services(self, request):
+        request.side_effect = [FakeResponse({}), FakeResponse([]), FakeResponse({}), FakeResponse([])]
+        cover = HomeEntity.objects.create(household=self.household, entity_id="cover.gordijnen", domain="cover", name="Gordijnen", is_supported=True)
+        climate = HomeEntity.objects.create(household=self.household, entity_id="climate.woonkamer", domain="climate", name="Woonkamer", is_supported=True, attributes={"min_temp": 10, "max_temp": 28})
+
+        control_entity(self.household, cover, "stop")
+        control_entity(self.household, climate, "set_temperature", "21,5")
+
+        self.assertIn("/api/services/cover/stop_cover", request.call_args_list[0].args[1])
+        self.assertEqual(request.call_args_list[2].kwargs["json"], {"entity_id": "climate.woonkamer", "temperature": 21.5})
+        self.assertIn("/api/services/climate/set_temperature", request.call_args_list[2].args[1])
+        self.assertEqual(HomeActionAudit.objects.get(entity=climate).detail, "Temperatuur ingesteld op 21.5 °C.")
+
+    def test_invalid_home_action_is_rejected_and_audited(self):
+        entity = HomeEntity.objects.create(household=self.household, entity_id="scene.avondsfeer", domain="scene", name="Avondsfeer", is_supported=True)
+        with self.assertRaises(HomeAssistantError):
+            control_entity(self.household, entity, "off")
+        audit = HomeActionAudit.objects.get(entity=entity)
+        self.assertFalse(audit.succeeded)
+        self.assertEqual(audit.action, "off")
+
     def test_child_can_view_but_cannot_save_or_control(self):
         entity = HomeEntity.objects.create(household=self.household, entity_id="light.kamer", domain="light", name="Kamer", is_supported=True)
         self.client.force_login(self.child)
@@ -64,6 +87,39 @@ class HomeAssistantTests(TestCase):
         response = self.client.get(reverse("home:index"), {"tab": "inrichting"})
         self.assertContains(response, "Zolder")
         self.assertContains(self.client.get(reverse("home:index"), {"tab": "onderhoud"}), "Cv-ketel")
+
+    def test_home_assistant_interface_names_the_rest_api_integration(self):
+        self.client.force_login(self.parent)
+        response = self.client.get(reverse("home:index"))
+        self.assertContains(response, "Home Assistant REST API")
+
+    def test_hue_light_control_is_server_side_and_audited(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HUE,
+            display_name="Philips Hue",
+            settings={"bridge_username": "bridge-user"},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id=f"hue.{connection.id}.1",
+            domain="light",
+            name="Keuken",
+            is_supported=True,
+            attributes={"hue_light_id": "1", "brightness": 120},
+        )
+
+        with patch("integrations.providers.control_hue_light", return_value="Helderheid ingesteld op 50%.") as control, patch("integrations.providers.sync_hue") as sync:
+            control_entity(self.household, entity, "brightness", "127")
+
+        control.assert_called_once_with(entity, "brightness", "127")
+        sync.assert_called_once_with(connection)
+        audit = HomeActionAudit.objects.get(entity=entity)
+        self.assertTrue(audit.succeeded)
+        self.assertEqual(audit.detail, "Helderheid ingesteld op 50%.")
 
     def test_household_document_is_downloadable_only_inside_household(self):
         self.client.force_login(self.parent)

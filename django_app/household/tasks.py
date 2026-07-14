@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from common.db_scope import household_db_scope
 from household.models import ShoppingItem
+from household.price_providers import refresh_household_prices
 from households.models import Household
 
 
@@ -28,3 +29,19 @@ def process_receipt_ocr(receipt_id, household_id):
     from household.ocr import process_receipt
     with household_db_scope(household_id):
         process_receipt(receipt_id)
+
+
+@shared_task
+def refresh_household_shopping_prices(household_id):
+    household = Household.objects.filter(pk=household_id).first()
+    if not household:
+        return {"updated": 0, "offers": 0, "errors": 0}
+    with household_db_scope(household_id):
+        return refresh_household_prices(household)
+
+
+@shared_task
+def refresh_shopping_prices():
+    for household in Household.objects.all():
+        with household_db_scope(household.pk):
+            refresh_household_prices(household)

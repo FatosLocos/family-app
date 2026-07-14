@@ -46,4 +46,9 @@ sudo systemctl enable --now family-app-backup.timer
 systemctl list-timers family-app-backup.timer
 ```
 
-De back-ups blijven lokaal op de VPS; externe versleutelde opslag is bewust nog niet geconfigureerd.
+De back-ups blijven lokaal op de VPS; externe versleutelde opslag is bewust nog niet geconfigureerd. Controleer een nieuwe dump altijd eerst zonder productiedata te wijzigen:
+
+```bash
+COMPOSE_FILE=/opt/family-app/docker-compose.django.yml ENV_FILE=/opt/family-app/django_app/.env \
+  /opt/family-app/django_app/ops/verify-backup.sh /var/backups/family_app/family_app-YYYY-MM-DDTHH-MM-SS.dump
+```

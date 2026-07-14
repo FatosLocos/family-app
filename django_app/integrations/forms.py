@@ -11,3 +11,10 @@ class BunqConfigForm(forms.Form):
     client_id = forms.CharField(label="OAuth client ID", max_length=240)
     client_secret = forms.CharField(label="OAuth client secret", required=False, widget=forms.PasswordInput(render_value=False))
     environment = forms.ChoiceField(label="Omgeving", choices=(("production", "Productie"), ("sandbox", "Sandbox")), initial="production")
+
+
+class HueConfigForm(forms.Form):
+    client_id = forms.CharField(label="Hue OAuth client ID", max_length=240)
+    client_secret = forms.CharField(label="Hue OAuth client secret", required=False, widget=forms.PasswordInput(render_value=False))
+    app_id = forms.CharField(label="Hue application ID", max_length=120, initial="family-app")
+    device_name = forms.CharField(label="Apparaatnaam", max_length=120, initial="Family App")

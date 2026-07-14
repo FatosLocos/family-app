@@ -1,8 +1,14 @@
+from datetime import date
+from decimal import Decimal
+from unittest.mock import patch
+
 from django.test import TestCase
 from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
+from family.birthdays import upcoming_birthdays
+from family.wishlist_metadata import WishlistMetadata, fetch_wishlist_metadata
 from households.models import Household, Membership
 from identity.models import User
 
@@ -21,6 +27,73 @@ class FamilyWishlistTests(TestCase):
         self.assertEqual(response.status_code, 200)
         wishlist = WishList.objects.get(household=self.household, owner=self.child)
         self.assertTrue(WishItem.objects.filter(wishlist=wishlist, title="Nieuw boek").exists())
+
+    @patch("family.views.fetch_wishlist_metadata")
+    def test_product_link_autofills_a_url_only_wish_on_the_server(self, fetch_metadata):
+        fetch_metadata.return_value = WishlistMetadata(
+            title="Bouwset voor kinderen",
+            image_url="https://cdn.example.test/bouwset.jpg",
+            price=Decimal("24.95"),
+            category="Speelgoed",
+        )
+
+        response = self.client.post(reverse("family:add_wish"), {"owner_id": self.child.id, "url": "https://shop.example.test/bouwset"})
+
+        self.assertEqual(response.status_code, 302)
+        item = WishItem.objects.get(wishlist__owner=self.child)
+        self.assertEqual(item.title, "Bouwset voor kinderen")
+        self.assertEqual(str(item.price), "24.95")
+        self.assertEqual(item.category, "Speelgoed")
+        self.assertEqual(item.image_url, "https://cdn.example.test/bouwset.jpg")
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
+    @patch("family.wishlist_metadata.requests.get")
+    def test_product_metadata_uses_json_ld(self, get, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        get.return_value.status_code = 200
+        get.return_value.is_redirect = False
+        get.return_value.headers = {"Content-Type": "text/html"}
+        get.return_value.encoding = "utf-8"
+        get.return_value.iter_content.return_value = [b'''<html><head><script type="application/ld+json">{"@type":"Product","name":"Super koptelefoon","image":"https://img.example.test/headphones.jpg","category":"Elektronica","offers":{"price":"79.95"}}</script></head></html>''']
+
+        metadata = fetch_wishlist_metadata("https://shop.example.test/koptelefoon")
+
+        self.assertEqual(metadata.title, "Super koptelefoon")
+        self.assertEqual(metadata.image_url, "https://img.example.test/headphones.jpg")
+        self.assertEqual(str(metadata.price), "79.95")
+        self.assertEqual(metadata.category, "Elektronica")
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
+    @patch("family.wishlist_metadata.requests.get")
+    def test_product_metadata_reads_open_graph_price_and_relative_image(self, get, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        get.return_value.status_code = 200
+        get.return_value.is_redirect = False
+        get.return_value.headers = {"Content-Type": "text/html"}
+        get.return_value.encoding = "utf-8"
+        get.return_value.iter_content.return_value = [b'''<html><head><meta property="og:title" content="Bouwset"><meta property="og:image" content="/media/bouwset.jpg"><meta property="og:price:amount" content="34,95"></head></html>''']
+
+        metadata = fetch_wishlist_metadata("https://shop.example.test/product/bouwset")
+
+        self.assertEqual(metadata.title, "Bouwset")
+        self.assertEqual(str(metadata.price), "34.95")
+        self.assertEqual(metadata.image_url, "https://shop.example.test/media/bouwset.jpg")
+
+    def test_wishlist_form_shows_price_category_and_product_preview(self):
+        response = self.client.get(reverse("family:index"), {"tab": "wensen"})
+
+        self.assertContains(response, 'name="price"')
+        self.assertContains(response, 'name="category"')
+        self.assertContains(response, 'data-wish-image-preview')
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
+    def test_product_metadata_refuses_private_addresses(self, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("192.168.1.2", 0))]
+
+        response = self.client.get(reverse("family:preview_wish_metadata"), {"url": "https://router.example.test/product"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Lokale adressen", response.json()["error"])
 
     def test_public_shared_wishlist_can_reserve_once(self):
         wishlist = WishList.objects.create(household=self.household, owner=self.child, title="Wensen", is_shared=True, share_token="public-token")
@@ -104,9 +177,56 @@ class FamilyWishlistTests(TestCase):
         ).id]), {"name": "Ander lid", "birth_date": "", "email": "", "phone": ""})
         self.assertEqual(response.status_code, 403)
 
+    def test_child_can_view_contacts_but_cannot_manage_or_export_them(self):
+        contact = Contact.objects.create(household=self.household, name="Familie Jansen", address="Straat 1")
+        self.client.force_login(self.child)
+
+        response = self.client.get(f"{reverse('family:index')}?tab=contacten")
+        self.assertContains(response, "Familie Jansen")
+        self.assertNotContains(response, f"contact-edit-{contact.id}")
+        self.assertNotContains(response, reverse("family:export_contacts"))
+        self.assertEqual(self.client.post(reverse("family:add_contact"), {"name": "Nieuw contact", "contact_type": "person"}).status_code, 403)
+        self.assertEqual(self.client.post(reverse("family:update_contact", args=[contact.id]), {"name": "Aangepast", "contact_type": "family"}).status_code, 403)
+        self.assertEqual(self.client.post(reverse("family:delete_contact", args=[contact.id])).status_code, 403)
+        self.assertEqual(self.client.get(reverse("family:export_contacts")).status_code, 403)
+
     def test_family_contacts_screen_renders_management_overlays(self):
         contact = Contact.objects.create(household=self.household, name="Familie De Vries")
         person = ContactPerson.objects.create(household=self.household, contact=contact, name="Piet de Vries")
         response = self.client.get(f"{reverse('family:index')}?tab=contacten")
         self.assertContains(response, f'contact-edit-{contact.id}')
         self.assertContains(response, f'person-edit-{person.id}')
+
+    def test_upcoming_birthdays_are_sorted_by_next_occurrence_and_show_age(self):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        later = ContactPerson.objects.create(household=self.household, contact=contact, name="Later", birth_date=date(1990, 8, 1))
+        tomorrow = ContactPerson.objects.create(household=self.household, contact=contact, name="Morgen", birth_date=date(2000, 7, 15))
+        last_week = ContactPerson.objects.create(household=self.household, contact=contact, name="Volgend jaar", birth_date=date(1985, 7, 7))
+
+        birthdays = upcoming_birthdays([later, last_week, tomorrow], date(2026, 7, 14))
+
+        self.assertEqual([birthday["person"].name for birthday in birthdays], ["Morgen", "Later", "Volgend jaar"])
+        self.assertEqual(birthdays[0]["next_date"], date(2026, 7, 15))
+        self.assertEqual(birthdays[0]["turning_age"], 26)
+
+    def test_leap_day_birthday_uses_february_twenty_eighth_in_non_leap_years(self):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        leap_day = ContactPerson.objects.create(household=self.household, contact=contact, name="Schrikkel", birth_date=date(2000, 2, 29))
+
+        birthday = upcoming_birthdays([leap_day], date(2025, 2, 1))[0]
+
+        self.assertEqual(birthday["next_date"], date(2025, 2, 28))
+        self.assertEqual(birthday["turning_age"], 25)
+
+    @patch("family.views.timezone.localdate", return_value=date(2026, 7, 14))
+    def test_birthdays_tab_renders_the_next_birthday_first(self, _localdate):
+        contact = Contact.objects.create(household=self.household, name="Familie")
+        ContactPerson.objects.create(household=self.household, contact=contact, name="Later", birth_date=date(1990, 8, 1))
+        ContactPerson.objects.create(household=self.household, contact=contact, name="Morgen", birth_date=date(2000, 7, 15))
+
+        response = self.client.get(reverse("family:index"), {"tab": "verjaardagen"})
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(content.index("Morgen"), content.index("Later"))
+        self.assertContains(response, "wordt 26")

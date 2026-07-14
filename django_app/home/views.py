@@ -13,6 +13,7 @@ from home.forms import EmergencyContactForm, FurnishingItemForm, HomeAssistantCo
 from home.models import EmergencyContact, FurnishingItem, HomeActionAudit, HomeAssistantConfig, HomeEntity, HouseholdDocument, MaintenanceItem, Room
 from home.services import HomeAssistantError, control_entity, save_config, sync_entities
 from households.decorators import household_required, parent_required
+from integrations.models import IntegrationConnection
 
 
 def _tab_redirect(tab):
@@ -29,7 +30,8 @@ def index(request):
         entities = entities.filter(domain=domain)
     maintenance = MaintenanceItem.objects.for_household(request.household)
     rooms = Room.objects.for_household(request.household)
-    return render(request, "home/index.html", {"tab": tab, "config": config, "entities": entities, "selected_domain": domain, "domains": HomeEntity.objects.for_household(request.household).values_list("domain", flat=True).distinct().order_by("domain"), "audits": HomeActionAudit.objects.for_household(request.household).select_related("entity")[:6], "config_form": HomeAssistantConfigForm(initial={"base_url": config.base_url if config else ""}), "maintenance": maintenance, "emergency_contacts": EmergencyContact.objects.for_household(request.household), "rooms": rooms.prefetch_related("items"), "documents": HouseholdDocument.objects.for_household(request.household), "maintenance_form": MaintenanceItemForm(), "emergency_form": EmergencyContactForm(), "room_form": RoomForm(), "furnishing_form": FurnishingItemForm(), "document_form": HouseholdDocumentForm(), "metrics": [{"value": entities.filter(is_available=True).count(), "label": "beschikbaar"}, {"value": maintenance.filter(due_date__lte=timezone.localdate()).count(), "label": "onderhoud"}]})
+    hue_connection = IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.HUE).first()
+    return render(request, "home/index.html", {"tab": tab, "config": config, "hue_connection": hue_connection, "entities": entities, "selected_domain": domain, "domains": HomeEntity.objects.for_household(request.household).values_list("domain", flat=True).distinct().order_by("domain"), "audits": HomeActionAudit.objects.for_household(request.household).select_related("entity")[:6], "config_form": HomeAssistantConfigForm(initial={"base_url": config.base_url if config else ""}), "maintenance": maintenance, "emergency_contacts": EmergencyContact.objects.for_household(request.household), "rooms": rooms.prefetch_related("items"), "documents": HouseholdDocument.objects.for_household(request.household), "maintenance_form": MaintenanceItemForm(), "emergency_form": EmergencyContactForm(), "room_form": RoomForm(), "furnishing_form": FurnishingItemForm(), "document_form": HouseholdDocumentForm(), "metrics": [{"value": entities.filter(is_available=True).count(), "label": "beschikbaar"}, {"value": maintenance.filter(due_date__lte=timezone.localdate()).count(), "label": "onderhoud"}]})
 
 
 @parent_required
@@ -62,7 +64,7 @@ def sync_home_assistant(request):
 def control(request, entity_id, action):
     entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id)
     try:
-        control_entity(request.household, entity, action)
+        control_entity(request.household, entity, action, request.POST.get("target_temperature") or request.POST.get("brightness"))
         messages.success(request, f"{entity.name} bijgewerkt.")
     except HomeAssistantError as error:
         messages.error(request, str(error))

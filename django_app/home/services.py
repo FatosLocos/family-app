@@ -73,18 +73,78 @@ def sync_entities(household):
         raise
 
 
-def control_entity(household, entity, action):
+def _service_call_for(entity, action, target_temperature=None):
+    services = {
+        "light": {"on": "turn_on", "off": "turn_off"},
+        "switch": {"on": "turn_on", "off": "turn_off"},
+        "scene": {"activate": "turn_on"},
+        "script": {"run": "turn_on"},
+        "cover": {"open": "open_cover", "close": "close_cover", "stop": "stop_cover"},
+        "climate": {"on": "turn_on", "off": "turn_off", "set_temperature": "set_temperature"},
+        "media_player": {
+            "on": "turn_on",
+            "off": "turn_off",
+            "play_pause": "media_play_pause",
+            "volume_down": "volume_down",
+            "volume_up": "volume_up",
+        },
+    }
+    service = services.get(entity.domain, {}).get(action)
+    if not service or not entity.is_supported:
+        raise HomeAssistantError("Deze bediening is niet beschikbaar voor dit apparaat.")
+
+    payload = {"entity_id": entity.entity_id}
+    if action == "set_temperature":
+        try:
+            temperature = float(str(target_temperature).replace(",", "."))
+        except (TypeError, ValueError) as error:
+            raise HomeAssistantError("Vul een geldige temperatuur in.") from error
+        attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+        minimum = float(attributes.get("min_temp", 5))
+        maximum = float(attributes.get("max_temp", 35))
+        if not minimum <= temperature <= maximum:
+            raise HomeAssistantError(f"Kies een temperatuur tussen {minimum:g} en {maximum:g} °C.")
+        payload["temperature"] = temperature
+    return service, payload
+
+
+def _action_detail(action, payload):
+    labels = {
+        "activate": "Scène gestart.",
+        "run": "Script gestart.",
+        "open": "Openen uitgevoerd.",
+        "close": "Sluiten uitgevoerd.",
+        "stop": "Actie gestopt.",
+        "on": "Ingeschakeld.",
+        "off": "Uitgeschakeld.",
+        "play_pause": "Afspelen gepauzeerd of hervat.",
+        "volume_down": "Volume verlaagd.",
+        "volume_up": "Volume verhoogd.",
+    }
+    if action == "set_temperature":
+        return f"Temperatuur ingesteld op {payload['temperature']:g} °C."
+    return labels[action]
+
+
+def control_entity(household, entity, action, target_temperature=None):
+    if entity.source == HomeEntity.Source.HUE:
+        from integrations.providers import ProviderError, control_hue_light, sync_hue
+
+        try:
+            detail = control_hue_light(entity, action, target_temperature)
+            sync_hue(entity.connection)
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail=detail)
+            return
+        except ProviderError as error:
+            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
+            raise HomeAssistantError(str(error)) from error
     config = HomeAssistantConfig.objects.for_household(household).first()
     if not config:
         raise HomeAssistantError("Home Assistant is nog niet gekoppeld.")
-    if action not in {"on", "off"} or not entity.is_supported:
-        raise HomeAssistantError("Deze entiteit is alleen ter inzage beschikbaar.")
-    if entity.domain in {"scene", "script"} and action != "on":
-        raise HomeAssistantError("Deze entiteit kan alleen worden gestart.")
-    service = "open_cover" if entity.domain == "cover" and action == "on" else "close_cover" if entity.domain == "cover" else "turn_on" if entity.domain in {"scene", "script"} else f"turn_{action}"
     try:
-        _request(config, "POST", f"/api/services/{entity.domain}/{service}", {"entity_id": entity.entity_id})
-        HomeActionAudit.objects.create(household=household, entity=entity, action=service, succeeded=True, detail="Actie uitgevoerd.")
+        service, payload = _service_call_for(entity, action, target_temperature)
+        _request(config, "POST", f"/api/services/{entity.domain}/{service}", payload)
+        HomeActionAudit.objects.create(household=household, entity=entity, action=service, succeeded=True, detail=_action_detail(action, payload))
         sync_entities(household)
     except HomeAssistantError as error:
         HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))

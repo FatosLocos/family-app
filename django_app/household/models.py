@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from common.scoping import HouseholdManager
 from households.models import Household
@@ -65,11 +66,19 @@ class MealPlan(HouseholdRecord):
 class Routine(HouseholdRecord):
     title = models.CharField(max_length=200)
     cadence = models.CharField(max_length=80, default="wekelijks")
+    interval_days = models.PositiveSmallIntegerField(default=7)
+    next_due_on = models.DateField(default=timezone.localdate)
+    last_completed_at = models.DateTimeField(null=True, blank=True)
     assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     is_active = models.BooleanField(default=True)
 
 
 class ShoppingPrice(HouseholdRecord):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Handmatig"
+        CHECKJEBON = "checkjebon", "Checkjebon"
+        PRIJSPROFEET = "prijsprofeet", "PrijsProfeet"
+
     class Retailer(models.TextChoices):
         ALBERT_HEIJN = "ah", "Albert Heijn"
         JUMBO = "jumbo", "Jumbo"
@@ -82,12 +91,34 @@ class ShoppingPrice(HouseholdRecord):
     unit_label = models.CharField(max_length=60, blank=True)
     is_offer = models.BooleanField(default=False)
     offer_label = models.CharField(max_length=160, blank=True)
+    regular_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    offer_valid_until = models.DateField(null=True, blank=True)
     product_url = models.URLField(blank=True)
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.MANUAL)
+    matched_product_name = models.CharField(max_length=240, blank=True)
     observed_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=("item", "retailer"), name="unique_price_per_item_retailer")]
         ordering = ("price",)
+
+
+class ShoppingPriceSnapshot(HouseholdRecord):
+    """An immutable observation for a meaningful retailer price change."""
+
+    item = models.ForeignKey(ShoppingItem, on_delete=models.CASCADE, related_name="price_snapshots")
+    retailer = models.CharField(max_length=20, choices=ShoppingPrice.Retailer.choices)
+    price = models.DecimalField(max_digits=8, decimal_places=2)
+    unit_label = models.CharField(max_length=60, blank=True)
+    is_offer = models.BooleanField(default=False)
+    offer_label = models.CharField(max_length=160, blank=True)
+    regular_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    source = models.CharField(max_length=20, choices=ShoppingPrice.Source.choices)
+    observed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-observed_at",)
+        indexes = [models.Index(fields=("item", "retailer", "-observed_at"), name="shopping_price_history_idx")]
 
 
 def receipt_upload_path(instance, filename):

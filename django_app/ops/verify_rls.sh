@@ -9,9 +9,25 @@ if [ -n "${DATABASE_URL:-}" ]; then
 else
   compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
   env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
+  compose() {
+    docker compose --env-file "$env_file" -f "$compose_file" "$@"
+  }
+  app_db_name="${APP_DB_NAME:-$(compose exec -T postgres printenv APP_DB_NAME)}"
+  app_db_user="${APP_DB_USER:-$(compose exec -T postgres printenv APP_DB_USER)}"
+  case "$app_db_name" in
+    ''|*[!A-Za-z0-9_]* )
+      echo "Ongeldige PostgreSQL-databasenaam." >&2
+      exit 64
+      ;;
+  esac
+  case "$app_db_user" in
+    ''|*[!A-Za-z0-9_]* )
+      echo "Ongeldige PostgreSQL-appgebruiker." >&2
+      exit 64
+      ;;
+  esac
   run_psql() {
-    docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-      psql -v ON_ERROR_STOP=1 -U family_app -d family_app
+    compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$app_db_user" -d "$app_db_name"
   }
 fi
 
@@ -27,7 +43,7 @@ BEGIN
   FROM (
     VALUES
       ('family_bulletinpost'), ('family_contact'), ('family_contactperson'), ('family_wishlist'), ('family_wishitem'), ('family_wishreservation'),
-      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_receipt'), ('household_mealplan'), ('household_routine'),
+      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_receipt'), ('household_mealplan'), ('household_routine'),
       ('planning_calendarsource'), ('planning_calendarevent'), ('planning_icssubscription'),
       ('finance_bankconnection'), ('finance_bankaccount'), ('finance_transaction'), ('finance_recurringrule'), ('finance_budget'),
       ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'),

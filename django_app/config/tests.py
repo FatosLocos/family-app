@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from unittest.mock import patch
 
 from django.db import DatabaseError
@@ -6,6 +7,7 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from config import views
+from family.models import Contact, ContactPerson
 from household.models import Task
 from households.models import Household, Membership
 from identity.models import User
@@ -61,3 +63,22 @@ class HouseholdSearchTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Service-Worker-Allowed"], "/")
         self.assertContains(response, 'const OFFLINE_URL = "/offline/"')
+
+    def test_authenticated_pages_reject_embedding_in_a_frame(self):
+        response = self.client.get(reverse("today"))
+
+        self.assertEqual(response["X-Frame-Options"], "DENY")
+
+    @patch("config.views.timezone.localdate", return_value=date(2026, 7, 14))
+    def test_today_shows_upcoming_birthdays_from_the_active_household(self, _localdate):
+        contact = Contact.objects.create(household=self.household, name="Familie Jansen")
+        ContactPerson.objects.create(household=self.household, contact=contact, name="Morgen", birth_date=date(2000, 7, 15))
+        other_contact = Contact.objects.create(household=self.other_household, name="Andere familie")
+        ContactPerson.objects.create(household=self.other_household, contact=other_contact, name="Privé verjaardag", birth_date=date(2000, 7, 15))
+
+        response = self.client.get(reverse("today"))
+
+        self.assertContains(response, "Verjaardagen")
+        self.assertContains(response, "Morgen")
+        self.assertContains(response, "wordt 26")
+        self.assertNotContains(response, "Privé verjaardag")

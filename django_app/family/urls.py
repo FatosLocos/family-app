@@ -14,6 +14,7 @@ urlpatterns = [
     path("personen/<int:person_id>/aanpassen/", views.update_person, name="update_person"),
     path("personen/<int:person_id>/verwijderen/", views.delete_person, name="delete_person"),
     path("wensen/toevoegen/", views.add_wish, name="add_wish"),
+    path("wensen/metadata/", views.preview_wish_metadata, name="preview_wish_metadata"),
     path("wensen/<int:item_id>/aanpassen/", views.update_wish, name="update_wish"),
     path("wensen/<int:item_id>/verwijderen/", views.delete_wish, name="delete_wish"),
     path("wensen/<int:wishlist_id>/delen/", views.toggle_wishlist_share, name="toggle_wishlist_share"),

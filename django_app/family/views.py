@@ -1,16 +1,17 @@
-from datetime import date
-
 from django.contrib import messages
 from django.db.models import Q
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 import secrets
 from urllib.parse import urlencode
 from django.views.decorators.http import require_POST
 
 from family.forms import BulletinPostForm, ContactForm, ContactPersonForm, VCardImportForm, WishItemForm
+from family.birthdays import upcoming_birthdays
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
+from family.wishlist_metadata import WishlistMetadataError, fetch_wishlist_metadata
 from family.vcard import contacts_as_vcard, parse_vcards
 from households.decorators import household_required, parent_required
 from households.forms import InviteForm
@@ -25,7 +26,10 @@ def index(request):
     contacts = Contact.objects.for_household(household).prefetch_related("people")
     if query:
         contacts = contacts.filter(Q(name__icontains=query) | Q(people__name__icontains=query)).distinct()
-    birthdays = ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).order_by("birth_date")
+    birthdays = upcoming_birthdays(
+        ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).select_related("contact"),
+        timezone.localdate(),
+    )
     memberships = Membership.objects.filter(household=household).select_related("user").order_by("role", "user__display_name", "user__email")
     wishlist_owner = request.user
     requested_owner = request.GET.get("wishlist_for")
@@ -47,7 +51,7 @@ def index(request):
     })
 
 
-@household_required
+@parent_required
 @require_POST
 def add_contact(request):
     form = ContactForm(request.POST)
@@ -64,7 +68,7 @@ def _family_tab_redirect(tab: str, **params):
     return redirect(f"{reverse('family:index')}?{urlencode(query)}")
 
 
-@household_required
+@parent_required
 @require_POST
 def update_contact(request, contact_id):
     contact = get_object_or_404(Contact.objects.for_household(request.household), pk=contact_id)
@@ -77,7 +81,7 @@ def update_contact(request, contact_id):
     return _family_tab_redirect("contacten")
 
 
-@household_required
+@parent_required
 @require_POST
 def delete_contact(request, contact_id):
     contact = get_object_or_404(Contact.objects.for_household(request.household), pk=contact_id)
@@ -86,7 +90,7 @@ def delete_contact(request, contact_id):
     return _family_tab_redirect("contacten")
 
 
-@household_required
+@parent_required
 @require_POST
 def import_contacts(request):
     contacts_url = f"{reverse('family:index')}?tab=contacten"
@@ -111,7 +115,7 @@ def import_contacts(request):
     return redirect(contacts_url)
 
 
-@household_required
+@parent_required
 def export_contacts(request):
     contacts = Contact.objects.for_household(request.household).prefetch_related("people").order_by("name")
     response = HttpResponse(contacts_as_vcard(contacts), content_type="text/vcard; charset=utf-8")
@@ -167,18 +171,57 @@ def add_wish(request):
             return redirect(f"{reverse('family:index')}?tab=wensen")
         owner = membership.user
     wishlist, _ = WishList.objects.get_or_create(household=request.household, owner=owner, defaults={"title": f"Wensen van {owner.display_name or owner.email}"})
-    form = WishItemForm(request.POST)
+    form = _wish_form_with_metadata(request.POST)
     if form.is_valid():
         item = form.save(commit=False)
         item.household = request.household
         item.wishlist = wishlist
         item.save()
         messages.success(request, "Wens toegevoegd.")
+    else:
+        messages.error(request, "Vul een wens in of gebruik een productlink met herkenbare gegevens.")
     return redirect(f"{reverse('family:index')}?tab=wensen&wishlist_for={owner.id}")
 
 
 def _can_manage_wishlist(request, wishlist):
     return wishlist.owner_id == request.user.id or request.membership.can_manage
+
+
+def _wish_form_with_metadata(data, instance=None):
+    """Use page metadata only for fields the person did not fill in themselves."""
+
+    values = data.copy()
+    url = values.get("url", "").strip()
+    # Browser preview fills all attributes. This fallback keeps URL-only submits
+    # usable without making every later edit depend on an external product page.
+    needs_metadata = url and any(not values.get(field, "").strip() for field in ("title", "price"))
+    if needs_metadata:
+        try:
+            metadata = fetch_wishlist_metadata(url)
+        except WishlistMetadataError:
+            metadata = None
+        if metadata:
+            if not values.get("title", "").strip():
+                values["title"] = metadata.title
+            if not values.get("price", "").strip() and metadata.price is not None:
+                values["price"] = f"{metadata.price:.2f}"
+            if not values.get("category", "").strip():
+                values["category"] = metadata.category
+            if not values.get("image_url", "").strip():
+                values["image_url"] = metadata.image_url
+    return WishItemForm(values, instance=instance)
+
+
+@household_required
+def preview_wish_metadata(request):
+    url = request.GET.get("url", "").strip()
+    if not url:
+        return JsonResponse({"error": "Voer eerst een productlink in."}, status=400)
+    try:
+        metadata = fetch_wishlist_metadata(url)
+    except WishlistMetadataError as error:
+        return JsonResponse({"error": str(error)}, status=422)
+    return JsonResponse(metadata.as_json())
 
 
 @household_required
@@ -187,7 +230,7 @@ def update_wish(request, item_id):
     item = get_object_or_404(WishItem.objects.for_household(request.household).select_related("wishlist"), pk=item_id)
     if not _can_manage_wishlist(request, item.wishlist):
         return HttpResponse(status=403)
-    form = WishItemForm(request.POST, instance=item)
+    form = _wish_form_with_metadata(request.POST, instance=item)
     if form.is_valid():
         form.save()
         messages.success(request, "Wens aangepast.")

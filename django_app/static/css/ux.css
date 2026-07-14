@@ -122,9 +122,23 @@ button.is-pending::after {
   font-size: 13px;
 }
 
+.network-status[hidden] {
+  display: none;
+}
+
 .network-status svg {
   width: 17px;
   color: var(--negative);
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.panel-actions form {
+  margin: 0;
 }
 
 .offline-page {
