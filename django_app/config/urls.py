@@ -6,6 +6,8 @@ from config import views
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", views.today, name="today"),
+    path("offline/", views.offline, name="offline"),
+    path("service-worker.js", views.service_worker, name="service_worker"),
     path("zoeken/", views.search, name="search"),
     path("healthz", views.healthz, name="healthz"),
     path("account/", include("identity.urls")),

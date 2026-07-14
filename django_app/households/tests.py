@@ -30,6 +30,23 @@ class InviteFlowTests(TestCase):
         invite.refresh_from_db()
         self.assertEqual(invite.accepted_by, child)
 
+    def test_new_user_creates_an_owned_household_during_signup(self):
+        response = self.client.post(reverse("identity:signup"), {
+            "display_name": "Nieuwe ouder",
+            "household_name": "Nieuw gezin",
+            "email": "nieuw@example.com",
+            "password1": "safe-password-123",
+            "password2": "safe-password-123",
+        }, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(email="nieuw@example.com")
+        self.assertTrue(Membership.objects.filter(
+            household__name="Nieuw gezin",
+            user=user,
+            role=Membership.Role.OWNER,
+        ).exists())
+
     def test_child_cannot_create_invite_or_change_a_role(self):
         child = User.objects.create_user(username="kind@example.com", email="kind@example.com", password="safe-password-123")
         child_membership = Membership.objects.create(household=self.household, user=child, role=Membership.Role.CHILD)

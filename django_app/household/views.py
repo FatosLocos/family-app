@@ -7,6 +7,7 @@ from django.views.decorators.http import require_POST
 from households.decorators import household_required
 from household.forms import MealPlanForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
 from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, Task
+from household.receipt_matching import match_receipt_to_transaction
 from notifications.models import Notification
 from household.tasks import process_receipt_ocr
 
@@ -29,6 +30,10 @@ def index(request):
     task_form.fields["assigned_to"].queryset = members
     routine_form = RoutineForm()
     routine_form.fields["assigned_to"].queryset = members
+    receipts = list(Receipt.objects.for_household(household).select_related("transaction", "transaction__account")[:30])
+    for receipt in receipts:
+        receipt.bank_amount = abs(receipt.transaction.amount) if receipt.transaction_id else None
+        receipt.amount_difference = abs(receipt.bank_amount - receipt.total_amount) if receipt.transaction_id and receipt.total_amount else None
     context = {
         "tab": tab, "task_filter": task_filter,
         "task_form": task_form, "shopping_form": ShoppingItemForm(), "meal_form": MealPlanForm(), "routine_form": routine_form,
@@ -36,7 +41,7 @@ def index(request):
         "shopping_items": ShoppingItem.objects.for_household(household).filter(list=default_list)[:50],
         "price_items": ShoppingItem.objects.for_household(household).filter(list=default_list).prefetch_related("prices")[:50],
         "price_form": ShoppingPriceForm(),
-        "receipts": Receipt.objects.for_household(household).select_related("transaction")[:30],
+        "receipts": receipts,
         "receipt_form": ReceiptForm(),
         "meals": MealPlan.objects.for_household(household).order_by("planned_for")[:14],
         "routines": Routine.objects.for_household(household).filter(is_active=True).select_related("assigned_to"),
@@ -193,8 +198,9 @@ def add_receipt(request):
     form = ReceiptForm(request.POST, request.FILES)
     if form.is_valid():
         receipt = Receipt.objects.create(household=request.household, **form.cleaned_data)
+        matched = match_receipt_to_transaction(receipt)
         process_receipt_ocr.delay(receipt.id, request.household.id)
-        messages.success(request, "Bon opgeslagen. Tekstherkenning staat in de wachtrij.")
+        messages.success("Bon opgeslagen en gekoppeld aan een banktransactie." if matched else "Bon opgeslagen. Tekstherkenning staat in de wachtrij.")
     else:
         messages.error(request, "Controleer de bon.")
     return _household_tab_redirect("inzicht")

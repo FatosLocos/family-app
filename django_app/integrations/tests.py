@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -6,10 +7,11 @@ from django.urls import reverse
 from django.utils import timezone
 
 from finance.models import BankAccount, Transaction
+from household.models import Task
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
-from integrations.models import IntegrationAudit, IntegrationConnection
+from integrations.models import IntegrationAudit, IntegrationConnection, SyncRun
 from integrations.providers import sync_bunq, sync_outlook
 from integrations.tasks import sync_connection_task
 from planning.models import CalendarEvent, CalendarSource
@@ -110,6 +112,21 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(audit.action, IntegrationAudit.Action.SYNC_SUCCEEDED)
         self.assertNotIn("token", audit.detail.lower())
 
+    def test_sync_task_skips_a_connection_that_is_already_running(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+        )
+        SyncRun.objects.create(household=self.household, connection=connection, status="running")
+
+        with patch("integrations.tasks.sync_connection") as sync:
+            result = sync_connection_task(connection.id, self.household.id)
+
+        self.assertEqual(result, {"status": "already_running"})
+        sync.assert_not_called()
+
 
 class SettingsAccessTests(TestCase):
     def setUp(self):
@@ -161,3 +178,52 @@ class SettingsAccessTests(TestCase):
         audit = IntegrationAudit.objects.get(household=self.household, action=IntegrationAudit.Action.DISCONNECTED)
         self.assertIsNone(audit.connection)
         self.assertEqual(audit.provider, "outlook")
+
+    def test_settings_renders_a_connection_waiting_for_authorization(self):
+        IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.owner,
+            provider="outlook",
+            display_name="Outlook agenda",
+            status="needs_auth",
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("integrations:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Wacht op toestemming")
+
+
+class HouseholdDataExportTests(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(username="owner@example.com", email="owner@example.com", password="safe-password-123")
+        self.child = User.objects.create_user(username="child@example.com", email="child@example.com", password="safe-password-123")
+        self.other_user = User.objects.create_user(username="other@example.com", email="other@example.com", password="safe-password-123")
+        self.household = Household.objects.create(name="Eigen gezin")
+        self.other_household = Household.objects.create(name="Ander gezin")
+        Membership.objects.create(household=self.household, user=self.owner, role=Membership.Role.OWNER)
+        Membership.objects.create(household=self.household, user=self.child, role=Membership.Role.CHILD)
+        Membership.objects.create(household=self.other_household, user=self.other_user, role=Membership.Role.OWNER)
+        Task.objects.create(household=self.household, title="Eigen taak")
+        Task.objects.create(household=self.other_household, title="Andere taak")
+        IntegrationConnection.objects.create(household=self.household, user=self.owner, provider="outlook", display_name="Outlook", secret_encrypted=encrypt("gevoelig-token"))
+
+    def test_owner_can_export_only_own_household_data_without_secrets(self):
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("integrations:export_household_data"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/json; charset=utf-8")
+        self.assertIn("attachment", response["Content-Disposition"])
+        payload = json.loads(response.content)
+        self.assertEqual(payload["household"]["name"], "Eigen gezin")
+        self.assertEqual([task["title"] for task in payload["household_data"]["tasks"]], ["Eigen taak"])
+        self.assertNotIn("gevoelig-token", response.content.decode())
+        self.assertNotIn("secret_encrypted", response.content.decode())
+
+    def test_child_cannot_export_household_data(self):
+        self.client.force_login(self.child)
+
+        self.assertEqual(self.client.get(reverse("integrations:export_household_data")).status_code, 403)

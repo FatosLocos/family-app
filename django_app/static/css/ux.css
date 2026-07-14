@@ -1,0 +1,202 @@
+/* Shared interaction and accessibility rules for every Django module. */
+:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.desktop-dock > a,
+.desktop-dock > details > summary {
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  min-height: 38px;
+  padding: 8px;
+}
+
+.desktop-dock > a span,
+.desktop-dock > details > summary span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.desktop-dock > a.is-active,
+.desktop-dock > a[aria-current="page"],
+.mobile-dock > a.is-active,
+.mobile-dock > a[aria-current="page"] {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.speed-panel::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -10px;
+  width: 100%;
+  height: 12px;
+}
+
+.modal[open],
+.command-palette[open] {
+  animation: modal-in 160ms ease-out;
+}
+
+.modal.is-closing,
+.command-palette.is-closing {
+  animation: modal-out 140ms ease-in forwards;
+}
+
+.modal.is-closing::backdrop,
+.command-palette.is-closing::backdrop {
+  animation: backdrop-out 140ms ease-in forwards;
+}
+
+@keyframes modal-out {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes backdrop-out {
+  to { opacity: 0; }
+}
+
+form :is(input, select, textarea).is-invalid {
+  border-color: var(--negative);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--negative) 18%, transparent);
+}
+
+button.is-pending {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+button.is-pending::after {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: button-spin 650ms linear infinite;
+}
+
+.receipt-match {
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--positive) !important;
+}
+
+.receipt-match svg {
+  width: 13px;
+  height: 13px;
+}
+
+.receipt-match.is-unmatched {
+  color: var(--muted) !important;
+}
+
+.network-status {
+  position: fixed;
+  z-index: 60;
+  top: 76px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(440px, calc(100vw - 28px));
+  padding: 9px 12px;
+  transform: translateX(-50%);
+  border: 1px solid color-mix(in srgb, var(--negative) 42%, var(--line));
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.network-status svg {
+  width: 17px;
+  color: var(--negative);
+}
+
+.offline-page {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: min(620px, 100%);
+  margin: 16vh auto 0;
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.offline-page > svg {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+}
+
+.offline-page h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.offline-page p:not(.eyebrow) {
+  margin: 8px 0 18px;
+  color: var(--muted);
+}
+
+@keyframes button-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (min-width: 761px) {
+  .desktop-dock > a:hover::after,
+  .desktop-dock > details > summary:hover::after {
+    content: attr(title);
+    position: absolute;
+    top: calc(100% + 10px);
+    padding: 5px 7px;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--surface);
+    font-size: 11px;
+    font-weight: 650;
+    white-space: nowrap;
+    box-shadow: var(--shadow);
+  }
+}
+
+@media (max-width: 760px) {
+  .desktop-dock > a span,
+  .desktop-dock > details > summary span {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+  }
+
+  .network-status { top: 60px; }
+  .offline-page { margin-top: 10vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

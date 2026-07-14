@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Offline · Family App{% endblock %}
+{% block content %}
+<section class="offline-page" aria-labelledby="offline-title">
+  <i data-lucide="cloud-off"></i>
+  <div>
+    <p class="eyebrow">Geen verbinding</p>
+    <h1 id="offline-title">Family App is tijdelijk offline.</h1>
+    <p>Controleer je verbinding en probeer het daarna opnieuw.</p>
+    <button class="button button-primary" type="button" onclick="window.location.reload()">Opnieuw proberen</button>
+  </div>
+</section>
+{% endblock %}
