@@ -71,9 +71,33 @@
 {% elif tab == 'prijzen' %}
   <section class="content-panel price-panel">
     <div class="panel-heading"><div><h2>Prijsvergelijking</h2><small>Indicatieve basisprijzen via Checkjebon en aanbiedingen via PrijsProfeet.{% if latest_price_at %} Bijgewerkt {{ latest_price_at|date:'d M H:i' }}.{% endif %}</small></div><div class="panel-actions"><form method="post" action="{% url 'household:refresh_prices' %}">{% csrf_token %}<button class="icon-button" title="Prijzen nu verversen" aria-label="Prijzen nu verversen"><i data-lucide="refresh-cw"></i></button></form><span class="status-pill">{{ price_items|length }} producten</span></div></div>
-    <div class="price-totals" aria-label="Geschat mandjetotaal per supermarkt">{% for total in price_totals %}<div class="retailer-{{ total.retailer }}"><span>{{ total.label }}</span><strong>€ {{ total.total|floatformat:2 }}</strong><small>{% if total.missing_items %}{{ total.priced_items }} van {{ price_items|length }} geprijsd{% else %}Volledig mandje{% endif %}</small></div>{% endfor %}</div>
-    <div class="price-grid-head"><span>Product</span><div class="price-supermarket-headings">{% for retailer, label in retailer_choices %}<span class="retailer-{{ retailer }}" title="{{ label }}">{{ label }}</span>{% endfor %}</div><span aria-hidden="true"></span></div>
-    {% for row in price_rows %}<article class="price-grid-row"><div class="price-product"><strong>{{ row.item.name }}</strong>{% if row.item.quantity %}<small>{{ row.item.quantity }}</small>{% endif %}</div><div class="price-comparison-cells">{% for cell in row.cells %}<div class="price-cell retailer-{{ cell.retailer }}{% if not cell.price %} is-empty{% endif %}" aria-label="{{ cell.label }}">{% if cell.price %}<div><strong>€ {{ cell.price.price }}</strong>{% if cell.price.unit_label %}<small>{{ cell.price.unit_label }}</small>{% endif %}{% if cell.price.matched_product_name and cell.price.matched_product_name != row.item.name %}<small>{{ cell.price.matched_product_name }}</small>{% endif %}</div>{% if cell.price.product_url %}<a class="icon-button price-link" href="{{ cell.price.product_url }}" target="_blank" rel="noreferrer" title="{{ cell.label }} product bekijken" aria-label="{{ cell.label }} product bekijken"><i data-lucide="external-link"></i></a>{% endif %}{% if cell.price.is_offer %}<em>{{ cell.price.offer_label|default:'Aanbieding' }}{% if cell.price.offer_valid_until %} t/m {{ cell.price.offer_valid_until|date:'d M' }}{% endif %}</em>{% endif %}{% else %}<span aria-label="Geen prijswaarneming">-</span>{% endif %}</div>{% endfor %}</div><button class="icon-button" type="button" data-open-dialog="price-dialog-{{ row.item.id }}" title="Prijs toevoegen"><i data-lucide="plus"></i></button></article>{% if row.history %}<details class="price-history"><summary>Prijsverloop ({{ row.history|length }})</summary><ol>{% for snapshot in row.history %}<li><time datetime="{{ snapshot.observed_at|date:'c' }}">{{ snapshot.observed_at|date:'d M' }}</time><span>{{ snapshot.get_retailer_display }}</span><strong>€ {{ snapshot.price }}</strong><small>{{ snapshot.get_source_display }}{% if snapshot.is_offer %} · aanbieding{% endif %}</small></li>{% endfor %}</ol></details>{% endif %}<dialog id="price-dialog-{{ row.item.id }}" class="modal"><form method="post" action="{% url 'household:save_shopping_price' row.item.id %}">{% csrf_token %}<div class="dialog-title"><h2>Prijs voor {{ row.item.name }}</h2><button class="icon-button" type="button" data-close-dialog><i data-lucide="x"></i></button></div>{{ price_form.as_p }}<button class="button button-primary">Opslaan</button></form></dialog>{% empty %}<p class="empty-copy">Voeg producten toe aan je lijst om prijzen te vergelijken.</p>{% endfor %}
+    <div class="price-matrix" aria-label="Prijsvergelijking per product en supermarkt">
+      <div class="price-matrix-inner">
+        <div class="price-grid-head">
+          <span>Product</span>
+          {% for header in price_retailer_headers %}
+            <div class="price-store-heading retailer-{{ header.retailer }}" title="{{ header.label }}">
+              <span class="retailer-mark" aria-hidden="true">{{ header.mark }}</span>
+              <div><strong>{{ header.label }}</strong>{% if header.priced_items %}<small>€ {{ header.total|floatformat:2 }} · {{ header.priced_items }}/{{ price_items|length }}</small>{% else %}<small>Nog niet geprijsd</small>{% endif %}</div>
+            </div>
+          {% endfor %}
+        </div>
+        {% for row in price_rows %}
+          <article class="price-grid-row">
+            <div class="price-product"><div><strong>{{ row.item.name }}</strong>{% if row.item.quantity %}<small>{{ row.item.quantity }}</small>{% endif %}</div><button class="icon-button price-add-action" type="button" data-open-dialog="price-dialog-{{ row.item.id }}" title="Prijs handmatig toevoegen" aria-label="Prijs voor {{ row.item.name }} handmatig toevoegen"><i data-lucide="plus"></i></button></div>
+            {% for cell in row.cells %}
+              <div class="price-cell retailer-{{ cell.retailer }}{% if not cell.price %} is-empty{% endif %}" aria-label="{{ cell.label }}">
+                {% if cell.price %}
+                  <div><strong>€ {{ cell.price.price }}</strong>{% if cell.price.unit_label %}<small>{{ cell.price.unit_label }}</small>{% endif %}{% if cell.price.matched_product_name and cell.price.matched_product_name != row.item.name %}<small>{{ cell.price.matched_product_name }}</small>{% endif %}{% if cell.price.is_offer %}<em>{{ cell.price.offer_label|default:'Aanbieding' }}{% if cell.price.offer_valid_until %} t/m {{ cell.price.offer_valid_until|date:'d M' }}{% endif %}</em>{% endif %}</div>{% if cell.price.product_url %}<a class="icon-button price-link" href="{{ cell.price.product_url }}" target="_blank" rel="noreferrer" title="{{ cell.label }} product bekijken" aria-label="{{ cell.label }} product bekijken"><i data-lucide="external-link"></i></a>{% endif %}
+                {% else %}<span>Niet beschikbaar</span>{% endif %}
+              </div>
+            {% endfor %}
+          </article>
+          {% if row.history %}<details class="price-history"><summary>Prijsverloop ({{ row.history|length }})</summary><ol>{% for snapshot in row.history %}<li><time datetime="{{ snapshot.observed_at|date:'c' }}">{{ snapshot.observed_at|date:'d M' }}</time><span>{{ snapshot.get_retailer_display }}</span><strong>€ {{ snapshot.price }}</strong><small>{{ snapshot.get_source_display }}{% if snapshot.is_offer %} · aanbieding{% endif %}</small></li>{% endfor %}</ol></details>{% endif %}
+          <dialog id="price-dialog-{{ row.item.id }}" class="modal"><form method="post" action="{% url 'household:save_shopping_price' row.item.id %}">{% csrf_token %}<div class="dialog-title"><h2>Prijs voor {{ row.item.name }}</h2><button class="icon-button" type="button" data-close-dialog><i data-lucide="x"></i></button></div>{{ price_form.as_p }}<button class="button button-primary">Opslaan</button></form></dialog>
+        {% empty %}<p class="empty-copy">Voeg producten toe aan je lijst om prijzen te vergelijken.</p>{% endfor %}
+      </div>
+    </div>
   </section>
 
 {% elif tab == 'inzicht' %}

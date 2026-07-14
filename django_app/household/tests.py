@@ -133,15 +133,19 @@ class HouseholdIsolationTests(TestCase):
 
         response = self.client.get(reverse("household:index"), {"tab": "prijzen"})
 
-        self.assertContains(response, 'class="price-comparison-cells"')
+        self.assertContains(response, 'class="price-matrix"')
         self.assertContains(response, 'retailer-ah')
         self.assertContains(response, 'retailer-jumbo is-empty')
         self.assertContains(response, 'retailer-lidl is-empty')
         self.assertContains(response, 'retailer-kaufland')
+        self.assertContains(response, "Nog niet geprijsd")
+        self.assertContains(response, "Niet beschikbaar")
         self.assertContains(response, 'https://example.test/koffie')
         totals = {total["retailer"]: total for total in response.context["price_totals"]}
+        headers = {header["retailer"]: header for header in response.context["price_retailer_headers"]}
         self.assertEqual(totals[ShoppingPrice.Retailer.ALBERT_HEIJN]["total"], Decimal("4.49"))
         self.assertEqual(totals[ShoppingPrice.Retailer.KAUFLAND]["missing_items"], 0)
+        self.assertEqual(headers[ShoppingPrice.Retailer.JUMBO]["priced_items"], 0)
 
     def test_insights_show_frequent_products_and_price_movement(self):
         self.client.force_login(self.owner)
