@@ -75,7 +75,14 @@ Installeer vervolgens `ops/systemd/family-app-backup.service` en
 `sudo systemctl daemon-reload` uit en activeer de timer met
 `sudo systemctl enable --now family-app-backup.timer`.
 
-Voer eerst op een onderhoudsmoment een hersteltest uit op de nieuwe stack. Het script vraagt expliciet om `HERSTEL` en overschrijft alleen de PostgreSQL-database van deze Compose-stack:
+Valideer eerst iedere nieuwe back-up zonder productiedata te raken. Dit herstelt de dump in een tijdelijke controle-database, controleert het media-archief en verwijdert die tijdelijke database direct weer:
+
+```bash
+COMPOSE_FILE=/opt/family-app/docker-compose.django.yml ENV_FILE=/opt/family-app/django_app/.env \
+  /opt/family-app/django_app/ops/verify-backup.sh /var/backups/family_app/family_app-YYYY-MM-DDTHH-MM-SS.dump
+```
+
+Voer daarna op een onderhoudsmoment de volledige hersteltest uit op de nieuwe stack. Het script vraagt expliciet om `HERSTEL` en overschrijft alleen de PostgreSQL-database van deze Compose-stack:
 
 ```bash
 COMPOSE_FILE=/opt/family-app/docker-compose.django.yml ENV_FILE=/opt/family-app/django_app/.env \
