@@ -6,7 +6,8 @@ from django.shortcuts import render
 from django.db.models import Q
 from django.utils import timezone
 
-from family.models import Contact, WishItem
+from family.birthdays import upcoming_birthdays
+from family.models import Contact, ContactPerson, WishItem
 from finance.models import Transaction
 from household.models import ShoppingItem, Task
 from notifications.models import Notification
@@ -42,8 +43,12 @@ def today(request):
     shopping = ShoppingItem.objects.for_household(household).filter(completed_at__isnull=True).select_related("list")[:5]
     events = CalendarEvent.objects.for_household(household).filter(ends_at__gte=now).order_by("starts_at")[:5]
     notifications = Notification.objects.for_household(household).filter(read_at__isnull=True).order_by("-created_at")[:4]
+    birthdays = upcoming_birthdays(
+        ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).select_related("contact"),
+        timezone.localdate(),
+    )[:3]
     return render(request, "today/index.html", {
-        "tasks": tasks, "shopping_items": shopping, "events": events, "notifications": notifications,
+        "tasks": tasks, "shopping_items": shopping, "events": events, "notifications": notifications, "birthdays": birthdays,
         "today": timezone.localdate(),
     })
 
