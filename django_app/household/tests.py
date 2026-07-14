@@ -143,6 +143,22 @@ class HouseholdIsolationTests(TestCase):
         self.assertEqual(totals[ShoppingPrice.Retailer.ALBERT_HEIJN]["total"], Decimal("4.49"))
         self.assertEqual(totals[ShoppingPrice.Retailer.KAUFLAND]["missing_items"], 0)
 
+    def test_insights_show_frequent_products_and_price_movement(self):
+        self.client.force_login(self.owner)
+        shopping_list = ShoppingList.objects.create(household=self.first_household, name="Boodschappen")
+        first = ShoppingItem.objects.create(household=self.first_household, list=shopping_list, name="Komkommer", completed_at=timezone.now() - timedelta(days=15))
+        ShoppingItem.objects.create(household=self.first_household, list=shopping_list, name="Komkommer", completed_at=timezone.now() - timedelta(days=3))
+        old_snapshot = ShoppingPriceSnapshot.objects.create(household=self.first_household, item=first, retailer=ShoppingPrice.Retailer.JUMBO, price="0.89", source=ShoppingPrice.Source.MANUAL)
+        current_snapshot = ShoppingPriceSnapshot.objects.create(household=self.first_household, item=first, retailer=ShoppingPrice.Retailer.JUMBO, price="1.19", source=ShoppingPrice.Source.MANUAL)
+        ShoppingPriceSnapshot.objects.filter(pk=old_snapshot.pk).update(observed_at=timezone.now() - timedelta(days=14))
+        ShoppingPriceSnapshot.objects.filter(pk=current_snapshot.pk).update(observed_at=timezone.now() - timedelta(days=1))
+
+        response = self.client.get(reverse("household:index"), {"tab": "inzicht"})
+
+        self.assertContains(response, "Boodschappatronen")
+        self.assertContains(response, "Komkommer")
+        self.assertContains(response, "+€ 0,30")
+
     @patch("household.price_providers.requests.get")
     def test_checkjebon_provider_prefers_the_matching_package_size(self, get):
         from household import price_providers

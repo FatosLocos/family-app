@@ -1,4 +1,5 @@
 from django.contrib import messages
+from django.db.models import Count, Max
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from datetime import timedelta
@@ -45,11 +46,37 @@ def index(request):
     for receipt in receipts:
         receipt.bank_amount = abs(receipt.transaction.amount) if receipt.transaction_id else None
         receipt.amount_difference = abs(receipt.bank_amount - receipt.total_amount) if receipt.transaction_id and receipt.total_amount else None
+    frequent_products = list(
+        ShoppingItem.objects.for_household(household)
+        .filter(completed_at__gte=timezone.now() - timedelta(days=90))
+        .values("name")
+        .annotate(times_bought=Count("id"), last_bought=Max("completed_at"))
+        .order_by("-times_bought", "-last_bought")[:8]
+    )
     price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices")[:50])
     snapshots_by_item = {}
     for snapshot in ShoppingPriceSnapshot.objects.for_household(household).filter(item__in=price_items).order_by("item_id", "-observed_at"):
         if len(snapshots_by_item.setdefault(snapshot.item_id, [])) < 8:
             snapshots_by_item[snapshot.item_id].append(snapshot)
+    price_trend_map = {}
+    for snapshot in ShoppingPriceSnapshot.objects.for_household(household).select_related("item").order_by("item_id", "retailer", "observed_at"):
+        key = (snapshot.item_id, snapshot.retailer)
+        trend = price_trend_map.setdefault(key, {"item_name": snapshot.item.name, "retailer": snapshot.retailer, "retailer_label": snapshot.get_retailer_display(), "first": snapshot, "latest": snapshot})
+        trend["latest"] = snapshot
+    price_trends = []
+    for trend in price_trend_map.values():
+        delta = trend["latest"].price - trend["first"].price
+        if not delta:
+            continue
+        price_trends.append({
+            "item_name": trend["item_name"],
+            "retailer_label": trend["retailer_label"],
+            "first_price": trend["first"].price,
+            "current_price": trend["latest"].price,
+            "delta": delta,
+            "direction": "up" if delta > 0 else "down",
+        })
+    price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)
     retailer_choices = ShoppingPrice.Retailer.choices
     price_rows = []
     latest_price_at = None
@@ -85,6 +112,8 @@ def index(request):
         "latest_price_at": latest_price_at,
         "price_form": ShoppingPriceForm(),
         "receipts": receipts,
+        "frequent_products": frequent_products,
+        "price_trends": price_trends[:8],
         "receipt_form": ReceiptForm(),
         "meals": MealPlan.objects.for_household(household).order_by("planned_for")[:14],
         "routines": Routine.objects.for_household(household).filter(is_active=True).select_related("assigned_to").order_by("next_due_on", "title"),
