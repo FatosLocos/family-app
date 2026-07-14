@@ -1,4 +1,4 @@
-const CACHE_NAME = "family-app-static-v3";
+const CACHE_NAME = "family-app-static-v4";
 const OFFLINE_URL = "/offline/";
 
 self.addEventListener("install", (event) => {

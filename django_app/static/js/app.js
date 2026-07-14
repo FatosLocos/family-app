@@ -203,5 +203,5 @@
     registerAgendaEvents();
   });
   document.body.addEventListener("htmx:afterSwap", refreshIcons);
-  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => {}));
+  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=4", { scope: "/" }).catch(() => {}));
 })();
