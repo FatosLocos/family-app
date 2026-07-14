@@ -24,7 +24,7 @@ def household_export(household):
             "contacts": list(Contact.objects.for_household(household).values("name", "contact_type", "email", "phone", "address", "postal_code", "city", "notes")),
             "people": list(ContactPerson.objects.for_household(household).select_related("contact").values("contact__name", "name", "birth_date", "email", "phone")),
             "wishlists": list(WishList.objects.for_household(household).select_related("owner").values("title", "owner__display_name", "is_shared", "created_at")),
-            "wishes": list(WishItem.objects.for_household(household).select_related("wishlist").values("wishlist__title", "title", "url", "image_url", "price", "repeatable", "reserved_by")),
+            "wishes": list(WishItem.objects.for_household(household).select_related("wishlist").values("wishlist__title", "title", "url", "image_url", "price", "category", "repeatable", "reserved_by")),
             "bulletin_posts": list(BulletinPost.objects.for_household(household).select_related("author").values("author__display_name", "body", "pinned", "created_at")),
         },
         "household_data": {

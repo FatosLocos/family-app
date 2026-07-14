@@ -24,8 +24,23 @@ class VCardImportForm(forms.Form):
 class WishItemForm(forms.ModelForm):
     class Meta:
         model = WishItem
-        fields = ("title", "url", "price", "repeatable")
-        widgets = {"url": forms.URLInput(attrs={"placeholder": "https://"})}
+        fields = ("title", "url", "price", "category", "image_url", "repeatable")
+        widgets = {
+            "url": forms.URLInput(attrs={"placeholder": "https://"}),
+            "category": forms.HiddenInput(),
+            "image_url": forms.HiddenInput(),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # A URL-only wish is completed server-side when product metadata is available.
+        self.fields["title"].required = False
+
+    def clean_title(self):
+        title = self.cleaned_data["title"].strip()
+        if not title:
+            raise forms.ValidationError("Vul een wens in of gebruik een productlink met herkenbare gegevens.")
+        return title
 
 
 class BulletinPostForm(forms.ModelForm):

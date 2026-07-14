@@ -60,6 +60,7 @@ class WishItem(FamilyRecord):
     url = models.URLField(blank=True)
     image_url = models.URLField(blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    category = models.CharField(max_length=80, blank=True)
     repeatable = models.BooleanField(default=False)
     reserved_by = models.CharField(max_length=160, blank=True)
 

@@ -14,11 +14,23 @@
 
   const refreshIcons = () => window.lucide?.createIcons({ attrs: { "stroke-width": 1.8 } });
 
-  const refreshNetworkStatus = () => {
+  const refreshNetworkStatus = async () => {
     const status = networkStatus();
     if (!status) return;
-    status.hidden = navigator.onLine;
-    document.documentElement.toggleAttribute("data-offline", !navigator.onLine);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3500);
+    try {
+      // navigator.onLine is only a browser hint and is unreliable in embedded browsers.
+      const response = await fetch("/healthz", { cache: "no-store", headers: { Accept: "application/json" }, signal: controller.signal });
+      const connected = response.ok;
+      status.hidden = connected;
+      document.documentElement.toggleAttribute("data-offline", !connected);
+    } catch (_) {
+      status.hidden = false;
+      document.documentElement.toggleAttribute("data-offline", true);
+    } finally {
+      window.clearTimeout(timer);
+    }
   };
 
   const openDialog = (target, trigger) => {
@@ -110,6 +122,44 @@
     });
   };
 
+  const registerWishAutofill = () => {
+    document.querySelectorAll("form[data-wish-autofill]").forEach((form) => {
+      const urlField = form.elements.namedItem("url");
+      const status = form.querySelector("[data-wish-metadata-status]");
+      if (!urlField || !form.dataset.metadataUrl) return;
+      let requestNumber = 0;
+      const fill = async () => {
+        const url = urlField.value.trim();
+        if (!/^https?:\/\//i.test(url)) return;
+        const currentRequest = ++requestNumber;
+        if (status) status.textContent = "Productgegevens ophalen…";
+        try {
+          const response = await fetch(`${form.dataset.metadataUrl}?url=${encodeURIComponent(url)}`, { headers: { Accept: "application/json" } });
+          const metadata = await response.json();
+          if (currentRequest !== requestNumber) return;
+          if (!response.ok) throw new Error(metadata.error || "Productgegevens zijn niet beschikbaar.");
+          ["title", "price", "category", "image_url"].forEach((name) => {
+            const field = form.elements.namedItem(name);
+            const value = metadata[name];
+            if (field && value && (!field.value.trim() || field.dataset.autofilled === "true")) {
+              field.value = value;
+              field.dataset.autofilled = "true";
+            }
+          });
+          if (status) status.textContent = `Gevonden: ${metadata.title}${metadata.price ? ` · € ${metadata.price}` : ""}`;
+        } catch (error) {
+          if (currentRequest === requestNumber && status) status.textContent = error.message || "Productgegevens konden niet worden opgehaald.";
+        }
+      };
+      urlField.addEventListener("change", fill);
+      urlField.addEventListener("blur", fill);
+      ["title", "price", "category", "image_url"].forEach((name) => {
+        const field = form.elements.namedItem(name);
+        field?.addEventListener("input", () => { delete field.dataset.autofilled; });
+      });
+    });
+  };
+
   const registerAgendaEvents = () => {
     document.querySelectorAll(".agenda-event").forEach((button) => button.addEventListener("click", () => {
       const modal = dialog("event-detail-dialog");
@@ -149,6 +199,7 @@
     registerHoverMenus();
     registerDialogs();
     registerForms();
+    registerWishAutofill();
     registerAgendaEvents();
   });
   document.body.addEventListener("htmx:afterSwap", refreshIcons);

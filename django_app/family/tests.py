@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -7,6 +8,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
 from family.birthdays import upcoming_birthdays
+from family.wishlist_metadata import WishlistMetadata, fetch_wishlist_metadata
 from households.models import Household, Membership
 from identity.models import User
 
@@ -25,6 +27,50 @@ class FamilyWishlistTests(TestCase):
         self.assertEqual(response.status_code, 200)
         wishlist = WishList.objects.get(household=self.household, owner=self.child)
         self.assertTrue(WishItem.objects.filter(wishlist=wishlist, title="Nieuw boek").exists())
+
+    @patch("family.views.fetch_wishlist_metadata")
+    def test_product_link_autofills_a_url_only_wish_on_the_server(self, fetch_metadata):
+        fetch_metadata.return_value = WishlistMetadata(
+            title="Bouwset voor kinderen",
+            image_url="https://cdn.example.test/bouwset.jpg",
+            price=Decimal("24.95"),
+            category="Speelgoed",
+        )
+
+        response = self.client.post(reverse("family:add_wish"), {"owner_id": self.child.id, "url": "https://shop.example.test/bouwset"})
+
+        self.assertEqual(response.status_code, 302)
+        item = WishItem.objects.get(wishlist__owner=self.child)
+        self.assertEqual(item.title, "Bouwset voor kinderen")
+        self.assertEqual(str(item.price), "24.95")
+        self.assertEqual(item.category, "Speelgoed")
+        self.assertEqual(item.image_url, "https://cdn.example.test/bouwset.jpg")
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
+    @patch("family.wishlist_metadata.requests.get")
+    def test_product_metadata_uses_json_ld(self, get, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        get.return_value.status_code = 200
+        get.return_value.is_redirect = False
+        get.return_value.headers = {"Content-Type": "text/html"}
+        get.return_value.encoding = "utf-8"
+        get.return_value.iter_content.return_value = [b'''<html><head><script type="application/ld+json">{"@type":"Product","name":"Super koptelefoon","image":"https://img.example.test/headphones.jpg","category":"Elektronica","offers":{"price":"79.95"}}</script></head></html>''']
+
+        metadata = fetch_wishlist_metadata("https://shop.example.test/koptelefoon")
+
+        self.assertEqual(metadata.title, "Super koptelefoon")
+        self.assertEqual(metadata.image_url, "https://img.example.test/headphones.jpg")
+        self.assertEqual(str(metadata.price), "79.95")
+        self.assertEqual(metadata.category, "Elektronica")
+
+    @patch("family.wishlist_metadata.socket.getaddrinfo")
+    def test_product_metadata_refuses_private_addresses(self, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("192.168.1.2", 0))]
+
+        response = self.client.get(reverse("family:preview_wish_metadata"), {"url": "https://router.example.test/product"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Lokale adressen", response.json()["error"])
 
     def test_public_shared_wishlist_can_reserve_once(self):
         wishlist = WishList.objects.create(household=self.household, owner=self.child, title="Wensen", is_shared=True, share_token="public-token")
