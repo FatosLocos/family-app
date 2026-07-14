@@ -110,3 +110,21 @@ class HouseholdIsolationTests(TestCase):
         receipt.refresh_from_db()
         self.assertEqual(receipt.ocr_status, Receipt.OcrStatus.COMPLETE)
         self.assertEqual(str(receipt.total_amount), "12.34")
+
+    @patch("household.views.process_receipt_ocr.delay")
+    def test_owner_can_upload_a_receipt_without_a_message_error(self, process_ocr):
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse("household:add_receipt"),
+            {
+                "retailer": "Jumbo",
+                "purchased_on": timezone.localdate(),
+                "total_amount": "12.34",
+                "image": SimpleUploadedFile("bon.jpg", b"image", content_type="image/jpeg"),
+            },
+        )
+
+        self.assertRedirects(response, f"{reverse('household:index')}?tab=inzicht")
+        receipt = Receipt.objects.get(household=self.first_household)
+        process_ocr.assert_called_once_with(receipt.id, self.first_household.id)

@@ -200,7 +200,7 @@ def add_receipt(request):
         receipt = Receipt.objects.create(household=request.household, **form.cleaned_data)
         matched = match_receipt_to_transaction(receipt)
         process_receipt_ocr.delay(receipt.id, request.household.id)
-        messages.success("Bon opgeslagen en gekoppeld aan een banktransactie." if matched else "Bon opgeslagen. Tekstherkenning staat in de wachtrij.")
+        messages.success(request, "Bon opgeslagen en gekoppeld aan een banktransactie." if matched else "Bon opgeslagen. Tekstherkenning staat in de wachtrij.")
     else:
         messages.error(request, "Controleer de bon.")
     return _household_tab_redirect("inzicht")
