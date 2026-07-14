@@ -8,14 +8,14 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set-in-django_app/.env}
-      APP_DB_NAME: family_app
-      APP_DB_USER: family_app
+      APP_DB_NAME: ${APP_DB_NAME:-family_app}
+      APP_DB_USER: ${APP_DB_USER:-family_app}
       APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?set-in-django_app/.env}
     volumes:
       - family_app-postgres:/var/lib/postgresql/data
       - ./django_app/ops/init-postgres.sh:/docker-entrypoint-initdb.d/10-family-app-role.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U family_app -d family_app"]
+      test: ["CMD-SHELL", "pg_isready -U ${APP_DB_USER:-family_app} -d ${APP_DB_NAME:-family_app}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
     env_file: ./django_app/.env
     environment:
-      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+      DATABASE_URL: ${DATABASE_URL:-postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app}
     command: >-
       sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
       gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
@@ -55,7 +55,7 @@ services:
     restart: unless-stopped
     env_file: ./django_app/.env
     environment:
-      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+      DATABASE_URL: ${DATABASE_URL:-postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app}
     command: celery -A config worker --loglevel=INFO
     depends_on:
       postgres:
@@ -68,7 +68,7 @@ services:
     restart: unless-stopped
     env_file: ./django_app/.env
     environment:
-      DATABASE_URL: postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app
+      DATABASE_URL: ${DATABASE_URL:-postgresql://family_app:${POSTGRES_PASSWORD}@postgres:5432/family_app}
     command: celery -A config beat --loglevel=INFO
     depends_on:
       postgres:
@@ -88,8 +88,11 @@ services:
 
 volumes:
   family_app-postgres:
+    name: ${FAMILY_APP_POSTGRES_VOLUME:-family-app-postgres}
   family_app-redis:
+    name: ${FAMILY_APP_REDIS_VOLUME:-family-app-redis}
   family_app-media:
+    name: ${FAMILY_APP_MEDIA_VOLUME:-family-app-media}
 
 networks:
   edge:
