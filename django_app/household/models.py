@@ -221,4 +221,37 @@ class ReceiptLineItem(HouseholdRecord):
     raw_line = models.CharField(max_length=500, blank=True)
 
     class Meta:
+
+
+class WeatherPreference(models.Model):
+    household = models.OneToOneField(Household, on_delete=models.CASCADE, related_name="weather_preference")
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    location_name = models.CharField(max_length=200, blank=True)
+    temperature_unit = models.CharField(max_length=1, choices=[("C", "Celsius"), ("F", "Fahrenheit")], default="C")
+    wind_unit = models.CharField(max_length=3, choices=[("ms", "m/s"), ("kmh", "km/h"), ("mph", "mph")], default="ms")
+    show_forecast = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "Weather preferences"
+
+    def __str__(self) -> str:
+        return f"Weather for {self.household.name}"
+
+
+class WeatherData(HouseholdRecord):
+    temperature = models.DecimalField(max_digits=5, decimal_places=1)
+    feels_like = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)
+    humidity = models.PositiveSmallIntegerField(null=True, blank=True)
+    wind_speed = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)
+    description = models.CharField(max_length=100, blank=True)
+    icon = models.CharField(max_length=20, blank=True)
+    pressure = models.PositiveIntegerField(null=True, blank=True)
+    uvi = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
+    clouds = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
         ordering = ("id",)

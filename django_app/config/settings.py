@@ -190,6 +190,7 @@ CELERY_BEAT_SCHEDULE = {
     },
     "refresh-household-notifications": {"task": "notifications.tasks.refresh_household_notifications", "schedule": 1800.0},
     "refresh-recurring-finance-rules": {"task": "finance.tasks.refresh_recurring_rules", "schedule": 21600.0},
+    "refresh-household-weather": {"task": "household.tasks.refresh_household_weather", "schedule": 3600.0},
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
     "cleanup-stale-data": {"task": "integrations.tasks.cleanup_stale_data", "schedule": 86400.0},
 }
@@ -204,6 +205,9 @@ INVITE_ONLY_MODE = os.environ.get("INVITE_ONLY_MODE", "0") == "1"
 WEBPUSH_VAPID_PUBLIC_KEY = os.environ.get("WEBPUSH_VAPID_PUBLIC_KEY", "")
 WEBPUSH_VAPID_PRIVATE_KEY = os.environ.get("WEBPUSH_VAPID_PRIVATE_KEY", "")
 WEBPUSH_VAPID_ADMIN_EMAIL = os.environ.get("WEBPUSH_VAPID_ADMIN_EMAIL", "admin@example.com")
+
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
+WEATHER_API_PROVIDER = os.environ.get("WEATHER_API_PROVIDER", "openweathermap")
 
 SESSION_COOKIE_AGE = 1209600
 SESSION_SAVE_EVERY_REQUEST = False

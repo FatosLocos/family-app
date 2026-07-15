@@ -45,3 +45,19 @@ def refresh_shopping_prices():
     for household in Household.objects.all():
         with household_db_scope(household.pk):
             refresh_household_prices(household)
+
+
+@shared_task
+def refresh_household_weather():
+    from household.models import WeatherPreference, WeatherData
+    from household.weather_service import fetch_weather
+    from django.conf import settings
+
+    for pref in WeatherPreference.objects.select_related("household").filter(latitude__isnull=False, longitude__isnull=False):
+        if not settings.WEATHER_API_KEY:
+            continue
+
+        weather_data = fetch_weather(pref.latitude, pref.longitude, settings.WEATHER_API_PROVIDER)
+        if weather_data:
+            with household_db_scope(pref.household.pk):
+                WeatherData.objects.create(household=pref.household, **weather_data)
