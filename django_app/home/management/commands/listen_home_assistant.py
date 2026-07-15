@@ -6,8 +6,10 @@ import time
 
 from django.core.management.base import BaseCommand
 
+from common.db_scope import household_db_scope
 from home.ha_gateway import listen_forever, sync_once
 from home.models import HomeAssistantConfig
+from households.models import Household
 
 
 class Command(BaseCommand):
@@ -20,12 +22,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if options["once"]:
             total = 0
-            for config in HomeAssistantConfig.objects.select_related("household"):
-                try:
-                    total += sync_once(config)
-                except Exception as error:
-                    config.last_error = str(error)[:300]
-                    config.save(update_fields=["last_error", "updated_at"])
+            for household in Household.objects.all():
+                with household_db_scope(household.pk):
+                    for config in HomeAssistantConfig.objects.filter(household=household):
+                        try:
+                            total += sync_once(config)
+                        except Exception as error:
+                            config.last_error = str(error)[:300]
+                            config.save(update_fields=["last_error", "updated_at"])
             self.stdout.write(self.style.SUCCESS(f"{total} Home Assistant-entiteiten bijgewerkt."))
             return
 
@@ -38,11 +42,13 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, stop)
         threads: dict[int, threading.Thread] = {}
         while not stop_event.is_set():
-            for config in HomeAssistantConfig.objects.select_related("household"):
-                if config.id in threads and threads[config.id].is_alive():
-                    continue
-                thread = threading.Thread(target=listen_forever, args=(config, stop_event), daemon=True)
-                thread.start()
-                threads[config.id] = thread
-                self.stdout.write(f"Home Assistant listener gestart voor huishouden {config.household_id}.")
+            for household in Household.objects.all():
+                with household_db_scope(household.pk):
+                    for config in HomeAssistantConfig.objects.filter(household=household):
+                        if config.id in threads and threads[config.id].is_alive():
+                            continue
+                        thread = threading.Thread(target=listen_forever, args=(config, stop_event), daemon=True)
+                        thread.start()
+                        threads[config.id] = thread
+                        self.stdout.write(f"Home Assistant listener gestart voor huishouden {config.household_id}.")
             time.sleep(options["scan_interval"])
