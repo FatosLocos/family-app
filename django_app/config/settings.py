@@ -195,6 +195,7 @@ CELERY_BEAT_SCHEDULE = {
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
     "sync-ev-vehicle-data": {"task": "home.tasks.sync_ev_vehicle_data", "schedule": 1800.0},
     "sync-energy-readings": {"task": "home.tasks.sync_energy_readings_from_home_assistant", "schedule": 3600.0},
+    "sync-psd2-transactions": {"task": "finance.tasks.sync_psd2_transactions", "schedule": 7200.0},
     "cleanup-stale-data": {"task": "integrations.tasks.cleanup_stale_data", "schedule": 86400.0},
 }
 
@@ -202,6 +203,10 @@ BUNQ_OAUTH_CLIENT_ID = os.environ.get("BUNQ_OAUTH_CLIENT_ID", "")
 BUNQ_OAUTH_CLIENT_SECRET = os.environ.get("BUNQ_OAUTH_CLIENT_SECRET", "")
 OUTLOOK_CALENDAR_CLIENT_ID = os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID", "")
 OUTLOOK_CALENDAR_CLIENT_SECRET = os.environ.get("OUTLOOK_CALENDAR_CLIENT_SECRET", "")
+
+PLAID_CLIENT_ID = os.environ.get("PLAID_CLIENT_ID", "")
+PLAID_SECRET = os.environ.get("PLAID_SECRET", "")
+PLAID_ENV = os.environ.get("PLAID_ENV", "sandbox")
 
 INVITE_ONLY_MODE = os.environ.get("INVITE_ONLY_MODE", "0") == "1"
 

@@ -176,3 +176,85 @@ def update_transaction_category(request, transaction_id):
     else:
         messages.error(request, "Controleer de categorie.")
     return redirect(f"{reverse('finance:index')}?tab=transacties")
+
+
+@parent_required
+def psd2_link_init(request):
+    """Initialize Plaid Link for account connection."""
+    from django.http import JsonResponse
+    from finance.psd2_service import PlaidPSD2Client
+
+    try:
+        client = PlaidPSD2Client()
+        link_response = client.create_link_token(str(request.user.id))
+        if not link_response or "link_token" not in link_response:
+            return JsonResponse({"error": "Failed to create link token"}, status=400)
+        return JsonResponse({"link_token": link_response["link_token"]})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@parent_required
+@require_POST
+def psd2_link_callback(request):
+    """Handle Plaid Link public token exchange."""
+    from django.http import JsonResponse
+    from finance.psd2_service import PlaidPSD2Client, sync_psd2_accounts
+    from integrations.crypto import encrypt
+
+    try:
+        public_token = request.POST.get("public_token")
+        if not public_token:
+            return JsonResponse({"error": "Missing public_token"}, status=400)
+
+        client = PlaidPSD2Client()
+        exchange_response = client.exchange_public_token(public_token, {})
+        if not exchange_response or "access_token" not in exchange_response:
+            return JsonResponse({"error": "Failed to exchange public token"}, status=400)
+
+        access_token = exchange_response["access_token"]
+        connection, created = BankConnection.objects.get_or_create(
+            household=request.household,
+            provider=BankConnection.Provider.PLAID,
+            external_reference=exchange_response.get("item_id", ""),
+            defaults={
+                "display_name": "Plaid Connection",
+                "oauth_access_token_encrypted": encrypt(access_token),
+            }
+        )
+
+        if not created:
+            connection.oauth_access_token_encrypted = encrypt(access_token)
+            connection.save(update_fields=["oauth_access_token_encrypted"])
+
+        sync_psd2_accounts(connection.id, request.household.id)
+
+        messages.success(request, "Bankrekening succesvol gekoppeld.")
+        return redirect(f"{reverse('finance:index')}?tab=bronnen")
+    except Exception as e:
+        messages.error(request, f"Linkage mislukt: {e}")
+        return redirect("finance:index")
+
+
+@parent_required
+def psd2_accounts_list(request):
+    """List PSD2-connected accounts."""
+    from django.http import JsonResponse
+
+    accounts = BankAccount.objects.for_household(request.household).filter(
+        connection__provider=BankConnection.Provider.PLAID
+    ).select_related("connection")
+
+    return JsonResponse({
+        "accounts": [
+            {
+                "id": account.id,
+                "name": account.name,
+                "iban": account.iban,
+                "currency": account.currency,
+                "balance": float(account.balance or 0),
+                "connection": account.connection.display_name,
+            }
+            for account in accounts
+        ]
+    })

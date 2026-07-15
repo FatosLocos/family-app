@@ -18,12 +18,20 @@ class BankConnection(FinanceRecord):
     class Provider(models.TextChoices):
         BUNQ = "bunq", "bunq"
         ABN_MANUAL = "abn_amro_manual", "ABN AMRO import"
+        PLAID = "plaid", "Plaid (PSD2)"
+        OPEN_BANKING = "open_banking", "Open Banking API"
 
     provider = models.CharField(max_length=32, choices=Provider.choices)
     display_name = models.CharField(max_length=160)
     status = models.CharField(max_length=24, default="configured")
     external_reference = models.CharField(max_length=180, blank=True)
     last_sync_at = models.DateTimeField(null=True, blank=True)
+
+    # PSD2/OAuth fields
+    oauth_access_token_encrypted = models.TextField(blank=True)  # Encrypted OAuth token
+    oauth_refresh_token_encrypted = models.TextField(blank=True)  # Refresh token (if needed)
+    oauth_expires_at = models.DateTimeField(null=True, blank=True)  # Token expiry
+    oauth_link_token = models.CharField(max_length=180, blank=True)  # Plaid link token for setup
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=("household", "provider", "external_reference"), name="unique_household_finance_connection")]

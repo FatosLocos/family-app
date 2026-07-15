@@ -64,3 +64,18 @@ def refresh_recurring_rules():
     for household in Household.objects.all():
         with household_db_scope(household.pk):
             refresh_household_recurring_rules(household)
+
+
+@shared_task
+def sync_psd2_transactions():
+    """Sync transactions from PSD2/Plaid connections."""
+    from finance.models import BankConnection
+    from finance.psd2_service import sync_psd2_transactions as sync_txns
+
+    for connection in BankConnection.objects.filter(provider=BankConnection.Provider.PLAID):
+        try:
+            sync_txns(connection.id, connection.household_id, days=90)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to sync PSD2 transactions for connection {connection.id}: {e}")
