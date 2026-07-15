@@ -1,6 +1,7 @@
 from django.contrib.auth import login
-from django.contrib.auth.views import LoginView, LogoutView
+from django.contrib.auth.views import LoginView, LogoutView, PasswordResetConfirmView
 from django.shortcuts import redirect, render
+from django.urls import reverse_lazy
 from django.utils import timezone
 
 from households.models import Household, HouseholdInvite, Membership
@@ -14,6 +15,11 @@ class LocalLoginView(LoginView):
 
 class LocalLogoutView(LogoutView):
     pass
+
+
+class LocalPasswordResetConfirmView(PasswordResetConfirmView):
+    template_name = "identity/password_reset_confirm.html"
+    success_url = reverse_lazy("identity:login")
 
 
 def signup(request):
