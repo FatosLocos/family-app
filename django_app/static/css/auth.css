@@ -1,0 +1,20 @@
+.auth-form .field-help {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.auth-form .field-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--negative);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.auth-form .field-has-error input {
+  border-color: var(--negative);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--negative) 14%, transparent);
+}

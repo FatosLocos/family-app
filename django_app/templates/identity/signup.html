@@ -1,1 +1,32 @@
-{% extends 'base.html' %}{% block title %}Beginnen · Family App{% endblock %}{% block content %}<section class="auth-shell"><div class="auth-brand"><p class="eyebrow">{% if pending_invite %}Uitnodiging{% else %}Nieuwe start{% endif %}</p><h1>{% if pending_invite %}Sluit aan bij {{ pending_invite.household.name }}.{% else %}Maak jullie nieuwe thuisbasis.{% endif %}</h1><p>{% if pending_invite %}Maak je eigen account aan. Je rol wordt {{ pending_invite.get_role_display|lower }}.{% else %}Je maakt eerst een huishouden aan en nodigt daarna ouders en kinderen uit.{% endif %}</p></div><form method="post" class="auth-form">{% csrf_token %}<h2>{% if pending_invite %}Account aanmaken{% else %}Huishouden aanmaken{% endif %}</h2>{% if form.errors %}<div class="form-error">Controleer de gemarkeerde velden.</div>{% endif %}{% if not pending_invite %}<label>Naam huishouden<input name="household_name" required placeholder="Bijv. Ons gezin"></label>{% endif %}<label>{{ form.display_name.label }}{{ form.display_name }}</label><label>{{ form.email.label }}{{ form.email }}</label><label>{{ form.password1.label }}{{ form.password1 }}</label><label>{{ form.password2.label }}{{ form.password2 }}</label><button class="button button-primary" type="submit">Beginnen</button><p>Al een account? <a href="{% url 'identity:login' %}">Inloggen</a></p></form></section>{% endblock %}
+{% extends 'base.html' %}
+
+{% block title %}Beginnen · Family App{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-brand">
+    <p class="eyebrow">{% if pending_invite %}Uitnodiging{% else %}Nieuwe start{% endif %}</p>
+    <h1>{% if pending_invite %}Sluit aan bij {{ pending_invite.household.name }}.{% else %}Maak jullie nieuwe thuisbasis.{% endif %}</h1>
+    <p>{% if pending_invite %}Maak je eigen account aan. Je rol wordt {{ pending_invite.get_role_display|lower }}.{% else %}Je maakt eerst een huishouden aan en nodigt daarna ouders en kinderen uit.{% endif %}</p>
+  </div>
+  <form method="post" class="auth-form" novalidate>
+    {% csrf_token %}
+    <h2>{% if pending_invite %}Account aanmaken{% else %}Huishouden aanmaken{% endif %}</h2>
+    {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+    {% if form.errors %}<div class="form-error">Controleer de gemarkeerde velden.</div>{% endif %}
+    {% if not pending_invite %}
+      <label>Naam huishouden<input name="household_name" required placeholder="Bijv. Ons gezin"></label>
+    {% endif %}
+    {% for field in form %}
+      <label{% if field.errors %} class="field-has-error"{% endif %}>
+        {{ field.label }}
+        {{ field }}
+        {% if field.help_text %}<small class="field-help">{{ field.help_text|safe }}</small>{% endif %}
+        {% for error in field.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
+      </label>
+    {% endfor %}
+    <button class="button button-primary" type="submit">Beginnen</button>
+    <p>Al een account? <a href="{% url 'identity:login' %}">Inloggen</a></p>
+  </form>
+</section>
+{% endblock %}

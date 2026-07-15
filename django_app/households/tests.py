@@ -47,6 +47,20 @@ class InviteFlowTests(TestCase):
             role=Membership.Role.OWNER,
         ).exists())
 
+    def test_signup_renders_the_specific_field_error(self):
+        response = self.client.post(reverse("identity:signup"), {
+            "display_name": "Nieuwe ouder",
+            "household_name": "Nieuw gezin",
+            "email": "nieuw@example.com",
+            "password1": "password",
+            "password2": "password",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="field-error"')
+        self.assertContains(response, "Dit wachtwoord is te algemeen.")
+        self.assertFalse(User.objects.filter(email="nieuw@example.com").exists())
+
     def test_child_cannot_create_invite_or_change_a_role(self):
         child = User.objects.create_user(username="kind@example.com", email="kind@example.com", password="safe-password-123")
         child_membership = Membership.objects.create(household=self.household, user=child, role=Membership.Role.CHILD)
