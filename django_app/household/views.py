@@ -197,7 +197,7 @@ def index(request):
             "delta": delta,
             "direction": "up" if delta > 0 else "down",
         })
-    price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)[:10]
+    price_trends = sorted(price_trends, key=lambda trend: abs(trend["delta"]), reverse=True)[:10]
     pantry_items = list(PantryItem.objects.for_household(household).order_by("category", "name"))
     for pantry_item in pantry_items:
         pantry_item.is_low = pantry_item.quantity <= pantry_item.minimum_quantity
