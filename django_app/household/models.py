@@ -221,6 +221,7 @@ class ReceiptLineItem(HouseholdRecord):
     raw_line = models.CharField(max_length=500, blank=True)
 
     class Meta:
+        pass
 
 
 class WeatherPreference(models.Model):
