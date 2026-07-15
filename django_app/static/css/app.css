@@ -23,3 +23,25 @@
 .checkbox-row, .checkbox-field { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
 .checkbox-row input[type="checkbox"], .checkbox-field input[type="checkbox"] { width: auto; margin: 0; }
 .checkbox-row label, .checkbox-field label { margin: 0; font-weight: 400; }
+
+/* Touch targets: minimum 44px for accessibility */
+button, a[role="button"], input[type="button"], input[type="submit"], input[type="reset"], .button { min-height: 44px; min-width: 44px; }
+.icon-button { min-height: 44px; min-width: 44px; width: 44px; height: 44px; }
+.check-button { min-height: 44px; min-width: 44px; width: 44px; height: 44px; }
+.primary-icon-action { min-height: 44px; min-width: 44px; width: 44px; height: 44px; }
+
+/* WCAG AA contrast improvements */
+.muted { color: var(--muted); } /* Ensure muted text has sufficient contrast */
+.field-help { color: var(--muted); font-size: 12px; margin-top: 4px; display: block; }
+
+/* Ensure links have sufficient contrast and underline for clarity */
+a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+/* Form labels - ensure they meet WCAG AA */
+label { color: var(--text); font-weight: 600; }
+
+/* Focus indicators for keyboard navigation */
+:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+*:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
