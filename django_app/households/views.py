@@ -8,8 +8,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from households.decorators import owner_required, parent_required
-from households.forms import InviteForm
-from households.models import HouseholdInvite, Membership
+from households.forms import InviteForm, ChildProfileForm
+from households.models import HouseholdInvite, Membership, ChildProfile
 
 
 def _open_invite(code):
@@ -81,4 +81,30 @@ def remove_member(request, membership_id):
         with transaction.atomic():
             membership.delete()
             messages.success(request, f"{name} is uit het huishouden verwijderd.")
+    return redirect(f"{reverse('family:index')}?tab=leden")
+
+
+@parent_required
+@require_POST
+def setup_child_profile(request, membership_id):
+    membership = get_object_or_404(
+        Membership.objects.select_related("user"),
+        pk=membership_id,
+        household=request.household,
+        role=Membership.Role.CHILD
+    )
+    if ChildProfile.objects.filter(household=request.household, user=membership.user).exists():
+        messages.info(request, "Dit kind heeft al een profiel.")
+        return redirect(f"{reverse('family:index')}?tab=leden")
+
+    form = ChildProfileForm(request.POST or None, request.FILES or None)
+    if request.method == "POST" and form.is_valid():
+        with transaction.atomic():
+            profile = form.save(commit=False)
+            profile.household = request.household
+            profile.user = membership.user
+            profile.save()
+            messages.success(request, f"Profiel gemaakt voor {membership.user.display_name or membership.user.get_full_name()}.")
+        return redirect(f"{reverse('family:index')}?tab=leden")
+
     return redirect(f"{reverse('family:index')}?tab=leden")
