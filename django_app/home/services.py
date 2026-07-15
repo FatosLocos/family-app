@@ -160,26 +160,23 @@ def control_entity(household, entity, action, target_temperature=None):
             if entity.source == HomeEntity.Source.SONOS:
                 _apply_sonos_control_state(entity, action, target_temperature)
                 if action == "set_group" and entity.connection:
-                    from integrations.providers import sync_sonos
+                    from integrations.tasks import sync_connection_task
 
-                    sync_sonos(entity.connection)
+                    sync_connection_task.delay(entity.connection.id, household.id)
             elif entity.source == HomeEntity.Source.SPOTIFY:
                 _apply_spotify_control_state(entity, action, target_temperature)
                 if entity.connection:
-                    from integrations.providers import sync_spotify
+                    from integrations.tasks import sync_connection_task
 
-                    sync_spotify(entity.connection)
-                    entity.refresh_from_db()
+                    sync_connection_task.delay(entity.connection.id, household.id)
             elif entity.source == HomeEntity.Source.SMARTCAR and entity.connection:
-                from integrations.providers import sync_smartcar
+                from integrations.tasks import sync_connection_task
 
-                sync_smartcar(entity.connection)
-                entity.refresh_from_db()
+                sync_connection_task.delay(entity.connection.id, household.id)
             elif entity.source == HomeEntity.Source.HOME_CONNECT and entity.connection:
-                from integrations.providers import sync_home_connect
+                from integrations.tasks import sync_connection_task
 
-                sync_home_connect(entity.connection)
-                entity.refresh_from_db()
+                sync_connection_task.delay(entity.connection.id, household.id)
             elif action == "on":
                 entity.state = "on"
             elif action == "play_pause":

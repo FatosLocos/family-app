@@ -201,28 +201,32 @@ def _oauth_response(response, provider: str) -> dict:
 
 
 def _refresh_connection_token(connection: IntegrationConnection, provider: str, token_url: str) -> str:
-    data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
-    if _stored_token_is_current(data):
-        return decrypt(data["access_token"])
-    refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
-    if not refresh_token:
-        raise ProviderError(f"{provider} moet opnieuw worden geautoriseerd.")
-    from integrations.services import get_app_config
+    from django.db import transaction
 
-    client_id, client_secret, _ = get_app_config(connection.household, connection.provider)
-    if not client_id or not client_secret:
-        raise ProviderError(f"{provider}-clientgegevens ontbreken.")
-    response = requests.post(token_url, data={"grant_type": "refresh_token", "refresh_token": refresh_token}, auth=(client_id, client_secret), timeout=20)
-    payload = _oauth_response(response, provider)
-    if not payload.get("access_token"):
-        raise ProviderError(f"{provider}-token vernieuwen mislukt.")
-    if payload.get("refresh_token"):
-        connection.secret_encrypted = encrypt(payload["refresh_token"])
-    data["access_token"] = encrypt(payload["access_token"])
-    data["expires_at"] = (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat()
-    connection.settings = data
-    connection.save(update_fields=["secret_encrypted", "settings", "updated_at"])
-    return payload["access_token"]
+    with transaction.atomic():
+        connection = IntegrationConnection.objects.select_for_update().get(pk=connection.pk)
+        data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+        if _stored_token_is_current(data):
+            return decrypt(data["access_token"])
+        refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+        if not refresh_token:
+            raise ProviderError(f"{provider} moet opnieuw worden geautoriseerd.")
+        from integrations.services import get_app_config
+
+        client_id, client_secret, _ = get_app_config(connection.household, connection.provider)
+        if not client_id or not client_secret:
+            raise ProviderError(f"{provider}-clientgegevens ontbreken.")
+        response = requests.post(token_url, data={"grant_type": "refresh_token", "refresh_token": refresh_token}, auth=(client_id, client_secret), timeout=20)
+        payload = _oauth_response(response, provider)
+        if not payload.get("access_token"):
+            raise ProviderError(f"{provider}-token vernieuwen mislukt.")
+        if payload.get("refresh_token"):
+            connection.secret_encrypted = encrypt(payload["refresh_token"])
+        data["access_token"] = encrypt(payload["access_token"])
+        data["expires_at"] = (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat()
+        connection.settings = data
+        connection.save(update_fields=["secret_encrypted", "settings", "updated_at"])
+        return payload["access_token"]
 
 
 def _sonos_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
