@@ -143,7 +143,7 @@ def index(request):
         if line_item.receipt.purchased_on and line_item.receipt.purchased_on > row["last_bought"]:
             row["last_bought"] = line_item.receipt.purchased_on
     receipt_products = sorted(receipt_product_map.values(), key=lambda row: (-row["times_bought"], -row["last_bought"].toordinal()))[:8]
-    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices", "offers")[:50])
+    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices", "offers")[:20])
     recurring_item_map = {}
     for item in (
         ShoppingItem.objects.for_household(household)
@@ -180,7 +180,7 @@ def index(request):
         if len(snapshots_by_item.setdefault(snapshot.item_id, [])) < 8:
             snapshots_by_item[snapshot.item_id].append(snapshot)
     price_trend_map = {}
-    for snapshot in ShoppingPriceSnapshot.objects.for_household(household).select_related("item").order_by("item_id", "retailer", "observed_at"):
+    for snapshot in ShoppingPriceSnapshot.objects.for_household(household).select_related("item").order_by("item_id", "retailer", "observed_at")[:500]:
         key = (snapshot.item_id, snapshot.retailer)
         trend = price_trend_map.setdefault(key, {"item_name": snapshot.item.name, "retailer": snapshot.retailer, "retailer_label": snapshot.get_retailer_display(), "first": snapshot, "latest": snapshot})
         trend["latest"] = snapshot
@@ -197,7 +197,7 @@ def index(request):
             "delta": delta,
             "direction": "up" if delta > 0 else "down",
         })
-    price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)
+    price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)[:10]
     pantry_items = list(PantryItem.objects.for_household(household).order_by("category", "name"))
     for pantry_item in pantry_items:
         pantry_item.is_low = pantry_item.quantity <= pantry_item.minimum_quantity
