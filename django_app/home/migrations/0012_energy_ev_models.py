@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("households", "0005_childprofile"),
-        ("home", "0011_homeassistantconfig"),
+        ("home", "0011_alter_homeentity_source"),
     ]
 
     operations = [
