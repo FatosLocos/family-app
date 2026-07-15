@@ -19,4 +19,8 @@ urlpatterns = [
     path("documenten/toevoegen/", views.add_document, name="add_document"),
     path("documenten/<int:document_id>/download/", views.download_document, name="download_document"),
     path("documenten/<int:document_id>/verwijderen/", views.delete_document, name="delete_document"),
+    # Home Assistant custom integration API
+    path("api/ha/webhook/<str:webhook_token>/", views.ha_webhook_receiver, name="ha_webhook_receiver"),
+    path("api/ha/entiteiten/", views.ha_entities_list, name="ha_entities_list"),
+    path("api/ha/entiteiten/<str:entity_id>/control/", views.ha_control_entity, name="ha_control_entity"),
 ]
