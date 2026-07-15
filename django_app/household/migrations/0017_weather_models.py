@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('households', '0005_childprofile'),
-        ('household', '0009_change_task_title_max_length'),
+        ('household', '0016_receiptlineitem_shopping_item'),
     ]
 
     operations = [
