@@ -7,6 +7,7 @@ from django.urls import reverse_lazy
 from django.utils import timezone
 
 from households.models import Household, HouseholdInvite, Membership
+from households.code_utils import hash_invite_code
 from identity.forms import LoginForm, SignUpForm
 
 
@@ -36,10 +37,13 @@ def signup(request):
         return redirect("today")
 
     invite_code = request.session.get("pending_invite_code", "")
-    pending_invite = HouseholdInvite.objects.filter(code=invite_code, accepted_by__isnull=True).select_related("household").first()
-    if pending_invite and pending_invite.expires_at and pending_invite.expires_at <= timezone.now():
-        request.session.pop("pending_invite_code", None)
-        pending_invite = None
+    pending_invite = None
+    if invite_code:
+        code_hash = hash_invite_code(invite_code)
+        pending_invite = HouseholdInvite.objects.filter(code_hash=code_hash, accepted_by__isnull=True).select_related("household").first()
+        if pending_invite and pending_invite.expires_at and pending_invite.expires_at <= timezone.now():
+            request.session.pop("pending_invite_code", None)
+            pending_invite = None
 
     if settings.INVITE_ONLY_MODE and not pending_invite:
         return render(request, "identity/signup_closed.html")

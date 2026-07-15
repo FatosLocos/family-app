@@ -10,10 +10,12 @@ from django.views.decorators.http import require_POST
 from households.decorators import owner_required, parent_required
 from households.forms import InviteForm, ChildProfileForm
 from households.models import HouseholdInvite, Membership, ChildProfile
+from households.code_utils import hash_invite_code, verify_invite_code
 
 
 def _open_invite(code):
-    invite = get_object_or_404(HouseholdInvite, code=code, accepted_by__isnull=True)
+    code_hash = hash_invite_code(code)
+    invite = get_object_or_404(HouseholdInvite, code_hash=code_hash, accepted_by__isnull=True)
     if invite.expires_at and invite.expires_at <= timezone.now():
         return None
     return invite
@@ -25,7 +27,7 @@ def accept_invite(request, code):
         messages.error(request, "Deze uitnodiging is verlopen of al gebruikt.")
         return redirect("identity:login")
     if not request.user.is_authenticated:
-        request.session["pending_invite_code"] = invite.code
+        request.session["pending_invite_code"] = code
         return redirect("identity:signup")
     with transaction.atomic():
         membership, created = Membership.objects.get_or_create(household=invite.household, user=request.user, defaults={"role": invite.role})
@@ -45,13 +47,14 @@ def create_invite(request):
     form = InviteForm(request.POST)
     if form.is_valid():
         with transaction.atomic():
-            HouseholdInvite.objects.create(
+            invite, code = HouseholdInvite.create_with_code(
                 household=request.household,
                 created_by=request.user,
                 role=form.cleaned_data["role"],
                 label=form.cleaned_data["label"],
                 expires_at=timezone.now() + timedelta(days=14),
             )
+            request.session[f"invite_code_{invite.id}"] = code
             messages.success(request, "Uitnodiging gemaakt. Deel de link vanuit het overzicht.")
     return redirect(f"{reverse('family:index')}?tab=leden")
 

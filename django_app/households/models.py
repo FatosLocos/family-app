@@ -1,11 +1,7 @@
-import secrets
-
 from django.conf import settings
 from django.db import models
 
-
-def generate_invite_code() -> str:
-    return secrets.token_urlsafe(18)
+from households.code_utils import generate_invite_code, hash_invite_code
 
 
 class Household(models.Model):
@@ -65,7 +61,32 @@ class HouseholdInvite(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     role = models.CharField(max_length=16, choices=Membership.Role.choices, default=Membership.Role.CHILD)
     label = models.CharField(max_length=120, blank=True)
-    code = models.CharField(max_length=32, unique=True, default=generate_invite_code)
+    code_hash = models.CharField(max_length=64, unique=True, db_index=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     accepted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="accepted_invites")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    _plain_code = None  # Temporary storage for the plain code before hashing
+
+    def save(self, *args, **kwargs):
+        if not self.code_hash:
+            code = generate_invite_code()
+            self.code_hash = hash_invite_code(code)
+            self._plain_code = code  # Store for later retrieval
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def create_with_code(cls, household, created_by, role, label="", expires_at=None):
+        """Create invite and return both the invite and plain code."""
+        code = generate_invite_code()
+        invite = cls(
+            household=household,
+            created_by=created_by,
+            role=role,
+            label=label,
+            expires_at=expires_at,
+            code_hash=hash_invite_code(code),
+        )
+        invite.save()
+        invite._plain_code = code
+        return invite, code
