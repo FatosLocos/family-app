@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import secrets
 
 
@@ -19,4 +20,4 @@ def hash_invite_code(code: str) -> str:
 
 def verify_invite_code(code: str, code_hash: str) -> bool:
     """Verify an invite code against its hash."""
-    return hash_invite_code(code) == code_hash
+    return hmac.compare_digest(hash_invite_code(code), code_hash)

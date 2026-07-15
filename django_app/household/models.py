@@ -220,9 +220,6 @@ class ReceiptLineItem(HouseholdRecord):
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
     raw_line = models.CharField(max_length=500, blank=True)
 
-    class Meta:
-        pass
-
 
 class WeatherPreference(models.Model):
     household = models.OneToOneField(Household, on_delete=models.CASCADE, related_name="weather_preference")
@@ -255,4 +252,3 @@ class WeatherData(HouseholdRecord):
 
     class Meta:
         ordering = ("-created_at",)
-        ordering = ("id",)
