@@ -447,6 +447,12 @@ def start_google_live_stream(request, entity_id):
         from integrations.providers import ProviderError, start_google_home_live_stream
 
         session = start_google_home_live_stream(entity)
+        # Store stream names in session for later cleanup
+        request.session[f"google_live_stream_{entity.id}"] = {
+            "mjpeg_stream_name": session["stream_name"],
+            "rtsp_stream_name": session["rtsp_stream_name"],
+        }
+        request.session.modified = True
         HomeActionAudit.objects.create(household=request.household, entity=entity, action="live_stream", succeeded=True, detail="Tijdelijke Nest-livestream gestart.")
         return JsonResponse({"media_url": reverse("home:google_live_mp4", args=[entity.id]), "expires_at": session["expires_at"]})
     except ProviderError as error:
@@ -457,20 +463,30 @@ def start_google_live_stream(request, entity_id):
 @parent_required
 @require_POST
 def stop_google_live_stream(request, entity_id):
-    get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
+    entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
     from integrations.providers import stop_google_home_live_stream
 
-    stop_google_home_live_stream()
+    stream_info = request.session.get(f"google_live_stream_{entity.id}", {})
+    mjpeg_stream_name = stream_info.get("mjpeg_stream_name", "")
+    rtsp_stream_name = stream_info.get("rtsp_stream_name", "")
+    if mjpeg_stream_name and rtsp_stream_name:
+        stop_google_home_live_stream(mjpeg_stream_name, rtsp_stream_name)
+        del request.session[f"google_live_stream_{entity.id}"]
+        request.session.modified = True
     return HttpResponse(status=204)
 
 
 @parent_required
 def google_live_mp4(request, entity_id):
-    get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
+    entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
     try:
-        from integrations.providers import GO2RTC_STREAM_NAME, ProviderError, google_home_mp4_stream
+        from integrations.providers import ProviderError, google_home_mp4_stream
 
-        response = google_home_mp4_stream(GO2RTC_STREAM_NAME)
+        stream_info = request.session.get(f"google_live_stream_{entity.id}", {})
+        stream_name = stream_info.get("mjpeg_stream_name", "")
+        if not stream_name:
+            raise ProviderError("Geen actieve livestream gevonden.")
+        response = google_home_mp4_stream(stream_name)
     except ProviderError as error:
         return HttpResponse(str(error), status=503, content_type="text/plain; charset=utf-8")
 

@@ -29,8 +29,14 @@ class HueProviderError(ProviderError):
         self.status_code = status_code
 
 
-GO2RTC_STREAM_NAME = "family-app-live"
-GO2RTC_MJPEG_STREAM_NAME = "family-app-live-mjpeg"
+def _go2rtc_stream_name(household_id: int, entity_id: int) -> str:
+    """Generate per-household/entity stream name for isolation."""
+    return f"family-app-{household_id}-{entity_id}"
+
+
+def _go2rtc_mjpeg_stream_name(household_id: int, entity_id: int) -> str:
+    """Generate per-household/entity MJPEG stream name for isolation."""
+    return f"family-app-{household_id}-{entity_id}-mjpeg"
 
 HOME_CONNECT_EVENT_LABELS = {
     "Dishcare.Dishwasher.Event.SaltLack": "Zout bijvullen",
@@ -904,6 +910,10 @@ def start_google_home_live_stream(entity: HomeEntity) -> dict:
     if not entity.connection:
         raise ProviderError("De Google Home-koppeling voor deze camera ontbreekt.")
 
+    # Generate per-household/entity stream names for tenant isolation
+    rtsp_stream_name = _go2rtc_stream_name(entity.household_id, entity.id)
+    mjpeg_stream_name = _go2rtc_mjpeg_stream_name(entity.household_id, entity.id)
+
     payload = _google_home_request(
         entity.connection,
         "POST",
@@ -918,7 +928,7 @@ def start_google_home_live_stream(entity: HomeEntity) -> dict:
     try:
         relay_response = requests.put(
             f"{_go2rtc_api_url()}/api/streams",
-            params={"name": GO2RTC_STREAM_NAME, "src": rtsp_url},
+            params={"name": rtsp_stream_name, "src": rtsp_url},
             timeout=20,
         )
     except requests.RequestException as error:
@@ -928,22 +938,23 @@ def start_google_home_live_stream(entity: HomeEntity) -> dict:
     try:
         mjpeg_response = requests.put(
             f"{_go2rtc_api_url()}/api/streams",
-            params={"name": GO2RTC_MJPEG_STREAM_NAME, "src": f"ffmpeg:{GO2RTC_STREAM_NAME}#video=mjpeg"},
+            params={"name": mjpeg_stream_name, "src": f"ffmpeg:{rtsp_stream_name}#video=mjpeg"},
             timeout=20,
         )
     except requests.RequestException as error:
-        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": rtsp_stream_name}, timeout=10)
         raise ProviderError("De lokale videorelay is niet bereikbaar.") from error
     if not mjpeg_response.ok:
-        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": rtsp_stream_name}, timeout=10)
         raise ProviderError("De videorelay kon de browserstream niet starten.")
-    return {"expires_at": str(results.get("expiresAt") or ""), "stream_name": GO2RTC_MJPEG_STREAM_NAME}
+    return {"expires_at": str(results.get("expiresAt") or ""), "stream_name": mjpeg_stream_name, "rtsp_stream_name": rtsp_stream_name}
 
 
-def stop_google_home_live_stream() -> None:
+def stop_google_home_live_stream(mjpeg_stream_name: str, rtsp_stream_name: str) -> None:
+    """Stop a per-household/entity livestream."""
     try:
-        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_MJPEG_STREAM_NAME}, timeout=10)
-        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": mjpeg_stream_name}, timeout=10)
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": rtsp_stream_name}, timeout=10)
     except requests.RequestException:
         pass
 
