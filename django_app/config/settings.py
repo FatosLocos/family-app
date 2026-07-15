@@ -156,6 +156,12 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://family-
 # tasks inline in DEBUG unless a developer explicitly opts into a broker.
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "1" if DEBUG else "0") == "1"
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_MAX_RETRIES = 3
+CELERY_TASK_DEFAULT_RETRY_DELAY = 300
+CELERY_TASK_AUTORETRY_FOR = (Exception,)
+CELERY_RESULT_EXPIRES = 3600
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 600
 CELERY_BEAT_SCHEDULE = {
     "sync-active-calendar-connections": {"task": "integrations.tasks.sync_active_connections", "schedule": 900.0},
     "sync-home-connect-appliances": {"task": "integrations.tasks.sync_home_connect_connections", "schedule": 60.0},
@@ -170,6 +176,7 @@ CELERY_BEAT_SCHEDULE = {
     "refresh-household-notifications": {"task": "notifications.tasks.refresh_household_notifications", "schedule": 1800.0},
     "refresh-recurring-finance-rules": {"task": "finance.tasks.refresh_recurring_rules", "schedule": 21600.0},
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
+    "cleanup-stale-data": {"task": "integrations.tasks.cleanup_stale_data", "schedule": 86400.0},
 }
 
 BUNQ_OAUTH_CLIENT_ID = os.environ.get("BUNQ_OAUTH_CLIENT_ID", "")
