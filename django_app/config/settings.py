@@ -193,6 +193,8 @@ CELERY_BEAT_SCHEDULE = {
     "refresh-recurring-finance-rules": {"task": "finance.tasks.refresh_recurring_rules", "schedule": 21600.0},
     "refresh-household-weather": {"task": "household.tasks.refresh_household_weather", "schedule": 3600.0},
     "sync-home-assistant": {"task": "home.tasks.sync_home_assistant_connections", "schedule": 300.0},
+    "sync-ev-vehicle-data": {"task": "home.tasks.sync_ev_vehicle_data", "schedule": 1800.0},
+    "sync-energy-readings": {"task": "home.tasks.sync_energy_readings_from_home_assistant", "schedule": 3600.0},
     "cleanup-stale-data": {"task": "integrations.tasks.cleanup_stale_data", "schedule": 86400.0},
 }
 

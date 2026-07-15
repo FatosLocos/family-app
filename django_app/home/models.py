@@ -131,3 +131,75 @@ class HouseholdDocument(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+
+
+class EnergyReading(models.Model):
+    """Track energy consumption readings over time."""
+
+    class Unit(models.TextChoices):
+        KWH = "kwh", "kWh"
+        WH = "wh", "Wh"
+        MJ = "mj", "MJ"
+
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="energy_readings")
+    source = models.CharField(max_length=80, default="grid")  # "grid", "solar", "battery", etc.
+    consumption_kwh = models.DecimalField(max_digits=10, decimal_places=2)  # kWh consumed
+    production_kwh = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # kWh produced (solar)
+    timestamp = models.DateTimeField(db_index=True)
+    cost_eur = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        ordering = ("-timestamp",)
+        indexes = [models.Index(fields=["household", "-timestamp"]), models.Index(fields=["source", "-timestamp"])]
+
+
+class EVVehicle(models.Model):
+    """Track electric vehicles in the household."""
+
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="ev_vehicles")
+    name = models.CharField(max_length=120)
+    make = models.CharField(max_length=80, blank=True)
+    model = models.CharField(max_length=80, blank=True)
+    battery_capacity_kwh = models.DecimalField(max_digits=6, decimal_places=1, null=True, blank=True)
+    current_soc_percent = models.PositiveSmallIntegerField(default=0)  # State of charge
+    current_range_km = models.PositiveIntegerField(default=0)  # Estimated range in km
+    integration_provider = models.CharField(max_length=32, blank=True)  # e.g., "smartcar", "tesla_api"
+    external_id = models.CharField(max_length=300, blank=True)
+    is_charging = models.BooleanField(default=False)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self) -> str:
+        return f"{self.make} {self.model} ({self.current_soc_percent}%)"
+
+
+class EVChargingSession(models.Model):
+    """Track EV charging sessions."""
+
+    vehicle = models.ForeignKey(EVVehicle, on_delete=models.CASCADE, related_name="charging_sessions")
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField(null=True, blank=True)
+    start_soc_percent = models.PositiveSmallIntegerField()
+    end_soc_percent = models.PositiveSmallIntegerField(null=True, blank=True)
+    energy_added_kwh = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    location = models.CharField(max_length=200, blank=True)
+    cost_eur = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        ordering = ("-start_time",)
+        indexes = [models.Index(fields=["vehicle", "-start_time"])]
+
+    @property
+    def duration_minutes(self) -> int | None:
+        if self.end_time:
+            return int((self.end_time - self.start_time).total_seconds() / 60)
+        return None
