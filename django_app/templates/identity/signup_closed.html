@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+
+{% block title %}Registratie Gesloten · Family App{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-brand">
+    <p class="eyebrow">Registratie</p>
+    <h1>Registratie is gesloten.</h1>
+    <p>Family App is momenteel in invite-only modus. Je kunt alleen inloggen als je een uitnodiging hebt ontvangen.</p>
+  </div>
+  <div class="auth-form">
+    <p class="form-hint"><a href="{% url 'identity:login' %}">Inloggen met je account</a></p>
+  </div>
+</section>
+{% endblock %}

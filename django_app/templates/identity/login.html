@@ -1,1 +1,23 @@
-{% extends 'base.html' %}{% block title %}Inloggen · Family App{% endblock %}{% block content %}<section class="auth-shell"><div class="auth-brand"><p class="eyebrow">Gezinsapp</p><h1>Alles voor thuis, op één plek.</h1><p>Plan samen, houd overzicht en kies wat vandaag belangrijk is.</p></div><form method="post" class="auth-form">{% csrf_token %}<h2>Inloggen</h2>{% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}<label>{{ form.username.label }}{{ form.username }}</label><label>{{ form.password.label }}{{ form.password }}</label><button class="button button-primary" type="submit">Inloggen</button><p>Nog geen huishouden? <a href="{% url 'identity:signup' %}">Begin opnieuw</a></p></form></section>{% endblock %}
+{% extends 'base.html' %}
+
+{% block title %}Inloggen · Family App{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-brand">
+    <p class="eyebrow">Gezinsapp</p>
+    <h1>Alles voor thuis, op één plek.</h1>
+    <p>Plan samen, houd overzicht en kies wat vandaag belangrijk is.</p>
+  </div>
+  <form method="post" class="auth-form">
+    {% csrf_token %}
+    <h2>Inloggen</h2>
+    {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+    <label>{{ form.username.label }}{{ form.username }}</label>
+    <label>{{ form.password.label }}{{ form.password }}</label>
+    <button class="button button-primary" type="submit">Inloggen</button>
+    <p class="form-hint"><a href="{% url 'identity:password_reset' %}">Wachtwoord vergeten?</a></p>
+    <p>Nog geen huishouden? <a href="{% url 'identity:signup' %}">Begin opnieuw</a></p>
+  </form>
+</section>
+{% endblock %}

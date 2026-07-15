@@ -10,6 +10,7 @@ def generate_invite_code() -> str:
 
 class Household(models.Model):
     name = models.CharField(max_length=160)
+    invite_only = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self) -> str:
