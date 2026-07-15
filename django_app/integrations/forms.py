@@ -37,8 +37,9 @@ class HomeConnectConfigForm(forms.Form):
 
 
 class SmartcarConfigForm(forms.Form):
-    client_id = forms.CharField(label="Smartcar client ID", max_length=240)
-    client_secret = forms.CharField(label="Smartcar client secret", required=False, widget=forms.PasswordInput(render_value=False))
+    client_id = forms.CharField(label="API client ID", max_length=240, help_text="De API Credentials client ID voor server-side synchronisatie (meestal beginnend met client_).")
+    client_secret = forms.CharField(label="API client secret", required=False, widget=forms.PasswordInput(render_value=False), help_text="De bijbehorende API secret. Deze wordt alleen server-side versleuteld opgeslagen.")
+    connect_client_id = forms.CharField(label="Connect client ID", max_length=240, help_text="De client ID uit de Smartcar-appconfiguratie voor de browseraanmelding. Dit is niet de API Credentials client ID.")
     country = forms.CharField(label="Standaardland", max_length=2, initial="NL", required=False, help_text="Tweeletterige landcode voor de voertuigkiezer, bijvoorbeeld NL.")
     allow_remote_controls = forms.BooleanField(label="Vergrendelen en ontgrendelen toestaan", required=False, help_text="Vraag alleen aan als je deze externe voertuigbediening bewust wilt gebruiken.")
 

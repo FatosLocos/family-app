@@ -391,9 +391,10 @@ def finish_home_connect_connection(request, code: str, state: str) -> Integratio
 
 
 def start_smartcar_connection(request) -> str:
-    client_id, _, config = get_app_config(request.household, "smartcar")
-    if not client_id:
-        raise ValueError("Vul eerst de Smartcar-clientgegevens in.")
+    _, _, config = get_app_config(request.household, "smartcar")
+    connect_client_id = str(config.get("connect_client_id") or "").strip()
+    if not connect_client_id:
+        raise ValueError("Vul eerst het Smartcar Connect client ID uit de appconfiguratie in.")
     connection, _ = IntegrationConnection.objects.get_or_create(
         household=request.household,
         user=request.user,
@@ -407,7 +408,7 @@ def start_smartcar_connection(request) -> str:
         scopes.append("control_security")
     params = {
         "response_type": "code",
-        "client_id": client_id,
+        "client_id": connect_client_id,
         "redirect_uri": f"{public_origin(request)}/instellingen/smartcar/callback/",
         "scope": " ".join(scopes),
         "state": state,

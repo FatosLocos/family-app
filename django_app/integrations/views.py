@@ -95,7 +95,7 @@ def index(request):
         "spotify_redirect_url": f"{public_origin(request)}/instellingen/spotify/callback/",
         "home_connect_form": HomeConnectConfigForm(initial={"client_id": home_connect_client_id}),
         "home_connect_redirect_url": f"{public_origin(request)}/instellingen/home-connect/callback/",
-        "smartcar_form": SmartcarConfigForm(initial={"client_id": smartcar_client_id, "country": smartcar_settings.get("country", "NL"), "allow_remote_controls": smartcar_settings.get("allow_remote_controls", False)}),
+        "smartcar_form": SmartcarConfigForm(initial={"client_id": smartcar_client_id, "connect_client_id": smartcar_settings.get("connect_client_id", ""), "country": smartcar_settings.get("country", "NL"), "allow_remote_controls": smartcar_settings.get("allow_remote_controls", False)}),
         "smartcar_redirect_url": f"{public_origin(request)}/instellingen/smartcar/callback/",
         "google_home_form": GoogleHomeConfigForm(initial={"client_id": google_home_client_id, "project_id": google_home_settings.get("project_id", ""), "events_enabled": google_home_settings.get("events_enabled", False), "pubsub_subscription": google_home_settings.get("pubsub_subscription", "")}),
         "google_home_redirect_url": f"{public_origin(request)}/instellingen/google-home/callback/",
@@ -293,7 +293,17 @@ def save_home_connect_config(request):
 def save_smartcar_config(request):
     form = SmartcarConfigForm(request.POST)
     if form.is_valid():
-        save_app_config(request.household, "smartcar", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {"country": (form.cleaned_data["country"] or "NL").upper(), "allow_remote_controls": form.cleaned_data["allow_remote_controls"]})
+        save_app_config(
+            request.household,
+            "smartcar",
+            form.cleaned_data["client_id"],
+            form.cleaned_data["client_secret"],
+            {
+                "connect_client_id": form.cleaned_data["connect_client_id"].strip(),
+                "country": (form.cleaned_data["country"] or "NL").upper(),
+                "allow_remote_controls": form.cleaned_data["allow_remote_controls"],
+            },
+        )
         messages.success(request, "Smartcar-configuratie veilig opgeslagen.")
     return redirect("integrations:index")
 
