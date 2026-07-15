@@ -88,6 +88,16 @@ APP_DB_OWNER=family_app_owner
   and then reassigns every restored table/view/sequence/function to the owner
   role and re-grants DML to the app role, since `pg_restore` otherwise leaves
   everything owned by whichever role ran the restore.
+- `ops/migrate-to-owner-role.sh` is a one-time transition for a database that
+  was created under the old single-role model, where the app role owned the
+  schema/database directly. `ALTER SCHEMA/DATABASE ... OWNER TO` only updates
+  the *owner* field - it does not revoke a pre-existing explicit ACL entry for
+  the old owner, so the app role can end up keeping a stale CREATE grant on
+  the schema even after ownership moves to the new owner role. This surfaced
+  during the production rollout of this design: `CREATE TABLE` still worked as
+  the app role until an explicit `REVOKE ALL ... FROM <app role>` was added
+  before the final GRANTs. The script now does this revoke-then-grant
+  unconditionally, so it's safe to run whether or not that stale entry exists.
 
 ### Why migrations need a different connection string
 

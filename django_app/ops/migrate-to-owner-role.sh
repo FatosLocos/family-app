@@ -99,6 +99,13 @@ BEGIN
     EXECUTE format('ALTER FUNCTION %I.%I OWNER TO %I', item.nspname, item.proname, owner_name);
   END LOOP;
 
+  -- The app role was the schema/database owner before this transition, so it
+  -- may carry a stale explicit ACL entry (e.g. "family_app=UC/...") that
+  -- ALTER ... OWNER TO does not clean up - only the ownership field changes,
+  -- not pre-existing grants to the old owner. Strip everything and re-grant
+  -- exactly what the app role needs, so no residual CREATE/DDL right survives.
+  EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', app_name);
+  EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', '$APP_DB_NAME', app_name);
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', '$APP_DB_NAME', app_name);
   EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app_name);
   EXECUTE format('ALTER DEFAULT PRIVILEGES FOR USER %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', owner_name, app_name);
