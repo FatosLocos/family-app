@@ -19,6 +19,18 @@ from notifications.models import Notification
 from household.tasks import process_receipt_ocr, refresh_household_shopping_prices
 
 
+def _is_htmx_request(request) -> bool:
+    """Check if request is an HTMX partial request."""
+    return request.headers.get("HX-Request") == "true"
+
+
+def _form_error_response(request, template: str, context: dict, status: int = 422):
+    """Return form with validation errors for HTMX requests."""
+    response = render(request, template, context, status=status)
+    response["HX-Reswap"] = "innerHTML"
+    return response
+
+
 def _shopping_item_multiplier(item):
     """Use an explicit count such as '2 pakken'; weights stay one product."""
     match = re.match(r"^\s*(\d+)\s*(?:x\b|stuks?\b|pakken?\b|flessen?\b|zakken?\b|dozen?\b)", item.quantity.casefold())
@@ -272,8 +284,12 @@ def add_task(request):
         task = form.save(commit=False)
         task.household = request.household
         task.save()
+        if _is_htmx_request(request):
+            return render(request, "household/partials/task_form_success.html", {"message": "Taak toegevoegd."})
         messages.success(request, "Taak toegevoegd.")
     else:
+        if _is_htmx_request(request):
+            return _form_error_response(request, "household/partials/task_form.html", {"form": form})
         messages.error(request, "Controleer de taakvelden.")
     return redirect("household:index")
 
@@ -306,8 +322,12 @@ def add_shopping_item(request):
         item.list = shopping_list
         item.save()
         refresh_household_shopping_prices.delay(request.household.id)
+        if _is_htmx_request(request):
+            return render(request, "household/partials/item_form_success.html", {"message": "Boodschap toegevoegd."})
         messages.success(request, "Boodschap toegevoegd. Prijzen worden bijgewerkt.")
     else:
+        if _is_htmx_request(request):
+            return _form_error_response(request, "household/partials/shopping_item_form.html", {"form": form})
         messages.error(request, "Vul een productnaam in.")
     return redirect("household:index")
 
@@ -337,7 +357,12 @@ def add_meal(request):
         meal.household = request.household
         meal.save()
         _create_meal_ingredients(meal, form.cleaned_data["ingredients_text"])
+        if _is_htmx_request(request):
+            return render(request, "household/partials/item_form_success.html", {"message": "Maaltijd ingepland."})
         messages.success(request, "Maaltijd ingepland.")
+    else:
+        if _is_htmx_request(request):
+            return _form_error_response(request, "household/partials/meal_form.html", {"form": form})
     return _household_tab_redirect("maaltijden")
 
 
@@ -350,7 +375,12 @@ def add_routine(request):
         routine = form.save(commit=False)
         routine.household = request.household
         routine.save()
+        if _is_htmx_request(request):
+            return render(request, "household/partials/item_form_success.html", {"message": "Routine toegevoegd."})
         messages.success(request, "Routine toegevoegd.")
+    else:
+        if _is_htmx_request(request):
+            return _form_error_response(request, "household/partials/routine_form.html", {"form": form, "request": request})
     return redirect("household:index")
 
 

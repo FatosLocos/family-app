@@ -1,0 +1,12 @@
+<form method="post" hx-post="{% url 'household:add_routine' %}" hx-target="this" hx-swap="outerHTML">
+  {% csrf_token %}
+  {% for field in form %}
+    <label{% if field.errors %} class="field-has-error"{% endif %}>
+      {{ field.label }}
+      {{ field }}
+      {% if field.help_text %}<small class="field-help">{{ field.help_text|safe }}</small>{% endif %}
+      {% for error in field.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
+    </label>
+  {% endfor %}
+  <button class="button button-primary" type="submit">Routine toevoegen</button>
+</form>
