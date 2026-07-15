@@ -1084,6 +1084,15 @@
     }));
   };
 
+  const registerDangerButtonConfirmation = () => {
+    document.addEventListener("submit", (e) => {
+      const dangerBtn = e.target.querySelector(".button-danger, .icon-button.destructive");
+      if (dangerBtn && !window.confirm("Bent u zeker? Deze actie kan niet ongedaan worden gemaakt.")) {
+        e.preventDefault();
+      }
+    }, true);
+  };
+
   applyTheme();
   document.addEventListener("DOMContentLoaded", () => {
     refreshIcons();
@@ -1095,6 +1104,7 @@
       localStorage.setItem("family-app-theme", next);
       applyTheme();
     });
+    registerDangerButtonConfirmation();
     document.querySelectorAll("[data-command-open]").forEach((button) => button.addEventListener("click", () => openDialog("command-palette", button)));
     document.querySelectorAll("[data-live-search]").forEach((input) => {
       let timer;
