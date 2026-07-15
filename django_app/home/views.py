@@ -586,3 +586,77 @@ def delete_document(request, document_id):
     document.delete()
     messages.success(request, "Document verwijderd.")
     return _tab_redirect("documenten")
+
+
+@require_POST
+def ha_webhook_receiver(request, webhook_token: str):
+    """Receive state change notifications from Home Assistant webhook."""
+    from home.ha_integration import handle_state_change_webhook
+
+    try:
+        payload = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    household_id = payload.get("household_id")
+    if not household_id or webhook_token != _generate_webhook_token(household_id):
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    success = handle_state_change_webhook(household_id, payload)
+    return JsonResponse({"success": success, "entity_id": payload.get("entity_id", "unknown")})
+
+
+@household_required
+def ha_entities_list(request):
+    """Get list of Home Assistant entities for the household."""
+    from home.ha_integration import get_ha_entities
+
+    entities = get_ha_entities(request.household.id)
+    # Filter to supported domains
+    supported_domains = {"light", "switch", "climate", "cover", "lock", "scene", "automation", "script"}
+    filtered = [e for e in entities if e.get("entity_id", "").split(".")[0] in supported_domains]
+
+    return JsonResponse(
+        {
+            "entities": [
+                {
+                    "entity_id": e.get("entity_id", ""),
+                    "state": e.get("state", ""),
+                    "attributes": e.get("attributes", {}),
+                }
+                for e in filtered
+            ]
+        }
+    )
+
+
+@household_required
+@require_POST
+def ha_control_entity(request, entity_id: str):
+    """Control a Home Assistant entity (turn on/off, etc.)."""
+    from home.ha_integration import call_ha_service
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    action = data.get("action", "turn_on").lower()
+    domain = entity_id.split(".")[0] if "." in entity_id else ""
+
+    if domain not in {"light", "switch", "cover", "lock", "climate"}:
+        return JsonResponse({"error": "Unsupported domain"}, status=400)
+
+    service = "turn_on" if action == "on" else "turn_off" if action == "off" else action
+
+    success = call_ha_service(request.household.id, domain, service, entity_id, data.get("data"))
+    return JsonResponse({"success": success, "action": action, "entity_id": entity_id})
+
+
+def _generate_webhook_token(household_id: int) -> str:
+    """Generate a deterministic webhook token for a household."""
+    import hashlib
+
+    secret = settings.SECRET_KEY
+    token_input = f"{household_id}:{secret}:ha-webhook"
+    return hashlib.sha256(token_input.encode()).hexdigest()[:32]

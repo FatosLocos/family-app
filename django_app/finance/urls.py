@@ -12,4 +12,7 @@ urlpatterns = [
     path("terugkerend/<int:rule_id>/aanpassen/", views.update_recurring_rule, name="update_recurring_rule"),
     path("transacties/<int:transaction_id>/terugkerend/", views.set_recurring_override, name="set_recurring_override"),
     path("transacties/<int:transaction_id>/categorie/", views.update_transaction_category, name="update_transaction_category"),
+    path("api/psd2/link-init/", views.psd2_link_init, name="psd2_link_init"),
+    path("api/psd2/link-callback/", views.psd2_link_callback, name="psd2_link_callback"),
+    path("api/psd2/accounts/", views.psd2_accounts_list, name="psd2_accounts_list"),
 ]
