@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -27,6 +28,25 @@ class HueProviderError(ProviderError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    max_retries = 3
+    base_delay = 1
+    for attempt in range(max_retries):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
+                    time.sleep(retry_after)
+                    continue
+            return response
+        except requests.RequestException:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+    return response
 
 
 GO2RTC_STREAM_NAME = "family-app-live"
@@ -84,6 +104,9 @@ def _safe_response_json(response, provider: str) -> dict:
         raise ProviderError(f"{provider} gaf geen geldige reactie.") from error
     if response.ok:
         return payload if isinstance(payload, dict) else {}
+
+    if response.status_code == 429:
+        raise ProviderError(f"{provider} heeft te veel aanvragen ontvangen. Probeer het later opnieuw.")
 
     if provider == "Outlook":
         message = payload.get("error", {}).get("message") if isinstance(payload.get("error"), dict) else payload.get("error_description")
@@ -163,6 +186,8 @@ def _oauth_response(response, provider: str) -> dict:
         payload = response.json() if response.content else {}
     except ValueError as error:
         raise ProviderError(f"{provider} gaf geen geldige reactie.") from error
+    if response.status_code == 429:
+        raise ProviderError(f"{provider} heeft te veel aanvragen ontvangen. Probeer het later opnieuw.")
     if not response.ok or not isinstance(payload, dict):
         message = payload.get("error_description") or payload.get("error") if isinstance(payload, dict) else ""
         raise ProviderError(str(message or f"{provider} weigerde de aanvraag.")[:240])
@@ -294,7 +319,7 @@ def _home_connect_request(connection: IntegrationConnection, method: str, path: 
 
     token = _refresh_connection_token(connection, "Home Connect", HOME_CONNECT_OAUTH_TOKEN_URL)
     try:
-        response = requests.request(method, f"https://api.home-connect.com/api{path}", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.bsh.sdk.v1+json", "Content-Type": "application/vnd.bsh.sdk.v1+json"}, json=payload, timeout=20)
+        response = _request_with_retry(method, f"https://api.home-connect.com/api{path}", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.bsh.sdk.v1+json", "Content-Type": "application/vnd.bsh.sdk.v1+json"}, json=payload, timeout=20)
     except requests.RequestException as error:
         raise ProviderError("Home Connect is tijdelijk niet bereikbaar.") from error
     if allow_empty and getattr(response, "status_code", 200) in {204, 404, 409}:
@@ -2035,7 +2060,7 @@ def _outlook_token(connection: IntegrationConnection) -> str:
 def sync_outlook(connection: IntegrationConnection) -> dict:
     token = _outlook_token(connection)
     headers = {"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="Europe/Amsterdam"'}
-    calendars_response = requests.get("https://graph.microsoft.com/v1.0/me/calendars?$select=id,name", headers=headers, timeout=20)
+    calendars_response = _request_with_retry("GET", "https://graph.microsoft.com/v1.0/me/calendars?$select=id,name", headers=headers, timeout=20)
     calendars = _safe_response_json(calendars_response, "Outlook").get("value", [])
     start, end = timezone.now() - timedelta(days=14), timezone.now() + timedelta(days=120)
     total, synced_calendars = 0, 0
@@ -2055,15 +2080,19 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
         if not source.is_enabled:
             continue
         url = f"https://graph.microsoft.com/v1.0/me/calendars/{calendar['id']}/calendarView"
-        response = requests.get(url, headers=headers, params={"startDateTime": start.isoformat(), "endDateTime": end.isoformat(), "$select": "id,subject,start,end,isAllDay,location"}, timeout=30)
-        payload = _safe_response_json(response, "Outlook")
-        for event in payload.get("value", []):
-            if not event.get("id"):
-                continue
-            starts_at = _parse_graph_datetime(event.get("start", {}))
-            ends_at = _parse_graph_datetime(event.get("end", {}))
-            CalendarEvent.objects.update_or_create(household=connection.household, source=source, external_id=event["id"], defaults={"title": event.get("subject") or "Outlook afspraak", "starts_at": starts_at, "ends_at": ends_at, "is_all_day": bool(event.get("isAllDay")), "location": event.get("location", {}).get("displayName", "")})
-            total += 1
+        params = {"startDateTime": start.isoformat(), "endDateTime": end.isoformat(), "$select": "id,subject,start,end,isAllDay,location"}
+        while url:
+            response = _request_with_retry("GET", url, headers=headers, params=params if url == f"https://graph.microsoft.com/v1.0/me/calendars/{calendar['id']}/calendarView" else None, timeout=30)
+            payload = _safe_response_json(response, "Outlook")
+            for event in payload.get("value", []):
+                if not event.get("id"):
+                    continue
+                starts_at = _parse_graph_datetime(event.get("start", {}))
+                ends_at = _parse_graph_datetime(event.get("end", {}))
+                CalendarEvent.objects.update_or_create(household=connection.household, source=source, external_id=event["id"], defaults={"title": event.get("subject") or "Outlook afspraak", "starts_at": starts_at, "ends_at": ends_at, "is_all_day": bool(event.get("isAllDay")), "location": event.get("location", {}).get("displayName", "")})
+                total += 1
+            url = payload.get("@odata.nextLink")
+            params = None
         source.last_sync_at = timezone.now()
         source.save(update_fields=["last_sync_at", "updated_at"])
         synced_calendars += 1
