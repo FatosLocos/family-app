@@ -4,7 +4,7 @@ from celery import shared_task
 from django.utils import timezone
 
 from common.db_scope import household_db_scope
-from home.models import HomeAssistantConfig, EVVehicle
+from home.models import HomeAssistantConfig, HomeEntity, EVVehicle
 from home.services import HomeAssistantError, sync_entities
 from households.models import Household
 
@@ -24,42 +24,38 @@ def sync_home_assistant_connections():
 
 @shared_task
 def sync_ev_vehicle_data():
-    """Sync EV vehicle data from Smartcar and other integrations."""
-    from integrations.models import IntegrationConnection
-
+    """Project Smartcar vehicle entities (synced by integrations.providers.sync_smartcar)
+    into the EVVehicle dashboard model. Does not talk to Smartcar directly -
+    integrations.tasks.sync_active_connections already keeps HomeEntity up to date."""
     for household in Household.objects.all():
         with household_db_scope(household.pk):
-            # Get Smartcar connections
-            smartcar_connections = IntegrationConnection.objects.filter(
-                household=household, provider="smartcar", is_enabled=True
-            )
+            for entity in HomeEntity.objects.for_household(household).filter(source=HomeEntity.Source.SMARTCAR):
+                attrs = entity.attributes or {}
+                signals = attrs.get("smartcar_signals") or {}
+                battery = signals.get("battery") or {}
+                charge = signals.get("charge") or {}
+                capacity = signals.get("battery:capacity") or {}
 
-            for connection in smartcar_connections:
-                try:
-                    # Fetch vehicle data from Smartcar API
-                    vehicles_data = connection.fetch_vehicles()
-                    if not vehicles_data:
-                        continue
+                percent_remaining = battery.get("percentRemaining")
+                soc_percent = round(percent_remaining * 100) if isinstance(percent_remaining, (int, float)) else 0
+                range_km = battery.get("range")
+                capacity_kwh = capacity.get("capacity")
 
-                    for vehicle_data in vehicles_data:
-                        vehicle, created = EVVehicle.objects.update_or_create(
-                            household=household,
-                            external_id=vehicle_data.get("id"),
-                            defaults={
-                                "name": vehicle_data.get("name", "Unknown"),
-                                "make": vehicle_data.get("make", ""),
-                                "model": vehicle_data.get("model", ""),
-                                "battery_capacity_kwh": vehicle_data.get("battery_capacity_kwh"),
-                                "current_soc_percent": vehicle_data.get("soc_percent", 0),
-                                "current_range_km": vehicle_data.get("range_km", 0),
-                                "is_charging": vehicle_data.get("is_charging", False),
-                                "last_sync_at": timezone.now(),
-                            },
-                        )
-
-                except Exception as e:
-                    logger.error(f"Failed to sync EV data for connection {connection.id}: {e}")
-                    continue
+                EVVehicle.objects.update_or_create(
+                    household=household,
+                    external_id=attrs.get("smartcar_vehicle_id") or entity.entity_id,
+                    defaults={
+                        "name": entity.name,
+                        "make": attrs.get("smartcar_make") or "",
+                        "model": attrs.get("smartcar_model") or "",
+                        "battery_capacity_kwh": capacity_kwh if isinstance(capacity_kwh, (int, float)) else None,
+                        "current_soc_percent": soc_percent,
+                        "current_range_km": round(range_km) if isinstance(range_km, (int, float)) else 0,
+                        "integration_provider": "smartcar",
+                        "is_charging": str(charge.get("state", "")).upper() == "CHARGING",
+                        "last_sync_at": timezone.now(),
+                    },
+                )
 
 
 @shared_task

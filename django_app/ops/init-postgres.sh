@@ -28,7 +28,10 @@ REVOKE ALL ON DATABASE $APP_DB_NAME FROM public;
 -- Grant owner role all permissions on schema (owner-only operations)
 GRANT ALL ON SCHEMA public TO $APP_DB_OWNER;
 
--- Grant app role usage (not create) on schema
+-- Grant app role usage (not create) on schema, and CONNECT on the database
+-- (REVOKE ALL FROM public above also revokes the default public CONNECT
+-- grant, so the app role needs it back explicitly or it can't log in at all)
+GRANT CONNECT ON DATABASE $APP_DB_NAME TO $APP_DB_USER;
 GRANT USAGE ON SCHEMA public TO $APP_DB_USER;
 
 -- Set default privileges so future tables are owned by owner, app can SELECT/INSERT/UPDATE/DELETE

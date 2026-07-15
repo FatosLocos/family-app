@@ -8,7 +8,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from finance.models import BankConnection, BankAccount, Transaction
-from integrations.crypto import encrypt, decrypt
+from integrations.crypto import decrypt
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class PlaidPSD2Client:
         self.client_id = client_id or settings.PLAID_CLIENT_ID
         self.secret = secret or settings.PLAID_SECRET
         self.env = settings.PLAID_ENV  # 'sandbox', 'development', 'production'
-        self.base_url = f"https://api.{self.env}.plaid.com" if self.env != "production" else "https://api.plaid.com"
+        self.base_url = f"https://{self.env}.plaid.com"
 
     def create_link_token(self, user_id: str, country_codes: list[str] = None) -> dict | None:
         """Create a Plaid Link token for account connection."""
@@ -126,6 +126,7 @@ def sync_psd2_accounts(connection_id: int, household_id: int) -> bool:
                     connection=connection,
                     provider_account_id=account_data.get("account_id"),
                     defaults={
+                        "household_id": household_id,
                         "name": account_data.get("name", "Unknown"),
                         "iban": account_data.get("iban", ""),
                         "currency": account_data.get("balances", {}).get("iso_currency_code", "EUR"),
@@ -177,6 +178,7 @@ def sync_psd2_transactions(connection_id: int, household_id: int, days: int = 90
                     account=account,
                     provider_transaction_id=txn_data.get("transaction_id"),
                     defaults={
+                        "household_id": household_id,
                         "booked_at": datetime.fromisoformat(txn_data.get("date")).date(),
                         "description": txn_data.get("name", ""),
                         "counterparty": txn_data.get("merchant_name", txn_data.get("name", "")),

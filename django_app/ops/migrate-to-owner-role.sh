@@ -1,59 +1,49 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 1 ]; then
-  echo "Gebruik: $0 /pad/naar/family-app-backup.dump" >&2
-  exit 64
-fi
+# One-time transition for an EXISTING database created under the old
+# single-role model (the app role owned everything) to the new owner/app
+# split (ops/init-postgres.sh). Safe to run more than once: CREATE ROLE
+# IF NOT EXISTS-style guards make it idempotent. Rehearsed against a
+# disposable local database that mimicked production before use here -
+# see SECURITY.md for the full design.
 
-backup_file="$1"
-if [ ! -f "$backup_file" ]; then
-  echo "Back-upbestand niet gevonden: $backup_file" >&2
-  exit 66
-fi
+: "${APP_DB_NAME:?APP_DB_NAME is required}"
+: "${APP_DB_USER:?APP_DB_USER is required}"
+: "${APP_DB_OWNER:=${APP_DB_USER}_owner}"
 
 compose_file="${COMPOSE_FILE:-/opt/family-app/docker-compose.django.yml}"
 env_file="${ENV_FILE:-/opt/family-app/django_app/.env}"
 compose() {
   docker compose --env-file "$env_file" -f "$compose_file" "$@"
 }
-app_db_name="${APP_DB_NAME:-$(compose exec -T postgres printenv APP_DB_NAME)}"
-app_db_user="${APP_DB_USER:-$(compose exec -T postgres printenv APP_DB_USER)}"
-app_db_owner="${APP_DB_OWNER:-${app_db_user}_owner}"
-media_file="${backup_file%.dump}.media.tar"
 
-case "$app_db_name" in
-  ''|*[!A-Za-z0-9_]* )
-    echo "Ongeldige PostgreSQL-databasenaam." >&2
-    exit 64
-    ;;
-esac
-case "$app_db_user" in
-  ''|*[!A-Za-z0-9_]* )
-    echo "Ongeldige PostgreSQL-appgebruiker." >&2
-    exit 64
-    ;;
-esac
-echo "Herstel wist de huidige Family App-database en laadt: $backup_file"
-printf "Typ HERSTEL om door te gaan: "
+echo "Overgang naar owner/app-rolscheiding voor database '$APP_DB_NAME'."
+echo "Maak eerst een back-up (ops/backup.sh) als dat nog niet is gedaan voor dit onderhoudsmoment."
+printf "Typ OVERGANG om door te gaan: "
 read answer
-[ "$answer" = "HERSTEL" ] || exit 0
+[ "$answer" = "OVERGANG" ] || exit 0
 
-compose exec -T postgres pg_restore -U postgres -d "$app_db_name" --clean --if-exists --no-owner < "$backup_file"
+compose exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$APP_DB_OWNER') THEN
+    CREATE ROLE $APP_DB_OWNER NOLOGIN;
+  END IF;
+END
+\$\$;
+SQL
 
-# Restore owns objects via superuser. Reassign ownership to owner role (DDL authority).
-# Grant app role DML-only permissions (SELECT/INSERT/UPDATE/DELETE, no DDL, no ALTER RLS).
-compose exec -T postgres psql -U postgres -d "$app_db_name" -v ON_ERROR_STOP=1 <<SQL
+compose exec -T postgres psql -U postgres -d "$APP_DB_NAME" -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 DECLARE
   item record;
-  owner_name text := '$app_db_owner';
-  app_name text := '$app_db_user';
+  owner_name text := '$APP_DB_OWNER';
+  app_name text := '$APP_DB_USER';
 BEGIN
-  -- Reassign schema to owner role
+  EXECUTE format('ALTER DATABASE %I OWNER TO %I', '$APP_DB_NAME', owner_name);
   EXECUTE format('ALTER SCHEMA public OWNER TO %I', owner_name);
 
-  -- Iterate restored objects and reassign ownership
   FOR item IN
     SELECT namespace.nspname, object.relname, object.relkind
     FROM pg_class object
@@ -73,7 +63,6 @@ BEGIN
       owner_name
     );
 
-    -- Grant app role DML permissions (no DDL)
     IF item.relkind IN ('r', 'p', 'm') THEN
       EXECUTE format(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON %s %I.%I TO %I',
@@ -86,13 +75,10 @@ BEGIN
         app_name
       );
     ELSIF item.relkind = 'v' THEN
-      -- PostgreSQL's GRANT statement has no "ON VIEW" form; views are
-      -- granted through the same "ON TABLE" clause as ordinary tables.
       EXECUTE format('GRANT SELECT ON TABLE %I.%I TO %I', item.nspname, item.relname, app_name);
     END IF;
   END LOOP;
 
-  -- Grant app role usage on sequences
   FOR item IN
     SELECT namespace.nspname, object.relname
     FROM pg_class object
@@ -104,7 +90,6 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SEQUENCE %I.%I TO %I', item.nspname, item.relname, app_name);
   END LOOP;
 
-  -- Reassign functions/procedures to owner role
   FOR item IN
     SELECT namespace.nspname, object.proname
     FROM pg_proc object
@@ -114,11 +99,12 @@ BEGIN
     EXECUTE format('ALTER FUNCTION %I.%I OWNER TO %I', item.nspname, item.proname, owner_name);
   END LOOP;
 
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', '$APP_DB_NAME', app_name);
+  EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app_name);
+  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR USER %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', owner_name, app_name);
+  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR USER %I IN SCHEMA public GRANT USAGE ON SEQUENCES TO %I', owner_name, app_name);
 END
 \$\$;
 SQL
 
-if [ -f "$media_file" ]; then
-  compose exec -T web \
-    sh -c 'mkdir -p /app/media && find /app/media -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -m --no-same-owner --no-same-permissions -C /app/media -xf -' < "$media_file"
-fi
+echo "Overgang voltooid. $APP_DB_OWNER bezit nu schema/tabellen; $APP_DB_USER heeft alleen DML."

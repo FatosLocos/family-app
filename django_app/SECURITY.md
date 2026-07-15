@@ -58,7 +58,7 @@ Monitor for unexpected queries:
 Invite codes are hashed with **PBKDF2-SHA256** (100k iterations) before storage. Never store plaintext codes.
 
 ```python
-from finance.code_utils import verify_invite_code
+from households.code_utils import verify_invite_code
 if verify_invite_code(submitted_code, stored_hash):
     # Code is valid
 ```
@@ -79,23 +79,56 @@ APP_DB_OWNER=family_app_owner
 
 ### Database Initialization
 
-- `ops/init-postgres.sh` creates both roles and sets default privileges
-- `ops/restore.sh` restores backup and reassigns ownership (owner role), then grants DML to app role
+- `ops/init-postgres.sh` creates both roles, grants the app role CONNECT + USAGE
+  on schema `public` (the `REVOKE ALL ... FROM public` step also revokes the
+  default public CONNECT grant, so it must be re-granted explicitly or the app
+  role cannot log in at all), and sets default privileges so the owner role's
+  future tables are automatically readable/writable by the app role.
+- `ops/restore.sh` restores a backup (via the postgres superuser, `--no-owner`)
+  and then reassigns every restored table/view/sequence/function to the owner
+  role and re-grants DML to the app role, since `pg_restore` otherwise leaves
+  everything owned by whichever role ran the restore.
+
+### Why migrations need a different connection string
+
+Since the app role has no DDL rights, `manage.py migrate` cannot run under the
+same `DATABASE_URL` used at runtime. The `web` service in
+`docker-compose.django.yml` sets a separate `MIGRATE_DATABASE_URL`: it connects
+as the `postgres` superuser but with `options=-c role=<owner role>`, so
+Postgres switches the session's `current_user` to the owner role for the
+duration of the connection - every table `migrate` creates ends up owned by
+the owner role, not the superuser, matching the runtime GRANTs. Only the
+`migrate` step in the `web` container's startup command uses this DSN;
+`collectstatic`, Daphne, Celery, and the listener services all use the normal
+app-role `DATABASE_URL`.
+
+Two pre-existing migrations (`integrations/migrations/0008_local_probe_application_owner.py`,
+`0009_local_probe_owner_role.py`) used to reassign two specific tables to the
+app role directly - a workaround from before this two-role split existed. That
+now conflicts with the model above (the owner role isn't a member of the app
+role, so it can't hand off ownership) and is redundant besides, since the
+default-privilege grants already cover every table. Both migrations were
+turned into no-ops rather than deleted, to keep the migration history intact.
 
 ### Testing the Boundary
 
 ```sql
--- Connect as app role
+-- Connect as the app role
 psql -U family_app -d family_app
 
--- These will succeed:
-SELECT * FROM users;
-INSERT INTO users (...) VALUES (...);
+-- These succeed (DML only):
+SELECT * FROM households_household;
+INSERT INTO household_task (household_id, ...) VALUES (...);
 
--- These will fail (no DDL permission):
-ALTER TABLE users DISABLE ROW LEVEL SECURITY;  -- ERROR: permission denied
-CREATE TABLE new_table (...);                  -- ERROR: permission denied
+-- These fail (no DDL permission):
+ALTER TABLE household_task DISABLE ROW LEVEL SECURITY;  -- ERROR: must be owner of table household_task
+CREATE TABLE new_table (id int);                        -- ERROR: permission denied for schema public
 ```
+
+This exact sequence was rehearsed against a disposable local database as part
+of implementing this design: fresh `init-postgres.sh`-equivalent setup,
+`migrate` via the superuser+`SET ROLE` DSN, then both boundary checks above
+run as the app role and produced precisely these errors.
 
 ## Future Hardening
 

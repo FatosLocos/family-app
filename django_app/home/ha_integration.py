@@ -1,74 +1,18 @@
-"""Home Assistant custom integration via webhooks and REST API."""
-import json
+"""Home Assistant custom integration via webhooks and REST API.
+
+The webhook side of this integration is receive-only (see
+home.views.ha_webhook_receiver): Home Assistant must be configured manually
+with a REST command + automation pointing at that URL, since HA has no
+stable public API for a third party to register automations remotely."""
 import logging
 from typing import Any
 
 import requests
-from django.conf import settings
 from django.utils import timezone
 
-from home.models import HomeAssistantConfig, HomeEntity
-from integrations.crypto import encrypt
+from home.models import HomeEntity
 
 logger = logging.getLogger(__name__)
-
-
-def register_webhook(config: HomeAssistantConfig, webhook_url: str) -> dict[str, Any] | None:
-    """Register a webhook endpoint in Home Assistant for state change notifications."""
-    try:
-        token = config.token_encrypted
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-
-        webhook_body = {
-            "automation": {
-                "alias": "Family App State Changes",
-                "description": "Sync entity state changes to Family App",
-                "trigger": {
-                    "platform": "state",
-                },
-                "action": {
-                    "service": "rest_command.notify_family_app",
-                    "data_template": {
-                        "entity_id": "{{ trigger.entity_id }}",
-                        "old_state": "{{ trigger.from_state.state }}",
-                        "new_state": "{{ trigger.to_state.state }}",
-                        "timestamp": "{{ now() }}",
-                    },
-                },
-            }
-        }
-
-        # Create automation in Home Assistant
-        response = requests.post(
-            f"{config.base_url}/api/config/automation/create",
-            json=webhook_body,
-            headers=headers,
-            timeout=10,
-        )
-        response.raise_for_status()
-
-        # Register REST command for webhook callback
-        rest_command = {
-            "notify_family_app": {
-                "url": webhook_url,
-                "method": "POST",
-                "payload": {
-                    "entity_id": "{{ entity_id }}",
-                    "old_state": "{{ old_state }}",
-                    "new_state": "{{ new_state }}",
-                    "timestamp": "{{ timestamp }}",
-                },
-            }
-        }
-
-        return {"automation_id": response.json().get("entity_id"), "rest_command": rest_command}
-
-    except requests.RequestException as e:
-        logger.error(f"Failed to register webhook in Home Assistant: {e}")
-        return None
 
 
 def handle_state_change_webhook(household_id: int, payload: dict[str, Any]) -> bool:

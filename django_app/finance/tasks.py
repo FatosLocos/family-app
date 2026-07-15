@@ -1,7 +1,6 @@
 import re
 from collections import defaultdict
 from datetime import timedelta
-from decimal import Decimal
 
 from celery import shared_task
 from django.utils import timezone
@@ -69,13 +68,17 @@ def refresh_recurring_rules():
 @shared_task
 def sync_psd2_transactions():
     """Sync transactions from PSD2/Plaid connections."""
+    import logging
+
     from finance.models import BankConnection
     from finance.psd2_service import sync_psd2_transactions as sync_txns
 
-    for connection in BankConnection.objects.filter(provider=BankConnection.Provider.PLAID):
-        try:
-            sync_txns(connection.id, connection.household_id, days=90)
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to sync PSD2 transactions for connection {connection.id}: {e}")
+    logger = logging.getLogger(__name__)
+
+    for household in Household.objects.all():
+        with household_db_scope(household.pk):
+            for connection in BankConnection.objects.for_household(household).filter(provider=BankConnection.Provider.PLAID):
+                try:
+                    sync_txns(connection.id, household.pk, days=90)
+                except Exception as e:
+                    logger.error(f"Failed to sync PSD2 transactions for connection {connection.id}: {e}")

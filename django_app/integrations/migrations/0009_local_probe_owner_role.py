@@ -1,18 +1,13 @@
-import os
-
 from django.db import migrations
 
 
 def assign_application_role(apps, schema_editor):
-    """Tests migrate with an admin role; runtime still uses the restricted role."""
-    if schema_editor.connection.vendor != "postgresql":
-        return
-
-    application_role = os.environ.get("APP_DB_USER", "family_app")
-    quoted_role = schema_editor.connection.ops.quote_name(application_role)
-    with schema_editor.connection.cursor() as cursor:
-        for table in ("integrations_localprobe", "integrations_localdiscovery"):
-            cursor.execute(f'ALTER TABLE "{table}" OWNER TO {quoted_role}')
+    """No-op since the DB owner/app role split (ops/init-postgres.sh): DML
+    grants for the app role now apply schema-wide via ALTER DEFAULT
+    PRIVILEGES, in tests and production alike, so no table-specific
+    ownership reassignment is needed - and it would fail anyway (the
+    migrating role isn't a member of the app role)."""
+    return
 
 
 class Migration(migrations.Migration):

@@ -72,13 +72,14 @@ BEGIN
   FROM (
     VALUES
       ('family_bulletinpost'), ('family_contact'), ('family_contactperson'), ('family_wishlist'), ('family_wishitem'), ('family_wishreservation'),
-      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_shoppingoffer'), ('household_shoppingpriceproviderstatus'), ('household_receipt'), ('household_receiptlineitem'), ('household_mealplan'), ('household_mealingredient'), ('household_pantryitem'), ('household_routine'),
+      ('household_task'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_shoppingoffer'), ('household_shoppingpriceproviderstatus'), ('household_receipt'), ('household_receiptlineitem'), ('household_mealplan'), ('household_mealingredient'), ('household_pantryitem'), ('household_routine'), ('household_weatherdata'), ('household_weatherpreference'),
       ('planning_calendarsource'), ('planning_calendarevent'), ('planning_icssubscription'),
       ('finance_bankconnection'), ('finance_bankaccount'), ('finance_transaction'), ('finance_recurringrule'), ('finance_budget'),
       ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'), ('integrations_localprobe'), ('integrations_localdiscovery'),
       ('notifications_notification'),
       ('home_homeassistantconfig'), ('home_homeentity'), ('home_homeactionaudit'),
-      ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument')
+      ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument'), ('home_energyreading'), ('home_evvehicle'),
+      ('households_childprofile')
   ) AS expected(table_name)
   LEFT JOIN pg_class relation ON relation.relname = expected.table_name AND relation.relnamespace = 'public'::regnamespace
   WHERE relation.oid IS NULL OR NOT relation.relrowsecurity OR NOT relation.relforcerowsecurity;
@@ -95,8 +96,8 @@ DECLARE
   task_id bigint;
   visible_count integer;
 BEGIN
-  INSERT INTO households_household (name, created_at) VALUES ('RLS controle A', now()) RETURNING id INTO first_household;
-  INSERT INTO households_household (name, created_at) VALUES ('RLS controle B', now()) RETURNING id INTO second_household;
+  INSERT INTO households_household (name, created_at, invite_only) VALUES ('RLS controle A', now(), false) RETURNING id INTO first_household;
+  INSERT INTO households_household (name, created_at, invite_only) VALUES ('RLS controle B', now(), false) RETURNING id INTO second_household;
 
   PERFORM set_config('app.household_id', first_household::text, false);
   INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority)

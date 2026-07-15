@@ -4,6 +4,7 @@ import json
 from os.path import basename
 from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.contrib import messages
 from django.http import FileResponse, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.db.models import Count, Q
@@ -11,6 +12,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from asgiref.sync import sync_to_async
 
@@ -588,9 +590,12 @@ def delete_document(request, document_id):
     return _tab_redirect("documenten")
 
 
+@csrf_exempt
 @require_POST
 def ha_webhook_receiver(request, webhook_token: str):
     """Receive state change notifications from Home Assistant webhook."""
+    import hmac
+
     from home.ha_integration import handle_state_change_webhook
 
     try:
@@ -599,7 +604,7 @@ def ha_webhook_receiver(request, webhook_token: str):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
     household_id = payload.get("household_id")
-    if not household_id or webhook_token != _generate_webhook_token(household_id):
+    if not household_id or not hmac.compare_digest(webhook_token, _generate_webhook_token(household_id)):
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
     success = handle_state_change_webhook(household_id, payload)

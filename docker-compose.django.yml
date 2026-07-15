@@ -11,6 +11,7 @@ services:
       APP_DB_NAME: ${APP_DB_NAME:-family_app}
       APP_DB_USER: ${APP_DB_USER:-family_app}
       APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?set-in-django_app/.env}
+      APP_DB_OWNER: ${APP_DB_OWNER:-family_app_owner}
     volumes:
       - family_app-postgres:/var/lib/postgresql/data
       - ./django_app/ops/init-postgres.sh:/docker-entrypoint-initdb.d/10-family-app-role.sh:ro
@@ -46,13 +47,19 @@ services:
     env_file: ./django_app/.env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      # The app role only has DML grants (see ops/init-postgres.sh), so migrations
+      # (DDL) run as the postgres superuser with its session role switched to the
+      # owner role - every table migrate creates ends up owned by the owner role,
+      # not the superuser, matching the runtime GRANTs.
+      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-postgresql://postgres:${POSTGRES_SUPERUSER_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}?options=-c%20role%3D${APP_DB_OWNER:-family_app_owner}}
       CELERY_BROKER_URL: redis://family-app-redis:6379/0
       CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
       CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
       GO2RTC_API_URL: http://go2rtc:1984
       LOCAL_PROBE_SOURCE_DIR: /opt/family-app/local_probe
     command: >-
-      sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
+      sh -c "DATABASE_URL=\"$$MIGRATE_DATABASE_URL\" python manage.py migrate --noinput &&
+      python manage.py collectstatic --noinput &&
       daphne -b 0.0.0.0 -p 8000 config.asgi:application"
     depends_on:
       postgres:
