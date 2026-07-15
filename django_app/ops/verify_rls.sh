@@ -78,7 +78,7 @@ BEGIN
       ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'), ('integrations_localprobe'), ('integrations_localdiscovery'),
       ('notifications_notification'),
       ('home_homeassistantconfig'), ('home_homeentity'), ('home_homeactionaudit'),
-      ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument'), ('home_energyreading'), ('home_evvehicle'),
+      ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument'), ('home_energyreading'), ('home_evvehicle'), ('home_evchargingsession'),
       ('households_childprofile')
   ) AS expected(table_name)
   LEFT JOIN pg_class relation ON relation.relname = expected.table_name AND relation.relnamespace = 'public'::regnamespace

@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from django.db.models import Avg, Sum
+from django.db.models import Sum
 from django.utils import timezone
 
 from home.models import EnergyReading, EVChargingSession, EVVehicle
@@ -115,7 +115,6 @@ def get_ev_dashboard(household_id: int) -> dict:
                 sessions = vehicle.charging_sessions.filter(end_time__isnull=False).order_by("-start_time")[:30]
                 total_energy = sessions.aggregate(total=Sum("energy_added_kwh"))["total"] or Decimal("0")
                 total_cost = sessions.aggregate(total=Sum("cost_eur"))["total"] or Decimal("0")
-                avg_duration = sessions.aggregate(avg=Avg("start_soc_percent"))["avg"] or 0
 
                 vehicle_summaries.append(
                     {
@@ -145,42 +144,49 @@ def get_ev_dashboard(household_id: int) -> dict:
         return {"vehicles": [], "total_vehicles": 0, "vehicles_charging": 0}
 
 
-def start_charging_session(vehicle_id: int, start_soc_percent: int, location: str = "") -> EVChargingSession | None:
+def start_charging_session(household_id: int, vehicle_id: int, start_soc_percent: int, location: str = "") -> EVChargingSession | None:
     """Start tracking a charging session."""
+    from common.db_scope import household_db_scope
+
     try:
-        session = EVChargingSession.objects.create(
-            vehicle_id=vehicle_id,
-            start_time=timezone.now(),
-            start_soc_percent=start_soc_percent,
-            location=location,
-        )
-        vehicle = EVVehicle.objects.get(id=vehicle_id)
-        vehicle.is_charging = True
-        vehicle.save(update_fields=["is_charging"])
-        return session
+        with household_db_scope(household_id):
+            vehicle = EVVehicle.objects.for_household(household_id).get(id=vehicle_id)
+            session = EVChargingSession.objects.create(
+                household_id=household_id,
+                vehicle=vehicle,
+                start_time=timezone.now(),
+                start_soc_percent=start_soc_percent,
+                location=location,
+            )
+            vehicle.is_charging = True
+            vehicle.save(update_fields=["is_charging"])
+            return session
     except Exception as e:
         logger.error(f"Failed to start charging session: {e}")
         return None
 
 
-def end_charging_session(session_id: int, end_soc_percent: int, cost_eur: Decimal | None = None) -> bool:
+def end_charging_session(household_id: int, session_id: int, end_soc_percent: int, cost_eur: Decimal | None = None) -> bool:
     """End and finalize a charging session."""
+    from common.db_scope import household_db_scope
+
     try:
-        session = EVChargingSession.objects.get(id=session_id)
-        session.end_time = timezone.now()
-        session.end_soc_percent = end_soc_percent
-        session.energy_added_kwh = Decimal(
-            (end_soc_percent - session.start_soc_percent) * session.vehicle.battery_capacity_kwh / 100
-        )
-        session.cost_eur = cost_eur
-        session.save()
+        with household_db_scope(household_id):
+            session = EVChargingSession.objects.for_household(household_id).select_related("vehicle").get(id=session_id)
+            session.end_time = timezone.now()
+            session.end_soc_percent = end_soc_percent
+            session.energy_added_kwh = Decimal(
+                (end_soc_percent - session.start_soc_percent) * session.vehicle.battery_capacity_kwh / 100
+            )
+            session.cost_eur = cost_eur
+            session.save()
 
-        vehicle = session.vehicle
-        vehicle.is_charging = False
-        vehicle.current_soc_percent = end_soc_percent
-        vehicle.save(update_fields=["is_charging", "current_soc_percent"])
+            vehicle = session.vehicle
+            vehicle.is_charging = False
+            vehicle.current_soc_percent = end_soc_percent
+            vehicle.save(update_fields=["is_charging", "current_soc_percent"])
 
-        return True
+            return True
     except Exception as e:
         logger.error(f"Failed to end charging session: {e}")
         return False

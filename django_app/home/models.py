@@ -183,6 +183,7 @@ class EVVehicle(models.Model):
 class EVChargingSession(models.Model):
     """Track EV charging sessions."""
 
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="ev_charging_sessions")
     vehicle = models.ForeignKey(EVVehicle, on_delete=models.CASCADE, related_name="charging_sessions")
     start_time = models.DateTimeField()
     end_time = models.DateTimeField(null=True, blank=True)
