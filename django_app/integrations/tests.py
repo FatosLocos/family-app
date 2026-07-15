@@ -868,7 +868,7 @@ class ProviderSyncTests(TestCase):
         with patch(
             "integrations.providers.requests.request",
             side_effect=[
-                FakeResponse({"connections": [{"vehicleId": "vehicle-1"}]}),
+                FakeResponse({"data": [{"id": "connection-1", "relationships": {"vehicle": {"data": {"id": "vehicle-1", "type": "vehicle"}}}}]}),
                 FakeResponse({"data": {"attributes": {"make": "Volvo", "model": "EX30", "year": 2025}}}),
                 FakeResponse({"data": [{"attributes": {"code": "odometer", "name": "Odometer", "body": {"value": 1234, "unit": "km"}}}], "included": {"vehicle": {"attributes": {"make": "Volvo", "model": "EX30", "year": 2025}}}}),
             ],

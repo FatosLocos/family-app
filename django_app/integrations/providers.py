@@ -669,7 +669,12 @@ def sync_smartcar(connection: IntegrationConnection) -> dict:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        vehicle_id = str(row.get("vehicleId") or row.get("vehicle_id") or row.get("id") or "")
+        relationships = row.get("relationships") if isinstance(row.get("relationships"), dict) else {}
+        vehicle_relationship = relationships.get("vehicle") if isinstance(relationships.get("vehicle"), dict) else {}
+        vehicle_reference = vehicle_relationship.get("data") if isinstance(vehicle_relationship.get("data"), dict) else {}
+        # V3 returns a connection id as row.id; the actual vehicle id lives in
+        # relationships.vehicle.data.id. Older responses expose vehicleId directly.
+        vehicle_id = str(row.get("vehicleId") or row.get("vehicle_id") or vehicle_reference.get("id") or "")
         if not vehicle_id:
             continue
         try:

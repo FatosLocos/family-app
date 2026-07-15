@@ -140,7 +140,9 @@ X_FRAME_OPTIONS = "DENY"
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://family-app-redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://family-app-redis:6379/1")
-CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0") == "1"
+# A direct local runserver has no Docker DNS entry for family-app-redis. Execute
+# tasks inline in DEBUG unless a developer explicitly opts into a broker.
+CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "1" if DEBUG else "0") == "1"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
     "sync-active-calendar-connections": {"task": "integrations.tasks.sync_active_connections", "schedule": 900.0},
