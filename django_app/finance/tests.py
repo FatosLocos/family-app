@@ -6,7 +6,7 @@ from django.urls import reverse
 
 from finance.importers import parse_abn_rows
 from finance.models import BankAccount, BankConnection, Budget, RecurringRule, Transaction
-from finance.tasks import refresh_household_recurring_rules
+from finance.tasks import next_recurring_due_date, refresh_household_recurring_rules
 from households.models import Household, Membership
 from identity.models import User
 
@@ -37,8 +37,17 @@ class FinanceWorkflowTests(TestCase):
         self.account = BankAccount.objects.create(household=self.household, connection=connection, provider_account_id="rekening-1", name="Betaalrekening")
         self.client.force_login(self.owner)
 
-    def transaction(self, identifier, booked_at, amount, counterparty):
-        return Transaction.objects.create(household=self.household, account=self.account, provider_transaction_id=identifier, booked_at=booked_at, amount=Decimal(amount), description=counterparty, counterparty=counterparty)
+    def transaction(self, identifier, booked_at, amount, counterparty, category=""):
+        return Transaction.objects.create(
+            household=self.household,
+            account=self.account,
+            provider_transaction_id=identifier,
+            booked_at=booked_at,
+            amount=Decimal(amount),
+            description=counterparty,
+            counterparty=counterparty,
+            category=category,
+        )
 
     def test_recurring_detection_respects_manual_exclusion_and_confirmation(self):
         first = self.transaction("odido-1", date(2026, 5, 1), "-45.00", "Odido")
@@ -82,13 +91,104 @@ class FinanceWorkflowTests(TestCase):
         self.client.post(reverse("finance:delete_budget", args=[budget.id]))
         self.assertFalse(Budget.objects.filter(pk=budget.id).exists())
 
+    def test_transaction_categories_drive_current_month_budget_usage(self):
+        budget = Budget.objects.create(
+            household=self.household,
+            name="Boodschappen",
+            category="Boodschappen",
+            monthly_limit=Decimal("100.00"),
+        )
+        transaction = self.transaction("ah", date.today(), "-37.50", "Albert Heijn", category="Boodschappen")
+        self.transaction("tank", date.today(), "-20.00", "Tankstation", category="Vervoer")
+
+        response = self.client.get(reverse("finance:index"), {"tab": "planning"})
+
+        page_budget = next(item for item in response.context["budgets"] if item.pk == budget.pk)
+        self.assertEqual(page_budget.spent, Decimal("37.50"))
+        self.assertEqual(page_budget.remaining, Decimal("62.50"))
+        self.assertEqual(page_budget.progress, 37)
+        self.assertContains(response, "Boodschappen")
+
+        response = self.client.post(
+            reverse("finance:update_transaction_category", args=[transaction.id]),
+            {"category": "Gezondheid"},
+        )
+        self.assertRedirects(response, f"{reverse('finance:index')}?tab=transacties")
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.category, "Gezondheid")
+
+    def test_transaction_category_can_be_applied_to_same_counterparty_history(self):
+        transaction = self.transaction("ah-current", date.today(), "-12.50", "Albert Heijn")
+        historical = self.transaction("ah-history", date(2026, 5, 3), "-28.50", "Albert Heijn")
+        unrelated = self.transaction("jumbo", date.today(), "-9.50", "Jumbo")
+
+        response = self.client.post(
+            reverse("finance:update_transaction_category", args=[transaction.id]),
+            {"category": "Boodschappen", "apply_to_history": "on"},
+        )
+
+        self.assertRedirects(response, f"{reverse('finance:index')}?tab=transacties")
+        transaction.refresh_from_db()
+        historical.refresh_from_db()
+        unrelated.refresh_from_db()
+        self.assertEqual(transaction.category, "Boodschappen")
+        self.assertEqual(historical.category, "Boodschappen")
+        self.assertEqual(unrelated.category, "")
+
+    def test_transaction_category_update_does_not_cross_household_boundary(self):
+        other_connection = BankConnection.objects.create(
+            household=self.other_household,
+            provider="abn_amro_manual",
+            display_name="ABN",
+            external_reference="other-category",
+        )
+        other_account = BankAccount.objects.create(
+            household=self.other_household,
+            connection=other_connection,
+            provider_account_id="other-category",
+            name="Andere rekening",
+        )
+        other_transaction = Transaction.objects.create(
+            household=self.other_household,
+            account=other_account,
+            provider_transaction_id="other-category",
+            booked_at=date.today(),
+            amount=Decimal("-10.00"),
+            description="Privé",
+            counterparty="Privé",
+        )
+
+        response = self.client.post(
+            reverse("finance:update_transaction_category", args=[other_transaction.id]),
+            {"category": "Boodschappen"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        other_transaction.refresh_from_db()
+        self.assertEqual(other_transaction.category, "")
+
     def test_recurring_and_budget_edit_overlays_render(self):
-        rule = RecurringRule.objects.create(household=self.household, fingerprint="test", merchant="Verzekering", direction="expense", expected_amount=Decimal("15.00"))
+        rule = RecurringRule.objects.create(household=self.household, fingerprint="test", merchant="Verzekering", direction="expense", expected_amount=Decimal("15.00"), last_seen_at=date.today(), cadence_days=30)
         budget = Budget.objects.create(household=self.household, name="Buffer", monthly_limit=Decimal("100.00"))
         response = self.client.get(reverse("finance:index"), {"tab": "planning"})
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f"recurring-edit-{rule.id}")
         self.assertContains(response, f"budget-edit-{budget.id}")
+        self.assertContains(response, "Komt eraan")
+        self.assertContains(response, "Verzekering")
+
+    def test_next_recurring_due_date_moves_a_stale_rule_forward(self):
+        rule = RecurringRule.objects.create(
+            household=self.household,
+            fingerprint="next-date",
+            merchant="Verzekering",
+            direction="expense",
+            expected_amount=Decimal("15.00"),
+            last_seen_at=date(2026, 1, 1),
+            cadence_days=30,
+        )
+
+        self.assertEqual(next_recurring_due_date(rule, date(2026, 3, 15)), date(2026, 4, 1))
 
     def test_child_cannot_open_financial_data_or_see_finance_navigation(self):
         child = User.objects.create_user(username="kind@example.com", email="kind@example.com", password="safe-password-123")

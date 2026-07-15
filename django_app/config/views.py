@@ -9,7 +9,8 @@ from django.utils import timezone
 from family.birthdays import upcoming_birthdays
 from family.models import Contact, ContactPerson, WishItem
 from finance.models import Transaction
-from household.models import ShoppingItem, Task
+from home.models import HomeEntity
+from household.models import MealPlan, Routine, ShoppingItem, Task
 from notifications.models import Notification
 from planning.models import CalendarEvent
 
@@ -43,12 +44,14 @@ def today(request):
     shopping = ShoppingItem.objects.for_household(household).filter(completed_at__isnull=True).select_related("list")[:5]
     events = CalendarEvent.objects.for_household(household).filter(ends_at__gte=now).order_by("starts_at")[:5]
     notifications = Notification.objects.for_household(household).filter(read_at__isnull=True).order_by("-created_at")[:4]
+    routines = Routine.objects.for_household(household).filter(is_active=True, next_due_on__lte=timezone.localdate()).select_related("assigned_to").order_by("next_due_on", "title")[:5]
+    meals = MealPlan.objects.for_household(household).filter(planned_for__gte=timezone.localdate()).order_by("planned_for")[:2]
     birthdays = upcoming_birthdays(
         ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).select_related("contact"),
         timezone.localdate(),
     )[:3]
     return render(request, "today/index.html", {
-        "tasks": tasks, "shopping_items": shopping, "events": events, "notifications": notifications, "birthdays": birthdays,
+        "tasks": tasks, "shopping_items": shopping, "events": events, "notifications": notifications, "birthdays": birthdays, "routines": routines, "meals": meals,
         "today": timezone.localdate(),
     })
 
@@ -57,7 +60,7 @@ def today(request):
 def search(request):
     household = request.household
     query = request.GET.get("q", "").strip()
-    results = {"tasks": [], "contacts": [], "events": [], "transactions": [], "wishes": []}
+    results = {"tasks": [], "contacts": [], "events": [], "transactions": [], "wishes": [], "devices": [], "notifications": []}
     if household and len(query) >= 2:
         results = {
             "tasks": Task.objects.for_household(household).filter(Q(title__icontains=query) | Q(notes__icontains=query)).order_by("completed_at", "due_at")[:6],
@@ -65,6 +68,8 @@ def search(request):
             "events": CalendarEvent.objects.for_household(household).filter(Q(title__icontains=query) | Q(location__icontains=query)).order_by("starts_at")[:6],
             "transactions": Transaction.objects.for_household(household).filter(Q(description__icontains=query) | Q(counterparty__icontains=query)).order_by("-booked_at")[:6],
             "wishes": WishItem.objects.for_household(household).filter(title__icontains=query).select_related("wishlist")[:6],
+            "devices": HomeEntity.objects.for_household(household).filter(Q(name__icontains=query) | Q(domain__icontains=query) | Q(state__icontains=query)).order_by("name")[:6],
+            "notifications": Notification.objects.for_household(household).filter(Q(title__icontains=query) | Q(body__icontains=query)).order_by("-created_at")[:6],
         }
     context = {"query": query, **results}
     if request.headers.get("HX-Request"):

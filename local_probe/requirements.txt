@@ -1,3 +1,6 @@
 requests==2.32.3
 websocket-client==1.8.0
 zeroconf==0.136.0
+PyChromecast==14.0.0
+bleak==0.22.3
+ha-philipsjs==3.2.5

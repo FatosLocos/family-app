@@ -144,6 +144,9 @@ CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0") == "1
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
     "sync-active-calendar-connections": {"task": "integrations.tasks.sync_active_connections", "schedule": 900.0},
+    "sync-home-connect-appliances": {"task": "integrations.tasks.sync_home_connect_connections", "schedule": 60.0},
+    "renew-sonos-cloud-event-subscriptions": {"task": "integrations.tasks.renew_sonos_event_subscriptions", "schedule": 3600.0},
+    "poll-google-home-events": {"task": "integrations.tasks.poll_google_home_event_subscriptions", "schedule": 2.0},
     "sync-ics-subscriptions": {"task": "planning.tasks.sync_ics_subscriptions", "schedule": 900.0},
     "replenish-recurring-shopping-items": {"task": "household.tasks.replenish_recurring_shopping_items", "schedule": 86400.0},
     "refresh-shopping-prices": {

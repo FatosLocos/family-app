@@ -1,0 +1,6 @@
+api:
+  listen: ":1984"
+  allow_paths:
+    - /api/streams
+    - /api/stream.mjpeg
+    - /api/stream.mp4

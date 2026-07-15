@@ -31,6 +31,14 @@ services:
         aliases:
           - family-app-redis
 
+  go2rtc:
+    image: alexxit/go2rtc:1.9.14
+    restart: unless-stopped
+    command: sh -c "cp /defaults/go2rtc.yaml /config/go2rtc.yaml && exec go2rtc -config /config/go2rtc.yaml"
+    volumes:
+      - ./django_app:/defaults:ro
+      - family_app-go2rtc:/config
+
   web:
     image: family-app:local
     build: ./django_app
@@ -41,6 +49,7 @@ services:
       CELERY_BROKER_URL: redis://family-app-redis:6379/0
       CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
       CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
+      GO2RTC_API_URL: http://go2rtc:1984
       LOCAL_PROBE_SOURCE_DIR: /opt/family-app/local_probe
     command: >-
       sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput &&
@@ -49,6 +58,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      go2rtc:
         condition: service_started
     volumes:
       - family_app-media:/app/media
@@ -69,6 +80,22 @@ services:
       CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
       CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
     command: python manage.py listen_home_assistant
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  home-connect-listener:
+    image: family-app:local
+    restart: unless-stopped
+    env_file: ./django_app/.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${APP_DB_USER:-family_app}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-family_app}}
+      CELERY_BROKER_URL: redis://family-app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://family-app-redis:6379/1
+      CHANNEL_REDIS_URL: redis://family-app-redis:6379/2
+    command: python manage.py listen_home_connect_events
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,6 +149,8 @@ volumes:
     name: ${FAMILY_APP_REDIS_VOLUME:-family-app-redis}
   family_app-media:
     name: ${FAMILY_APP_MEDIA_VOLUME:-family-app-media}
+  family_app-go2rtc:
+    name: ${FAMILY_APP_GO2RTC_VOLUME:-family-app-go2rtc}
 
 networks:
   edge:

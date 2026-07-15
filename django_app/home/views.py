@@ -5,12 +5,14 @@ from os.path import basename
 from urllib.parse import urlsplit
 
 from django.contrib import messages
-from django.http import FileResponse, HttpResponse
-from django.db.models import Q
+from django.http import FileResponse, HttpResponse, JsonResponse, StreamingHttpResponse
+from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
+from asgiref.sync import sync_to_async
 
 from django.utils import timezone
 
@@ -19,6 +21,7 @@ from home.models import EmergencyContact, FurnishingItem, HomeActionAudit, HomeA
 from home.services import HomeAssistantError, control_entity, save_config, sync_entities
 from households.decorators import household_required, parent_required
 from integrations.models import IntegrationConnection, SyncRun
+from integrations.local_probe import expire_stale_probes
 
 
 def _tab_redirect(tab):
@@ -158,6 +161,10 @@ def _decorate_home_entities(entities):
     previous_scene_group = None
     for entity in decorated:
         attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+        entity.google_last_event_time = ""
+        event_timestamp = parse_datetime(str(attributes.get("google_last_event_at") or ""))
+        if event_timestamp:
+            entity.google_last_event_time = timezone.localtime(event_timestamp).strftime("%d %b %H:%M:%S")
         if entity.source == HomeEntity.Source.HUE:
             entity.hue_connectivity_label = _hue_connectivity_label(attributes.get("hue_connectivity"))
             entity.hue_connectivity_issue = _hue_has_connectivity_issue(attributes.get("hue_connectivity"))
@@ -172,34 +179,44 @@ def _decorate_home_entities(entities):
 
 
 def _local_sonos_duplicate_ids(entities):
-    """Prefer a locally discovered Sonos group over its cloud representation."""
+    """Prefer a live local Sonos group; otherwise fall back to its cloud card."""
     sonos_entities = list(entities.filter(source=HomeEntity.Source.SONOS))
-    local_member_sets = []
+    local_groups = []
     for entity in sonos_entities:
         attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
         if not attributes.get("probe_id") or attributes.get("sonos_entity_type") != "group":
             continue
         members = {str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id}
         if members:
-            local_member_sets.append(members)
-    if not local_member_sets:
+            local_groups.append((entity, members))
+    if not local_groups:
         return set()
 
     hidden_ids = set()
-    for entity in sonos_entities:
-        attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
-        if attributes.get("probe_id"):
-            continue
-        entity_type = attributes.get("sonos_entity_type")
-        if entity_type == "player":
-            player_id = str(attributes.get("sonos_player_id") or "")
-            if any(player_id in members for members in local_member_sets):
-                hidden_ids.add(entity.pk)
-        elif entity_type == "group":
-            member_ids = {str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id}
-            coordinator_id = str(attributes.get("sonos_coordinator_id") or "")
-            if any(member_ids & members or coordinator_id in members for members in local_member_sets):
-                hidden_ids.add(entity.pk)
+    cloud_entities = [
+        entity
+        for entity in sonos_entities
+        if not (entity.attributes if isinstance(entity.attributes, dict) else {}).get("probe_id")
+    ]
+    for local_group, members in local_groups:
+        matching_cloud = []
+        for entity in cloud_entities:
+            attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+            entity_type = attributes.get("sonos_entity_type")
+            if entity_type == "player":
+                matches = str(attributes.get("sonos_player_id") or "") in members
+            elif entity_type == "group":
+                member_ids = {str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id}
+                coordinator_id = str(attributes.get("sonos_coordinator_id") or "")
+                matches = bool(member_ids & members or coordinator_id in members)
+            else:
+                matches = False
+            if matches:
+                matching_cloud.append(entity)
+        if local_group.is_available:
+            hidden_ids.update(entity.pk for entity in matching_cloud)
+        elif matching_cloud:
+            hidden_ids.add(local_group.pk)
     return hidden_ids
 
 
@@ -241,6 +258,7 @@ def _ha_duplicate_ids(entities):
 @household_required
 def index(request):
     tab = request.GET.get("tab", "apparaten")
+    expire_stale_probes(request.household)
     config = HomeAssistantConfig.objects.for_household(request.household).first()
     all_entities = HomeEntity.objects.for_household(request.household)
     hidden_ids = _local_sonos_duplicate_ids(all_entities) | _ha_duplicate_ids(all_entities)
@@ -289,9 +307,18 @@ def index(request):
     maintenance = MaintenanceItem.objects.for_household(request.household)
     rooms = Room.objects.for_household(request.household)
     hue_connection = IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.HUE).first()
-    home_connections = IntegrationConnection.objects.for_household(request.household).filter(
-        provider__in=[IntegrationConnection.Provider.HUE, IntegrationConnection.Provider.SONOS, IntegrationConnection.Provider.LG_THINQ, IntegrationConnection.Provider.GOOGLE_HOME]
-    ).order_by("provider")
+    home_connections = list(IntegrationConnection.objects.for_household(request.household).filter(
+        provider__in=[IntegrationConnection.Provider.HUE, IntegrationConnection.Provider.SONOS, IntegrationConnection.Provider.SPOTIFY, IntegrationConnection.Provider.SMARTCAR, IntegrationConnection.Provider.LG_THINQ, IntegrationConnection.Provider.GOOGLE_HOME, IntegrationConnection.Provider.HOME_CONNECT]
+    ).order_by("provider"))
+    entity_counts = {
+        row["connection_id"]: row["count"]
+        for row in HomeEntity.objects.for_household(request.household)
+        .filter(connection_id__in=[connection.id for connection in home_connections], is_available=True)
+        .values("connection_id")
+        .annotate(count=Count("id"))
+    }
+    for connection in home_connections:
+        connection.home_entity_count = entity_counts.get(connection.id, 0)
     hue_sync_run = SyncRun.objects.filter(household=request.household, connection=hue_connection).order_by("-started_at").first() if hue_connection else None
     hue_sync_is_stale = bool(
         hue_connection
@@ -336,14 +363,52 @@ def control(request, entity_id, action):
             value = request.POST.getlist("player_ids")
         elif action == "create_alarm":
             value = json.dumps({"time": request.POST.get("alarm_time", ""), "recurrence": request.POST.get("alarm_recurrence", "DAILY")})
+        elif action == "update_alarm":
+            value = json.dumps(
+                {
+                    "id": request.POST.get("alarm_id", ""),
+                    "time": request.POST.get("alarm_time", ""),
+                    "recurrence": request.POST.get("alarm_recurrence", "DAILY"),
+                    "volume": request.POST.get("alarm_volume", "20"),
+                }
+            )
+        elif action == "set_home_theater_eq":
+            value = json.dumps({"eq_type": request.POST.get("eq_type", ""), "value": request.POST.get("value", "0")})
+        elif action == "learn_ir_code":
+            value = json.dumps({"code": request.POST.get("ir_code", ""), "timeout": request.POST.get("ir_timeout", "30")})
+        elif action in {"remove_group_member", "add_group_member", "add_ht_satellite", "create_stereo_pair", "separate_stereo_pair", "start_room_calibration", "stop_room_calibration"}:
+            value = json.dumps(
+                {
+                    "member_id": request.POST.get("member_id", ""),
+                    "role": request.POST.get("role", ""),
+                    "channel_map": request.POST.get("channel_map", ""),
+                    "confirmed": request.POST.get("confirm_remove") == "yes" or request.POST.get("confirm_add") == "yes" or request.POST.get("confirm_home_theater") == "yes" or request.POST.get("confirm_stereo") == "yes" or request.POST.get("confirm_calibration") == "yes",
+                }
+            )
+        elif action == "set_temperature_range":
+            value = {"heat": request.POST.get("heat_temperature", ""), "cool": request.POST.get("cool_temperature", "")}
+        elif action == "set_thermostat_mode":
+            value = request.POST.get("thermostat_mode", "")
+        elif action == "set_eco_mode":
+            value = request.POST.get("eco_mode", "")
+        elif action == "set_fan_timer":
+            value = request.POST.get("fan_seconds", "")
+        elif action in {"start_program", "select_program"}:
+            if request.POST.get("confirmed") != "yes":
+                raise HomeAssistantError("Bevestig eerst dat je deze programmawijziging wilt uitvoeren.")
+            value = request.POST.get("home_connect_program", "")
+        elif action == "stop_program":
+            if request.POST.get("confirmed") != "yes":
+                raise HomeAssistantError("Bevestig eerst dat je het programma wilt stoppen.")
+            value = ""
         else:
             value = request.POST.get("target_temperature") or request.POST.get("brightness") or request.POST.get("volume") or request.POST.get("color") or request.POST.get("effect") or request.POST.get("favorite_id")
-        control_entity(request.household, entity, action, value)
+        result = control_entity(request.household, entity, action, value) or {}
         if request.headers.get("HX-Request") == "true":
             response = HttpResponse("")
             response["HX-Trigger"] = json.dumps(
                 {
-                    "family:toast": {"message": f"{entity.name} bijgewerkt.", "level": "success"},
+                    "family:toast": {"message": f"{entity.name}: opdracht verzonden." if result.get("queued") else f"{entity.name} bijgewerkt.", "level": "info" if result.get("queued") else "success"},
                     "family:home-control": {
                         "entity_id": entity.id,
                         "action": action,
@@ -354,6 +419,8 @@ def control(request, entity_id, action):
                         "sonos_volume": entity.attributes.get("sonos_volume") if entity.source == HomeEntity.Source.SONOS and isinstance(entity.attributes, dict) else None,
                         "sonos_muted": bool(entity.attributes.get("sonos_muted")) if entity.source == HomeEntity.Source.SONOS and isinstance(entity.attributes, dict) else False,
                         "refresh": action == "set_group",
+                        "queued": bool(result.get("queued")),
+                        "command_id": result.get("command_id", ""),
                     },
                 }
             )
@@ -366,6 +433,63 @@ def control(request, entity_id, action):
             return response
         messages.error(request, str(error))
     return _return_to_home(request)
+
+
+@parent_required
+@require_POST
+def start_google_live_stream(request, entity_id):
+    entity = get_object_or_404(
+        HomeEntity.objects.for_household(request.household),
+        pk=entity_id,
+        source=HomeEntity.Source.GOOGLE_HOME,
+    )
+    try:
+        from integrations.providers import ProviderError, start_google_home_live_stream
+
+        session = start_google_home_live_stream(entity)
+        HomeActionAudit.objects.create(household=request.household, entity=entity, action="live_stream", succeeded=True, detail="Tijdelijke Nest-livestream gestart.")
+        return JsonResponse({"media_url": reverse("home:google_live_mp4", args=[entity.id]), "expires_at": session["expires_at"]})
+    except ProviderError as error:
+        HomeActionAudit.objects.create(household=request.household, entity=entity, action="live_stream", succeeded=False, detail=str(error))
+        return JsonResponse({"error": str(error)}, status=400)
+
+
+@parent_required
+@require_POST
+def stop_google_live_stream(request, entity_id):
+    get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
+    from integrations.providers import stop_google_home_live_stream
+
+    stop_google_home_live_stream()
+    return HttpResponse(status=204)
+
+
+@parent_required
+def google_live_mp4(request, entity_id):
+    get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id, source=HomeEntity.Source.GOOGLE_HOME)
+    try:
+        from integrations.providers import GO2RTC_STREAM_NAME, ProviderError, google_home_mp4_stream
+
+        response = google_home_mp4_stream(GO2RTC_STREAM_NAME)
+    except ProviderError as error:
+        return HttpResponse(str(error), status=503, content_type="text/plain; charset=utf-8")
+
+    iterator = response.iter_content(chunk_size=64 * 1024)
+
+    async def chunks():
+        try:
+            while True:
+                chunk = await sync_to_async(next, thread_sensitive=False)(iterator, None)
+                if chunk is None:
+                    break
+                if chunk:
+                    yield chunk
+        finally:
+            await sync_to_async(response.close, thread_sensitive=False)()
+
+    stream = StreamingHttpResponse(chunks(), content_type=response.headers.get("Content-Type", "video/mp4"))
+    stream["Cache-Control"] = "no-store"
+    return stream
 
 
 @parent_required

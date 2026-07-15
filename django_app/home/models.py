@@ -23,8 +23,14 @@ class HomeEntity(models.Model):
         HOME_ASSISTANT = "home_assistant", "Home Assistant"
         HUE = "hue", "Philips Hue"
         SONOS = "sonos", "Sonos"
+        NEST_PROTECT = "nest_protect", "Nest Protect"
         LG_THINQ = "lg_thinq", "LG ThinQ"
         GOOGLE_HOME = "google_home", "Google Home"
+        SPOTIFY = "spotify", "Spotify"
+        SMARTCAR = "smartcar", "Smartcar"
+        GOOGLE_CAST = "google_cast", "Google Cast"
+        PHILIPS_TV = "philips_tv", "Philips TV"
+        HOME_CONNECT = "home_connect", "Home Connect"
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE)
     connection = models.ForeignKey("integrations.IntegrationConnection", null=True, blank=True, on_delete=models.CASCADE, related_name="home_entities")

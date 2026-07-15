@@ -1,5 +1,6 @@
 from datetime import timedelta
 from io import StringIO
+import json
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
@@ -116,6 +117,32 @@ class HomeAssistantTests(TestCase):
         self.assertEqual(self.client.post(reverse("home:save_home_assistant"), {"base_url": "http://ha.local", "token": "new"}).status_code, 403)
         self.assertEqual(self.client.post(reverse("home:control", args=[entity.id, "on"])).status_code, 403)
 
+    @patch("home.views.control_entity", return_value={"queued": True, "command_id": "probe-command-1"})
+    def test_local_probe_control_waits_for_confirmation_in_the_browser(self, control):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="probe.test.hue.light-1",
+            domain="light",
+            name="Keuken",
+            state="off",
+            is_supported=True,
+            attributes={"probe_id": "probe-1", "probe_local_key": "light:light-1"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.post(
+            reverse("home:control", args=[entity.id, "on"]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        payload = json.loads(response["HX-Trigger"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["family:home-control"]["command_id"], "probe-command-1")
+        self.assertTrue(payload["family:home-control"]["queued"])
+        self.assertIn("opdracht verzonden", payload["family:toast"]["message"])
+        control.assert_called_once_with(self.household, entity, "on", None)
+
     def test_parent_can_manage_household_home_records(self):
         self.client.force_login(self.parent)
         self.client.post(reverse("home:add_maintenance"), {"title": "Cv-ketel", "category": "Installatie", "cadence_days": 365})
@@ -124,6 +151,206 @@ class HomeAssistantTests(TestCase):
         response = self.client.get(reverse("home:index"), {"tab": "inrichting"})
         self.assertContains(response, "Zolder")
         self.assertContains(self.client.get(reverse("home:index"), {"tab": "onderhoud"}), "Cv-ketel")
+
+    def test_home_connect_toolbar_reports_discovered_devices_and_links_to_them(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            status="configured",
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id="home_connect.1.dishwasher",
+            domain="dishwasher",
+            name="Vaatwasser",
+            is_available=True,
+            is_supported=True,
+            attributes={
+                "home_connect_icon": "dishwasher",
+                "home_connect_brand": "Siemens",
+                "home_connect_type": "Dishwasher",
+                "home_connect_type_label": "Vaatwasser",
+            },
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"))
+
+        self.assertContains(response, "1 apparaat gevonden")
+        self.assertContains(response, "source=home_connect")
+
+    def test_home_connect_card_uses_compact_status_and_labelled_actions(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            status="configured",
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id="home_connect.1.dishwasher",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            state="ready",
+            is_available=True,
+            is_supported=True,
+            attributes={
+                "home_connect_icon": "dishwasher",
+                "home_connect_brand": "Siemens",
+                "home_connect_type": "Dishwasher",
+                "home_connect_type_label": "Vaatwasser",
+                "home_connect_operation": "Gereed",
+                "home_connect_selected_program": "Eco 50 °C",
+                "home_connect_selected_program_key": "Dishcare.Dishwasher.Program.Eco50",
+                "home_connect_door_label": "Deur gesloten",
+                "home_connect_program_forecasts": {"energy": 47, "water": 43},
+                "home_connect_can_start": True,
+                "home_connect_can_select_program": True,
+                "home_connect_programs": [{"key": "Dishcare.Dishwasher.Program.Eco50", "label": "Eco 50 °C", "options": []}],
+            },
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "home_connect", "domain": "apparaten"})
+
+        self.assertContains(response, "Gereed")
+        self.assertContains(response, "Eco 50 °C")
+        self.assertContains(response, "47%")
+        self.assertContains(response, "43%")
+        self.assertContains(response, "Kiezen")
+        self.assertContains(response, "Start")
+        self.assertNotContains(response, "Gereed ·")
+
+    def test_active_google_cast_card_exposes_stop_control(self):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.GOOGLE_CAST,
+            entity_id="probe.cast.woonkamer",
+            domain="media_player",
+            name="Woonkamer TV",
+            state="on",
+            is_available=True,
+            is_supported=True,
+            attributes={
+                "cast_player_state": "PLAYING",
+                "cast_volume": 24,
+                "cast_muted": False,
+                "cast_title": "Testnummer",
+                "cast_artist": "Testartiest",
+                "cast_position": 12,
+                "cast_duration": 180,
+            },
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "google_cast", "domain": "apparaten"})
+
+        self.assertContains(response, reverse("home:control", args=[entity.id, "stop"]))
+        self.assertContains(response, "Afspelen stoppen")
+        self.assertContains(response, "data-cast-now-playing")
+        self.assertContains(response, "data-cast-progress-wrap")
+        self.assertContains(response, "data-sonos-play-toggle")
+
+    def test_idle_google_cast_card_uses_a_human_status(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.GOOGLE_CAST,
+            entity_id="probe.cast.slaapkamer",
+            domain="media_player",
+            name="Slaapkamer",
+            state="off",
+            is_available=True,
+            is_supported=True,
+            attributes={"cast_player_state": "IDLE", "cast_volume": 18, "cast_muted": True},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "google_cast", "domain": "apparaten"})
+
+        self.assertContains(response, "Gereed")
+        self.assertContains(response, "Gedempt")
+        self.assertNotContains(response, "Idle")
+
+    def test_google_cast_card_does_not_expose_the_internal_entity_id(self):
+        HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.GOOGLE_CAST,
+            entity_id="probe.local.google_cast.6d219e1b-a8a2",
+            domain="media_player",
+            name="Milan kamer",
+            state="off",
+            is_available=True,
+            is_supported=True,
+            attributes={"cast_model": "Google Nest Mini", "cast_player_state": "IDLE"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "google_cast", "domain": "apparaten"})
+
+        self.assertContains(response, "Google Cast · Google Nest Mini")
+        self.assertNotContains(response, "probe.local.google_cast.6d219e1b-a8a2")
+
+    def test_active_home_connect_connection_uses_its_provider_name(self):
+        IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Siemens",
+            status="configured",
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"))
+
+        self.assertContains(response, "Home Connect")
+        self.assertNotContains(response, "<strong>Koppeling <span", html=False)
+
+    def test_unpaired_philips_tv_shows_a_contextual_local_pairing_command(self):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.PHILIPS_TV,
+            entity_id="probe.tv.woonkamer",
+            domain="media_player",
+            name="Philips TV woonkamer",
+            state="on",
+            is_available=True,
+            is_supported=False,
+            attributes={"philips_model": "55OLED706/12", "philips_requires_pairing": True, "probe_local_key": "192.168.1.234"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "philips_tv", "domain": "apparaten"})
+
+        self.assertContains(response, "TV koppelen")
+        self.assertContains(response, f'philips-tv-pairing-dialog-{entity.id}')
+        self.assertContains(response, "philips-tv-link --host 192.168.1.234")
+
+    def test_paired_philips_tv_exposes_the_compact_remote_dialog(self):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.PHILIPS_TV,
+            entity_id="probe.tv.philips-tv.woonkamer",
+            domain="media_player",
+            name="Philips TV woonkamer",
+            is_available=True,
+            is_supported=True,
+            attributes={"philips_model": "55OLED706/12", "probe_local_key": "192.168.1.234"},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "philips_tv", "domain": "apparaten"})
+
+        self.assertContains(response, f'philips-tv-controls-dialog-{entity.id}')
+        self.assertContains(response, 'value="CursorUp"')
+        self.assertContains(response, 'value="AmbilightOnOff"')
+        self.assertContains(response, 'value="Standby"')
 
     def test_home_assistant_interface_names_the_rest_api_integration(self):
         self.client.force_login(self.parent)
@@ -500,6 +727,39 @@ class HomeAssistantTests(TestCase):
         self.assertNotIn(cloud_group.id, displayed_ids)
         self.assertNotIn(cloud_player.id, displayed_ids)
 
+    def test_offline_local_sonos_group_falls_back_to_matching_cloud_group(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.parent,
+            provider=IntegrationConnection.Provider.SONOS,
+            display_name="Sonos",
+        )
+        cloud_group = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SONOS,
+            entity_id=f"sonos.{connection.id}.group.cloud-woonkamer",
+            domain="media_player",
+            name="Woonkamer cloud",
+            attributes={"sonos_entity_type": "group", "sonos_coordinator_id": "player-woonkamer", "sonos_player_ids": ["player-woonkamer"]},
+        )
+        local_group = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.SONOS,
+            entity_id="probe.local.sonos.group.player-woonkamer",
+            domain="speaker",
+            name="Woonkamer lokaal",
+            is_available=False,
+            attributes={"probe_id": "probe-1", "sonos_entity_type": "group", "sonos_player_ids": ["player-woonkamer"]},
+        )
+        self.client.force_login(self.parent)
+
+        response = self.client.get(reverse("home:index"), {"source": "sonos", "domain": "alles"})
+
+        displayed_ids = {entity.id for entity in response.context["display_entities"]}
+        self.assertIn(cloud_group.id, displayed_ids)
+        self.assertNotIn(local_group.id, displayed_ids)
+
 
     def test_home_can_filter_hue_entities_by_room(self):
         HomeEntity.objects.create(
@@ -710,3 +970,28 @@ class HomeRealtimeTests(TransactionTestCase):
             await communicator.disconnect()
 
         async_to_sync(scenario)()
+
+    def test_cast_playback_details_are_included_in_live_updates(self):
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.GOOGLE_CAST,
+            entity_id="probe.cast.keuken",
+            domain="media_player",
+            name="Keuken",
+            state="on",
+            attributes={
+                "cast_player_state": "PLAYING",
+                "cast_volume": 35,
+                "cast_title": "Testnummer",
+                "cast_artist": "Testartiest",
+                "cast_position": 12,
+                "cast_duration": 180,
+            },
+        )
+
+        payload = home_entity_payload(entity)
+
+        self.assertEqual(payload["entity"]["attributes"]["cast_player_state"], "PLAYING")
+        self.assertEqual(payload["entity"]["attributes"]["cast_title"], "Testnummer")
+        self.assertEqual(payload["entity"]["attributes"]["cast_position"], 12)
+        self.assertEqual(payload["entity"]["attributes"]["cast_duration"], 180)

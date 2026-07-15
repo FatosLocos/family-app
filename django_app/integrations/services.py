@@ -18,6 +18,13 @@ HUE_OAUTH_AUTHORIZE_URL = "https://api.meethue.com/v2/oauth2/authorize"
 HUE_OAUTH_TOKEN_URL = "https://api.meethue.com/v2/oauth2/token"
 SONOS_OAUTH_AUTHORIZE_URL = "https://api.sonos.com/login/v3/oauth"
 SONOS_OAUTH_TOKEN_URL = "https://api.sonos.com/login/v3/oauth/access"
+SPOTIFY_OAUTH_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
+SPOTIFY_OAUTH_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative"
+HOME_CONNECT_OAUTH_AUTHORIZE_URL = "https://api.home-connect.com/security/oauth/authorize"
+HOME_CONNECT_OAUTH_TOKEN_URL = "https://api.home-connect.com/security/oauth/token"
+HOME_CONNECT_SCOPES = "IdentifyAppliance Monitor Settings Control"
+SMARTCAR_CONNECT_URL = "https://connect.smartcar.com/oauth/authorize"
 GOOGLE_HOME_PCM_URL = "https://nestservices.google.com/partnerconnections"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_HOME_SCOPE = "https://www.googleapis.com/auth/sdm.service"
@@ -38,6 +45,12 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
     if provider == "hue":
         return "", "", {"app_id": "", "device_name": "Family App"}
     if provider == "sonos":
+        return "", "", {}
+    if provider == "spotify":
+        return "", "", {}
+    if provider == "smartcar":
+        return "", "", {"country": "NL"}
+    if provider == "home_connect":
         return "", "", {}
     if provider == "google_home":
         return "", "", {"project_id": ""}
@@ -61,6 +74,27 @@ def save_sonos_config(household, client_id: str, client_secret: str, events_enab
         client_id,
         client_secret,
         {"event_callback_token": encrypt(token), "events_enabled": events_enabled},
+    )
+
+
+def save_google_home_config(household, client_id: str, client_secret: str, project_id: str, events_enabled: bool, pubsub_subscription: str, pubsub_service_account_json: str) -> IntegrationAppConfig:
+    """Keep the Pub/Sub key encrypted and preserve it when its field is blank."""
+    _, _, existing = get_app_config(household, "google_home")
+    service_account = str(pubsub_service_account_json or "").strip()
+    encrypted_service_account = str(existing.get("pubsub_service_account_json") or "")
+    if service_account:
+        encrypted_service_account = encrypt(service_account)
+    return save_app_config(
+        household,
+        "google_home",
+        client_id,
+        client_secret,
+        {
+            "project_id": project_id,
+            "events_enabled": bool(events_enabled),
+            "pubsub_subscription": str(pubsub_subscription or "").strip(),
+            "pubsub_service_account_json": encrypted_service_account,
+        },
     )
 
 
@@ -250,6 +284,155 @@ def finish_sonos_connection(request, code: str, state: str) -> IntegrationConnec
     }
     connection.status, connection.last_error = "needs_sync", ""
     connection.save()
+    return connection
+
+
+def start_spotify_connection(request) -> str:
+    client_id, _, _ = get_app_config(request.household, "spotify")
+    if not client_id:
+        raise ValueError("Vul eerst de Spotify-clientgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.SPOTIFY,
+        defaults={"display_name": "Spotify Connect"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["spotify_oauth"] = {"state": state, "connection_id": connection.id}
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": f"{public_origin(request)}/instellingen/spotify/callback/",
+        "scope": SPOTIFY_SCOPES,
+        "state": state,
+    }
+    return f"{SPOTIFY_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def finish_spotify_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("spotify_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Spotify-aanmelding.")
+    client_id, client_secret, _ = get_app_config(request.household, "spotify")
+    if not client_id or not client_secret:
+        raise ValueError("Spotify-clientgegevens ontbreken.")
+    response = requests.post(
+        SPOTIFY_OAUTH_TOKEN_URL,
+        data={"grant_type": "authorization_code", "code": code, "redirect_uri": f"{public_origin(request)}/instellingen/spotify/callback/"},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Spotify gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or "Spotify gaf geen toegangstoken terug."))
+    profile = requests.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {payload['access_token']}"}, timeout=20)
+    try:
+        account = profile.json() if profile.ok else {}
+    except ValueError:
+        account = {}
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.external_account = str(account.get("display_name") or account.get("email") or account.get("id") or "")
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+    }
+    connection.status, connection.last_error = "needs_sync", ""
+    connection.save()
+    return connection
+
+
+def start_home_connect_connection(request) -> str:
+    client_id, _, _ = get_app_config(request.household, "home_connect")
+    if not client_id:
+        raise ValueError("Vul eerst de Home Connect-clientgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.HOME_CONNECT,
+        defaults={"display_name": "Home Connect"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["home_connect_oauth"] = {"state": state, "connection_id": connection.id}
+    return f"{HOME_CONNECT_OAUTH_AUTHORIZE_URL}?{urlencode({'client_id': client_id, 'response_type': 'code', 'redirect_uri': f'{public_origin(request)}/instellingen/home-connect/callback/', 'scope': HOME_CONNECT_SCOPES, 'state': state})}"
+
+
+def finish_home_connect_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("home_connect_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Home Connect-aanmelding.")
+    client_id, client_secret, _ = get_app_config(request.household, "home_connect")
+    if not client_id or not client_secret:
+        raise ValueError("Home Connect-clientgegevens ontbreken.")
+    response = requests.post(
+        HOME_CONNECT_OAUTH_TOKEN_URL,
+        data={"grant_type": "authorization_code", "code": code, "redirect_uri": f"{public_origin(request)}/instellingen/home-connect/callback/"},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Home Connect gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or payload.get("error") or "Home Connect gaf geen toegangstoken terug."))
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
+    }
+    connection.status, connection.last_error = "needs_sync", ""
+    connection.save()
+    return connection
+
+
+def start_smartcar_connection(request) -> str:
+    client_id, _, config = get_app_config(request.household, "smartcar")
+    if not client_id:
+        raise ValueError("Vul eerst de Smartcar-clientgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.SMARTCAR,
+        defaults={"display_name": "Smartcar"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["smartcar_oauth"] = {"state": state, "connection_id": connection.id}
+    scopes = ["read_vehicle_info", "read_odometer", "read_location", "read_battery", "read_security"]
+    if config.get("allow_remote_controls"):
+        scopes.append("control_security")
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": f"{public_origin(request)}/instellingen/smartcar/callback/",
+        "scope": " ".join(scopes),
+        "state": state,
+        "mode": "live",
+    }
+    country = str(config.get("country") or "").strip().upper()
+    if country:
+        params["country"] = country
+    return f"{SMARTCAR_CONNECT_URL}?{urlencode(params)}"
+
+
+def finish_smartcar_connection(request, user_id: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("smartcar_oauth", {})
+    if not session or not secrets.compare_digest(str(session.get("state") or ""), state):
+        raise ValueError("Ongeldige of verlopen Smartcar-aanmelding.")
+    if not user_id:
+        raise ValueError("Smartcar gaf geen voertuigverbinding terug.")
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+    data["smartcar_user_id"] = user_id
+    connection.settings = data
+    connection.external_account = "Smartcar-voertuigen"
+    connection.status = "needs_sync"
+    connection.last_error = ""
+    connection.save(update_fields=["settings", "external_account", "status", "last_error", "updated_at"])
     return connection
 
 

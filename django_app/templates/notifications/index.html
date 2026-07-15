@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}Meldingen · Family App{% endblock %}
+{% block content %}
+{% include 'components/module_header.html' with title='Meldingen' description='Wat aandacht vraagt binnen jullie huishouden.' metrics=notification_metrics %}
+<nav class="module-tabs" aria-label="Meldingen filteren">
+  <a href="?filter=ongelezen" class="{% if selected_filter == 'ongelezen' %}active{% endif %}">Ongelezen{% if unread_count %} · {{ unread_count }}{% endif %}</a>
+  <a href="?filter=alles" class="{% if selected_filter == 'alles' %}active{% endif %}">Alles</a>
+</nav>
+<section class="content-panel notification-inbox">
+  <div class="panel-heading">
+    <h2>{% if selected_filter == 'ongelezen' %}Nieuwe meldingen{% else %}Alle meldingen{% endif %}</h2>
+    {% if unread_count %}<form method="post" action="{% url 'notifications:mark_all_read' %}">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button class="button button-secondary" type="submit"><i data-lucide="check-check"></i>Alles gelezen</button></form>{% endif %}
+  </div>
+  <ul class="notification-list">
+    {% for notification in notifications %}
+      <li class="{% if notification.read_at %}is-read{% else %}is-unread{% endif %}">
+        <i data-lucide="{% if notification.kind == 'warning' %}triangle-alert{% else %}bell{% endif %}"></i>
+        <div><strong>{{ notification.title }}</strong>{% if notification.body %}<small>{{ notification.body }}</small>{% endif %}<time datetime="{{ notification.created_at|date:'c' }}">{{ notification.created_at|date:'d M H:i' }}</time></div>
+        {% if notification.action_url %}<a class="icon-button" href="{{ notification.action_url }}" title="Openen" aria-label="{{ notification.title }} openen"><i data-lucide="arrow-up-right"></i></a>{% endif %}
+        {% if not notification.read_at %}<form method="post" action="{% url 'notifications:mark_read' notification.id %}">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button class="icon-button" title="Markeer gelezen" aria-label="{{ notification.title }} markeren als gelezen"><i data-lucide="check"></i></button></form>{% endif %}
+      </li>
+    {% empty %}
+      <li class="empty-copy">{% if selected_filter == 'ongelezen' %}Je bent helemaal bij.{% else %}Er zijn nog geen meldingen.{% endif %}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

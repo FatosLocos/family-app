@@ -89,5 +89,51 @@ def sync_connection_task(connection_id: int, household_id: int, sync_run_id: int
 def sync_active_connections():
     for household in Household.objects.all():
         with household_db_scope(household.pk):
-            for connection in IntegrationConnection.objects.for_household(household).filter(status__in=["configured", "needs_sync"]):
+            for connection in IntegrationConnection.objects.for_household(household).filter(status__in=["configured", "needs_sync"]).exclude(provider=IntegrationConnection.Provider.HOME_CONNECT):
                 sync_connection_task.delay(connection.id, household.id)
+
+
+@shared_task
+def sync_home_connect_connections():
+    """Keep appliance progress and maintenance signals useful without speeding up all integrations."""
+    for household in Household.objects.all():
+        with household_db_scope(household.pk):
+            for connection in IntegrationConnection.objects.for_household(household).filter(
+                provider=IntegrationConnection.Provider.HOME_CONNECT,
+                status__in=["configured", "needs_sync"],
+            ):
+                sync_connection_task.delay(connection.id, household.id)
+
+
+@shared_task
+def renew_sonos_event_subscriptions():
+    """Re-register Sonos cloud event targets without repeatedly syncing other providers."""
+    for household in Household.objects.all():
+        with household_db_scope(household.pk):
+            for connection in IntegrationConnection.objects.for_household(household).filter(
+                provider=IntegrationConnection.Provider.SONOS,
+                status__in=["configured", "needs_sync"],
+            ):
+                sync_connection_task.delay(connection.id, household.id)
+
+
+@shared_task
+def poll_google_home_event_subscriptions():
+    """Poll configured Google Pub/Sub subscriptions; acknowledgements make retries safe."""
+    from integrations.google_home_events import GoogleHomeEventError, poll_google_home_events
+
+    for household in Household.objects.all():
+        with household_db_scope(household.pk):
+            for connection in IntegrationConnection.objects.for_household(household).filter(
+                provider=IntegrationConnection.Provider.GOOGLE_HOME,
+                status="configured",
+            ):
+                try:
+                    poll_google_home_events(connection)
+                except GoogleHomeEventError as error:
+                    settings = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+                    settings["google_events_status"] = "error"
+                    settings["google_events_error"] = str(error)[:240]
+                    connection.settings = settings
+                    connection.save(update_fields=["settings", "updated_at"])
+                    logger.warning("Google Home eventpoll mislukt voor connection %s: %s", connection.id, error)

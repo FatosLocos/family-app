@@ -1,0 +1,8 @@
+<li id="today-task-{{ task.id }}" class="today-task {% if task.completed_at %}is-complete{% endif %}">
+  <form method="post" action="{% url 'household:toggle_task' task.id %}?next=today" hx-post="{% url 'household:toggle_task' task.id %}" hx-target="#today-task-{{ task.id }}" hx-swap="outerHTML">
+    {% csrf_token %}
+    <button class="check-button" aria-label="{{ task.title }} {% if task.completed_at %}opnieuw openen{% else %}afvinken{% endif %}"><i data-lucide="{% if task.completed_at %}circle-check{% else %}circle{% endif %}"></i></button>
+  </form>
+  <div><strong>{{ task.title }}</strong><small>{% if task.assigned_to %}{{ task.assigned_to }}{% endif %}{% if task.due_at %}{% if task.assigned_to %} · {% endif %}{{ task.due_at|date:'D j M' }}{% endif %}</small></div>
+  {% if task.due_at %}<time>{{ task.due_at|date:'D j M' }}</time>{% endif %}
+</li>

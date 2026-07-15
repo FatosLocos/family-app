@@ -1,0 +1,8 @@
+<li id="today-shopping-{{ item.id }}" class="today-shopping-row {% if item.completed_at %}is-complete{% endif %}">
+  <form method="post" action="{% url 'household:toggle_shopping_item' item.id %}" hx-post="{% url 'household:toggle_shopping_item' item.id %}" hx-target="#today-shopping-{{ item.id }}" hx-swap="outerHTML">
+    {% csrf_token %}
+    <button class="check-button" type="submit" aria-label="{{ item.name }} {% if item.completed_at %}opnieuw openen{% else %}afvinken{% endif %}"><i data-lucide="{% if item.completed_at %}circle-check{% else %}circle{% endif %}"></i></button>
+  </form>
+  <div><strong>{{ item.name }}</strong>{% if item.quantity or item.category %}<small>{{ item.quantity }}{% if item.quantity and item.category %} · {% endif %}{{ item.category }}</small>{% endif %}</div>
+  {% if item.recurring %}<i class="row-icon" data-lucide="repeat-2" title="Terugkerend"></i>{% endif %}
+</li>

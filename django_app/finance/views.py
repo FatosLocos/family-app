@@ -1,14 +1,14 @@
 from django.contrib import messages
 from django.db.models import Q, Sum
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from finance.forms import BudgetForm, RecurringRuleSettingsForm, StatementUploadForm
+from finance.forms import BudgetForm, RecurringRuleSettingsForm, StatementUploadForm, TransactionCategoryForm
 from finance.importers import parse_abn_rows, rows_for_upload
 from finance.models import BankAccount, BankConnection, Budget, RecurringRule, Transaction
-from finance.tasks import fingerprint, refresh_household_recurring_rules
+from finance.tasks import fingerprint, next_recurring_due_date, refresh_household_recurring_rules
 from households.decorators import household_required, parent_required
 
 
@@ -26,6 +26,8 @@ def index(request):
     if provider:
         transactions = transactions.filter(account__connection__provider=provider)
     recurring = list(RecurringRule.objects.for_household(request.household).filter(is_excluded=False).order_by("group", "merchant"))
+    for rule in recurring:
+        rule.next_due_on = next_recurring_due_date(rule)
     accounts = BankAccount.objects.for_household(request.household).select_related("connection")
     month_start = timezone.localdate().replace(day=1)
     monthly_total = transactions.filter(booked_at__gte=month_start, amount__lt=0).aggregate(total=Sum("amount"))["total"] or 0
@@ -35,11 +37,25 @@ def index(request):
         if rules:
             total = sum((rule.expected_amount if rule.direction == RecurringRule.Direction.INCOME else -rule.expected_amount) for rule in rules)
             recurring_groups.append({"code": group_code, "label": group_label, "rules": rules, "total": total})
+    upcoming_recurring = sorted((rule for rule in recurring if rule.next_due_on), key=lambda rule: rule.next_due_on)[:6]
+    budgets = list(Budget.objects.for_household(request.household).order_by("name"))
+    monthly_expenses = Transaction.objects.for_household(request.household).filter(booked_at__gte=month_start, amount__lt=0)
+    for budget in budgets:
+        if not budget.category:
+            budget.spent = None
+            budget.remaining = None
+            budget.progress = 0
+            continue
+        spent = monthly_expenses.filter(category__iexact=budget.category).aggregate(total=Sum("amount"))["total"] or 0
+        budget.spent = abs(spent)
+        budget.remaining = budget.monthly_limit - budget.spent
+        budget.progress = min(100, int((budget.spent / budget.monthly_limit) * 100)) if budget.monthly_limit else 0
+    category_options = sorted({budget.category for budget in budgets if budget.category} | set(Transaction.objects.for_household(request.household).exclude(category="").values_list("category", flat=True)), key=str.lower)
     return render(request, "finance/index.html", {
         "tab": tab, "query": query, "account_id": account_id, "provider": provider, "transactions": transactions[:100], "accounts": accounts,
-        "recurring": recurring, "recurring_groups": recurring_groups, "budgets": Budget.objects.for_household(request.household), "monthly_total": monthly_total,
+        "recurring": recurring, "recurring_groups": recurring_groups, "upcoming_recurring": upcoming_recurring, "budgets": budgets, "monthly_total": monthly_total,
         "providers": BankConnection.Provider.choices, "group_choices": RecurringRule.Group.choices,
-        "upload_form": StatementUploadForm(), "budget_form": BudgetForm(), "recurring_form": RecurringRuleSettingsForm(),
+        "upload_form": StatementUploadForm(), "budget_form": BudgetForm(), "recurring_form": RecurringRuleSettingsForm(), "category_options": category_options,
     })
 
 
@@ -127,4 +143,36 @@ def set_recurring_override(request, transaction_id):
         })
     else:
         refresh_household_recurring_rules(request.household)
+    return redirect(f"{reverse('finance:index')}?tab=transacties")
+
+
+@parent_required
+@require_POST
+def update_transaction_category(request, transaction_id):
+    transaction = get_object_or_404(Transaction.objects.for_household(request.household), pk=transaction_id)
+    form = TransactionCategoryForm(request.POST, instance=transaction)
+    if form.is_valid():
+        category = form.cleaned_data["category"].strip()
+        transaction.category = category
+        transaction.save(update_fields=["category", "updated_at"])
+
+        updated_count = 1
+        if form.cleaned_data["apply_to_history"]:
+            counterparty = transaction.counterparty.strip()
+            description = transaction.description.strip()
+            if counterparty:
+                matches = Transaction.objects.for_household(request.household).filter(counterparty__iexact=counterparty)
+            elif description:
+                matches = Transaction.objects.for_household(request.household).filter(description__iexact=description)
+            else:
+                matches = Transaction.objects.none()
+            if matches.exists():
+                updated_count = matches.update(category=category, updated_at=timezone.now())
+
+        if updated_count == 1:
+            messages.success(request, "Transactiecategorie bijgewerkt.")
+        else:
+            messages.success(request, f"Categorie bijgewerkt voor {updated_count} transacties van dezelfde tegenpartij.")
+    else:
+        messages.error(request, "Controleer de categorie.")
     return redirect(f"{reverse('finance:index')}?tab=transacties")

@@ -11,10 +11,15 @@ coverage
 *.tsbuildinfo
 .DS_Store
 /.venv-django/
+/local_probe/.venv/
 
 # Django runtime data
 __pycache__/
 *.py[cod]
 *.sqlite3
+celerybeat-schedule*
 staticfiles/
 media/
+
+# Local stream previews and diagnostics
+family-app-*-frame.jpg

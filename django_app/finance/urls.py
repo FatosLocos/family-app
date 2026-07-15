@@ -11,4 +11,5 @@ urlpatterns = [
     path("budgetten/<int:budget_id>/verwijderen/", views.delete_budget, name="delete_budget"),
     path("terugkerend/<int:rule_id>/aanpassen/", views.update_recurring_rule, name="update_recurring_rule"),
     path("transacties/<int:transaction_id>/terugkerend/", views.set_recurring_override, name="set_recurring_override"),
+    path("transacties/<int:transaction_id>/categorie/", views.update_transaction_category, name="update_transaction_category"),
 ]

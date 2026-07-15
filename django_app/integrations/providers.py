@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -14,6 +15,7 @@ from finance.models import BankAccount, BankConnection, Transaction
 from home.models import HomeEntity
 from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationConnection
+from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource
 
 
@@ -25,6 +27,53 @@ class HueProviderError(ProviderError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+GO2RTC_STREAM_NAME = "family-app-live"
+GO2RTC_MJPEG_STREAM_NAME = "family-app-live-mjpeg"
+
+HOME_CONNECT_EVENT_LABELS = {
+    "Dishcare.Dishwasher.Event.SaltLack": "Zout bijvullen",
+    "Dishcare.Dishwasher.Event.RinseAidLack": "Glansspoelmiddel bijvullen",
+    "Dishcare.Dishwasher.Event.ProgramBlockedSaltLack": "Programma geblokkeerd: zout bijvullen",
+    "Dishcare.Dishwasher.Event.MachineCareReminder": "Machine Care uitvoeren",
+    "ConsumerProducts.CoffeeMaker.Event.BeanContainerEmpty": "Bonenreservoir is leeg",
+    "ConsumerProducts.CoffeeMaker.Event.WaterTankEmpty": "Waterreservoir is leeg",
+    "ConsumerProducts.CoffeeMaker.Event.DeviceShouldBeDescaled": "Koffiemachine ontkalken",
+    "ConsumerProducts.CoffeeMaker.Event.DeviceShouldBeCleaned": "Koffiemachine reinigen",
+}
+
+HOME_CONNECT_VALUE_LABELS = {
+    "BSH.Common.EnumType.OperationState.Run": "Bezig",
+    "BSH.Common.EnumType.OperationState.Pause": "Gepauzeerd",
+    "BSH.Common.EnumType.OperationState.Finished": "Klaar",
+    "BSH.Common.EnumType.OperationState.Inactive": "Inactief",
+    "BSH.Common.EnumType.OperationState.Ready": "Gereed",
+    "BSH.Common.EnumType.OperationState.DelayedStart": "Gepland",
+    "Dishcare.Dishwasher.Program.Intensiv70": "Intensief 70 °C",
+    "Dishcare.Dishwasher.Program.Auto2": "Auto",
+    "Dishcare.Dishwasher.Program.Eco50": "Eco 50 °C",
+    "Dishcare.Dishwasher.Program.Quick45": "Snel 45 °C",
+    "Dishcare.Dishwasher.Program.Quick65": "Snel 65 °C",
+    "Dishcare.Dishwasher.Program.Kurz60": "Kort 60 °C",
+    "Dishcare.Dishwasher.Program.PreRinse": "Voorspoelen",
+    "Dishcare.Dishwasher.Program.MachineCare": "Machine Care",
+}
+
+HOME_CONNECT_APPLIANCE_LABELS = {
+    "dishwasher": "Vaatwasser",
+    "coffee_maker": "Koffiemachine",
+    "refrigerator": "Koelkast",
+    "washer": "Wasmachine",
+    "dryer": "Droger",
+    "oven": "Oven",
+    "hood": "Afzuigkap",
+    "appliance": "Apparaat",
+}
+
+
+def _go2rtc_api_url() -> str:
+    return os.environ.get("GO2RTC_API_URL", "http://127.0.0.1:1984").rstrip("/")
 
 
 def _safe_response_json(response, provider: str) -> dict:
@@ -83,10 +132,16 @@ def sync_connection(connection: IntegrationConnection) -> dict:
         return sync_hue(connection)
     if connection.provider == "sonos":
         return sync_sonos(connection)
+    if connection.provider == "spotify":
+        return sync_spotify(connection)
+    if connection.provider == "smartcar":
+        return sync_smartcar(connection)
     if connection.provider == "google_home":
         return sync_google_home(connection)
     if connection.provider == "lg_thinq":
         return sync_lg_thinq(connection)
+    if connection.provider == "home_connect":
+        return sync_home_connect(connection)
     raise ProviderError("Onbekende koppeling.")
 
 
@@ -150,6 +205,500 @@ def _sonos_request(connection: IntegrationConnection, method: str, path: str, pa
     return _oauth_response(response, "Sonos")
 
 
+def _spotify_request(connection: IntegrationConnection, method: str, path: str, *, params: dict | None = None, payload: dict | None = None, allow_empty: bool = False):
+    from integrations.services import SPOTIFY_OAUTH_TOKEN_URL
+
+    token = _refresh_connection_token(connection, "Spotify", SPOTIFY_OAUTH_TOKEN_URL)
+    try:
+        response = requests.request(method, f"https://api.spotify.com/v1{path}", headers={"Authorization": f"Bearer {token}"}, params=params, json=payload, timeout=20)
+    except requests.RequestException as error:
+        raise ProviderError("Spotify is tijdelijk niet bereikbaar.") from error
+    if getattr(response, "status_code", None) == 204 and allow_empty:
+        return {}
+    return _oauth_response(response, "Spotify")
+
+
+def _spotify_track_attributes(playback: dict) -> dict:
+    item = playback.get("item") if isinstance(playback.get("item"), dict) else {}
+    artists = item.get("artists") if isinstance(item.get("artists"), list) else []
+    album = item.get("album") if isinstance(item.get("album"), dict) else {}
+    images = album.get("images") if isinstance(album.get("images"), list) else []
+    return {
+        "spotify_is_playing": bool(playback.get("is_playing")),
+        "spotify_track_name": str(item.get("name") or ""),
+        "spotify_track_artist": ", ".join(str(artist.get("name") or "") for artist in artists if isinstance(artist, dict) and artist.get("name")),
+        "spotify_track_album": str(album.get("name") or ""),
+        "spotify_track_artwork": str((images[0] if images and isinstance(images[0], dict) else {}).get("url") or ""),
+        "spotify_progress_ms": playback.get("progress_ms"),
+        "spotify_duration_ms": item.get("duration_ms"),
+        "spotify_shuffle": bool(playback.get("shuffle_state")),
+        "spotify_repeat": str(playback.get("repeat_state") or "off"),
+        "spotify_context_uri": str((playback.get("context") or {}).get("uri") or "") if isinstance(playback.get("context"), dict) else "",
+    }
+
+
+def sync_spotify(connection: IntegrationConnection) -> dict:
+    devices_response = _spotify_request(connection, "GET", "/me/player/devices")
+    devices = devices_response.get("devices") if isinstance(devices_response.get("devices"), list) else []
+    try:
+        playback = _spotify_request(connection, "GET", "/me/player", allow_empty=True)
+    except ProviderError:
+        playback = {}
+    active_device = playback.get("device") if isinstance(playback.get("device"), dict) else {}
+    playlists_response = _spotify_request(connection, "GET", "/me/playlists", params={"limit": 20}, allow_empty=True)
+    playlists = playlists_response.get("items") if isinstance(playlists_response.get("items"), list) else []
+    playlist_items = [
+        {"name": str(item.get("name") or "Playlist"), "uri": str(item.get("uri") or ""), "image": str(((item.get("images") or [{}])[0] or {}).get("url") or "")}
+        for item in playlists if isinstance(item, dict) and item.get("uri")
+    ]
+    seen = set()
+    for device in devices:
+        if not isinstance(device, dict) or not device.get("id"):
+            continue
+        device_id = str(device["id"])
+        is_active = bool(device.get("is_active")) or str(active_device.get("id") or "") == device_id
+        attributes = {
+            "spotify_device_id": device_id,
+            "spotify_device_type": str(device.get("type") or "apparaat"),
+            "spotify_device_name": str(device.get("name") or "Spotify Connect-apparaat"),
+            "spotify_volume": (device.get("volume_percent") if isinstance(device.get("volume_percent"), int) else None),
+            "spotify_is_active": is_active,
+            "spotify_is_restricted": bool(device.get("is_restricted")),
+            "spotify_supports_volume": device.get("volume_percent") is not None,
+            "spotify_playlists": playlist_items if is_active else [],
+        }
+        if is_active:
+            attributes.update(_spotify_track_attributes(playback))
+        entity_id = f"spotify.{connection.id}.{device_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.SPOTIFY,
+                "domain": "media_player",
+                "name": str(device.get("name") or "Spotify Connect"),
+                "state": "on" if is_active and bool(playback.get("is_playing")) else "off",
+                "attributes": attributes,
+                "is_available": True,
+                "is_supported": not bool(device.get("is_restricted")),
+            },
+        )
+        seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.SPOTIFY, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    return {"devices": len(seen)}
+
+
+def _home_connect_request(connection: IntegrationConnection, method: str, path: str, *, payload: dict | None = None, allow_empty: bool = False) -> dict:
+    from integrations.services import HOME_CONNECT_OAUTH_TOKEN_URL
+
+    token = _refresh_connection_token(connection, "Home Connect", HOME_CONNECT_OAUTH_TOKEN_URL)
+    try:
+        response = requests.request(method, f"https://api.home-connect.com/api{path}", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.bsh.sdk.v1+json", "Content-Type": "application/vnd.bsh.sdk.v1+json"}, json=payload, timeout=20)
+    except requests.RequestException as error:
+        raise ProviderError("Home Connect is tijdelijk niet bereikbaar.") from error
+    if allow_empty and getattr(response, "status_code", 200) in {204, 404, 409}:
+        return {}
+    return _oauth_response(response, "Home Connect")
+
+
+def _home_connect_collection(payload: dict, key: str) -> list[dict]:
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict) and isinstance(data.get(key), list):
+        return [item for item in data[key] if isinstance(item, dict)]
+    return []
+
+
+def _home_connect_values(payload: dict) -> dict:
+    values = _home_connect_collection(payload, "status")
+    return {str(item.get("key") or ""): item.get("value") for item in values if isinstance(item, dict) and item.get("key")}
+
+
+def _home_connect_state(value: str) -> str:
+    state = value.rsplit(".", 1)[-1].lower()
+    return {"run": "running", "pause": "paused", "finished": "finished", "inactive": "idle", "ready": "ready"}.get(state, state or "unknown")
+
+
+def _home_connect_label(value) -> str:
+    raw = str(value or "")
+    return HOME_CONNECT_VALUE_LABELS.get(raw, raw.rsplit(".", 1)[-1].replace("_", " "))
+
+
+def _home_connect_event_label(key: str) -> str:
+    return HOME_CONNECT_EVENT_LABELS.get(key, _home_connect_label(key))
+
+
+def _home_connect_duration(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or seconds < 0:
+        return ""
+    total_minutes = int(seconds) // 60
+    hours, minutes = divmod(total_minutes, 60)
+    if hours:
+        return f"{hours}u {minutes:02d}m"
+    return f"{minutes} min"
+
+
+def _home_connect_appliance_meta(appliance_type: str) -> tuple[str, str]:
+    normalized = appliance_type.lower()
+    for needle, domain, icon in (
+        ("dishwasher", "dishwasher", "dishwasher"),
+        ("coffeemaker", "coffee_maker", "coffee"),
+        ("coffee maker", "coffee_maker", "coffee"),
+        ("fridge", "refrigerator", "refrigerator"),
+        ("refrigerator", "refrigerator", "refrigerator"),
+        ("freezer", "refrigerator", "refrigerator"),
+        ("washerdryer", "washer", "washing-machine"),
+        ("washer", "washer", "washing-machine"),
+        ("dryer", "dryer", "shirt"),
+        ("oven", "oven", "cooking-pot"),
+        ("hood", "hood", "fan"),
+    ):
+        if needle in normalized:
+            return domain, icon
+    return "appliance", "plug"
+
+
+def _home_connect_display_name(appliance: dict, appliance_domain: str) -> tuple[str, str]:
+    """Use a recognisable device label while retaining Home Connect's custom name."""
+    brand = str(appliance.get("brand") or "").strip()
+    custom_name = str(appliance.get("name") or "").strip()
+    type_label = HOME_CONNECT_APPLIANCE_LABELS.get(appliance_domain, "Apparaat")
+    label = " ".join(part for part in (brand, type_label.lower()) if part).strip()
+    return label or custom_name or type_label, custom_name
+
+
+def _home_connect_programs(payload: dict) -> list[dict]:
+    values = _home_connect_collection(payload, "programs")
+    programs = []
+    for item in values:
+        if not isinstance(item, dict) or not item.get("key"):
+            continue
+        options = []
+        for option in item.get("options") or []:
+            if not isinstance(option, dict) or not option.get("key") or "value" not in option:
+                continue
+            options.append({"key": str(option["key"]), "value": option["value"], "label": _home_connect_label(option["key"])})
+        programs.append({"key": str(item["key"]), "label": _home_connect_label(item["key"]), "options": options})
+    return programs
+
+
+def _home_connect_commands(payload: dict) -> set[str]:
+    values = _home_connect_collection(payload, "commands")
+    return {str(item.get("key")) for item in values if isinstance(item, dict) and item.get("key")}
+
+
+def _home_connect_appliances(payload: dict) -> list[dict]:
+    """Handle Home Connect's documented data.homeappliances response shape."""
+    return _home_connect_collection(payload, "homeappliances")
+
+
+def _home_connect_active_program(payload: dict) -> dict:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        active = data.get("active")
+        if isinstance(active, dict):
+            return active
+        if data.get("key"):
+            return data
+    return {}
+
+
+def _home_connect_selected_program(payload: dict) -> dict:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        if isinstance(data.get("selected"), dict):
+            return data["selected"]
+        if data.get("key"):
+            return data
+    return {}
+
+
+def _home_connect_program_forecasts(program: dict) -> dict[str, int]:
+    forecasts = {}
+    labels = {
+        "BSH.Common.Option.EnergyForecast": "energy",
+        "BSH.Common.Option.WaterForecast": "water",
+    }
+    for option in program.get("options") or []:
+        if not isinstance(option, dict):
+            continue
+        label = labels.get(str(option.get("key") or ""))
+        value = option.get("value")
+        if label and isinstance(value, (int, float)):
+            forecasts[label] = max(0, min(100, round(value)))
+    return forecasts
+
+
+def _home_connect_door_label(value) -> str:
+    normalized = str(value or "").lower()
+    if normalized.endswith(".open") or normalized == "open":
+        return "Deur open"
+    if normalized.endswith(".closed") or normalized == "closed":
+        return "Deur gesloten"
+    return ""
+
+
+def _home_connect_progress(value) -> int | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return max(0, min(100, round(float(value))))
+
+
+def _home_connect_start_status(appliance: dict, values: dict) -> tuple[bool, str]:
+    """Evaluate the documented preconditions for starting a Home Connect program."""
+    if not bool(appliance.get("connected", False)):
+        return False, "Het apparaat is niet verbonden."
+    if values.get("BSH.Common.Status.RemoteControlActive") is not True:
+        return False, "Bediening op afstand staat uit op het apparaat."
+    remote_start_allowed = (
+        values.get("BSH.Common.Status.RemoteControlStartAllowed") is True
+        or values.get("BSH.Common.Status.RemoteStartAllowed") is True
+    )
+    if not remote_start_allowed:
+        return False, "Remote Start staat uit op het apparaat."
+    if values.get("BSH.Common.Status.LocalControlActive") is True:
+        return False, "Het apparaat wordt lokaal bediend."
+    operation = str(values.get("BSH.Common.Status.OperationState") or "")
+    if _home_connect_state(operation) != "ready":
+        return False, "Het apparaat is nog niet klaar om te starten."
+    return True, "Klaar om een programma te starten."
+
+
+def sync_home_connect(connection: IntegrationConnection) -> dict:
+    payload = _home_connect_request(connection, "GET", "/homeappliances")
+    appliances = _home_connect_appliances(payload)
+    seen = set()
+    for appliance in appliances:
+        if not isinstance(appliance, dict) or not appliance.get("haId"):
+            continue
+        appliance_id = str(appliance["haId"])
+        values = _home_connect_values(_home_connect_request(connection, "GET", f"/homeappliances/{appliance_id}/status", allow_empty=True))
+        active = _home_connect_active_program(_home_connect_request(connection, "GET", f"/homeappliances/{appliance_id}/programs/active", allow_empty=True))
+        available_programs = _home_connect_request(connection, "GET", f"/homeappliances/{appliance_id}/programs/available", allow_empty=True)
+        programs = _home_connect_programs(available_programs)
+        # The selected program is a separate Home Connect resource. It carries
+        # the current option values (including energy and water forecasts).
+        selected = _home_connect_selected_program(
+            _home_connect_request(connection, "GET", f"/homeappliances/{appliance_id}/programs/selected", allow_empty=True)
+        )
+        commands = _home_connect_commands(_home_connect_request(connection, "GET", f"/homeappliances/{appliance_id}/commands", allow_empty=True))
+        appliance_type = str(appliance.get("type") or "Home Connect-apparaat")
+        appliance_domain, appliance_icon = _home_connect_appliance_meta(appliance_type)
+        display_name, custom_name = _home_connect_display_name(appliance, appliance_domain)
+        operation = str(values.get("BSH.Common.Status.OperationState") or "")
+        can_start, start_status = _home_connect_start_status(appliance, values)
+        remaining = values.get("BSH.Common.Option.RemainingProgramTime")
+        progress = _home_connect_progress(values.get("BSH.Common.Option.ProgramProgress"))
+        event_values = {
+            key: _home_connect_event_label(key)
+            for key, value in values.items()
+            if ".Event." in key and value not in {False, "BSH.Common.EnumType.EventStatus.Inactive"}
+        }
+        entity_id = f"home_connect.{connection.id}.{appliance_id}"
+        previous = HomeEntity.objects.for_household(connection.household).filter(entity_id=entity_id).first()
+        previous_state = previous.state if previous else ""
+        previous_events = previous.attributes.get("home_connect_events", {}) if previous and isinstance(previous.attributes, dict) else {}
+        entity, _ = HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection,
+                "source": HomeEntity.Source.HOME_CONNECT,
+                "domain": appliance_domain,
+                "name": display_name,
+                "state": _home_connect_state(operation),
+                "attributes": {
+                    "home_connect_id": appliance_id,
+                    "home_connect_type": appliance_type,
+                    "home_connect_type_label": HOME_CONNECT_APPLIANCE_LABELS.get(appliance_domain, "Apparaat"),
+                    "home_connect_icon": appliance_icon,
+                    "home_connect_brand": str(appliance.get("brand") or ""),
+                    "home_connect_model": str(appliance.get("enumber") or appliance.get("vib") or ""),
+                    "home_connect_custom_name": custom_name,
+                    "home_connect_connected": bool(appliance.get("connected", False)),
+                    "home_connect_operation": _home_connect_label(operation),
+                    "home_connect_program": _home_connect_label(active.get("key")) if isinstance(active, dict) else "",
+                    "home_connect_selected_program_key": str(selected.get("key") or ""),
+                    "home_connect_selected_program": _home_connect_label(selected.get("key")) if selected else "",
+                    "home_connect_program_forecasts": _home_connect_program_forecasts(selected),
+                    "home_connect_remaining_seconds": remaining if isinstance(remaining, (int, float)) else None,
+                    "home_connect_remaining_label": _home_connect_duration(remaining),
+                    "home_connect_program_progress": progress,
+                    "home_connect_door_label": _home_connect_door_label(values.get("BSH.Common.Status.DoorState")),
+                    "home_connect_remote_control": values.get("BSH.Common.Status.RemoteControlActive") is True,
+                    # Home Connect v1 exposes RemoteControlStartAllowed. Keep the
+                    # older key as a compatibility fallback for older appliance APIs.
+                    "home_connect_remote_start": (
+                        values.get("BSH.Common.Status.RemoteControlStartAllowed") is True
+                        or values.get("BSH.Common.Status.RemoteStartAllowed") is True
+                    ),
+                    "home_connect_local_control": values.get("BSH.Common.Status.LocalControlActive") is True,
+                    "home_connect_can_start": can_start,
+                    "home_connect_start_status": start_status,
+                    "home_connect_events": event_values,
+                    "home_connect_programs": programs,
+                    "home_connect_can_pause": "BSH.Common.Command.PauseProgram" in commands,
+                    "home_connect_can_resume": "BSH.Common.Command.ResumeProgram" in commands,
+                    "home_connect_can_stop": _home_connect_state(operation) in {"running", "paused"},
+                    "home_connect_can_select_program": bool(appliance.get("connected", False)) and _home_connect_state(operation) in {"idle", "ready"} and bool(programs),
+                },
+                "is_available": bool(appliance.get("connected", False)),
+                "is_supported": bool(appliance.get("connected", False)) and (bool(programs) or bool(commands)),
+            },
+        )
+        if not previous or previous_state != entity.state or previous.attributes != entity.attributes or previous.is_available != entity.is_available:
+            from home.realtime import broadcast_home_entity
+
+            broadcast_home_entity(entity)
+        if previous and previous_state != "finished" and entity.state == "finished":
+            program_name = str(entity.attributes.get("home_connect_program") or "Programma")
+            Notification.objects.get_or_create(
+                household=connection.household,
+                dedupe_key=f"home-connect-finished:{entity.id}:{program_name}:{timezone.localdate().isoformat()}",
+                defaults={
+                    "title": f"{entity.name} is klaar",
+                    "body": program_name,
+                    "kind": "info",
+                    "action_url": "/huis/?source=home_connect",
+                },
+            )
+        for event_key, event_label in event_values.items():
+            if previous_events.get(event_key) == event_label:
+                continue
+            Notification.objects.get_or_create(
+                household=connection.household,
+                dedupe_key=f"home-connect-event:{entity.id}:{event_key}:{event_label}",
+                defaults={
+                    "title": f"{entity.name}: aandacht nodig",
+                    "body": event_label,
+                    "kind": "warning",
+                    "action_url": "/huis/?source=home_connect",
+                },
+            )
+        seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.HOME_CONNECT, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    return {"devices": len(seen)}
+
+
+def _smartcar_access_token(connection: IntegrationConnection) -> str:
+    from integrations.services import get_app_config
+
+    client_id, client_secret, _ = get_app_config(connection.household, "smartcar")
+    if not client_id or not client_secret:
+        raise ProviderError("Smartcar-clientgegevens ontbreken.")
+    data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
+    if _stored_token_is_current(data):
+        return decrypt(data["access_token"])
+    try:
+        response = requests.post(
+            "https://iam.smartcar.com/oauth2/token",
+            data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise ProviderError("Smartcar is tijdelijk niet bereikbaar.") from error
+    payload = _oauth_response(response, "Smartcar")
+    token = str(payload.get("access_token") or "")
+    if not token:
+        raise ProviderError("Smartcar gaf geen toegangstoken terug.")
+    data["access_token"] = encrypt(token)
+    data["expires_at"] = (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat()
+    connection.settings = data
+    connection.save(update_fields=["settings", "updated_at"])
+    return token
+
+
+def _smartcar_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
+    data = connection.settings if isinstance(connection.settings, dict) else {}
+    user_id = str(data.get("smartcar_user_id") or "")
+    if not user_id:
+        raise ProviderError("Smartcar moet opnieuw worden geautoriseerd.")
+    try:
+        response = requests.request(
+            method,
+            f"https://vehicle.api.smartcar.com/v3{path}",
+            headers={"Authorization": f"Bearer {_smartcar_access_token(connection)}", "sc-user-id": user_id},
+            json=payload,
+            timeout=25,
+        )
+    except requests.RequestException as error:
+        raise ProviderError("Smartcar is tijdelijk niet bereikbaar.") from error
+    return _oauth_response(response, "Smartcar")
+
+
+def _smartcar_signal_values(payload: dict) -> tuple[dict, set[str]]:
+    values, codes = {}, set()
+    for item in payload.get("data", []) if isinstance(payload.get("data"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+        code = str(attributes.get("code") or "")
+        body = attributes.get("body") if isinstance(attributes.get("body"), dict) else {}
+        if code:
+            codes.add(code)
+            values[code] = body
+    return values, codes
+
+
+def _smartcar_readings(payload: dict) -> list[dict]:
+    readings = []
+    for item in payload.get("data", []) if isinstance(payload.get("data"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+        body = attributes.get("body") if isinstance(attributes.get("body"), dict) else {}
+        value = body.get("value")
+        if value is None:
+            continue
+        label = str(attributes.get("name") or attributes.get("code") or "Signaal")
+        unit = str(body.get("unit") or "")
+        readings.append({"label": label, "value": str(value), "unit": unit})
+    return readings[:12]
+
+
+def sync_smartcar(connection: IntegrationConnection) -> dict:
+    from integrations.services import get_app_config
+
+    _, _, app_config = get_app_config(connection.household, "smartcar")
+    controls_enabled = bool(app_config.get("allow_remote_controls"))
+    connections = _smartcar_request(connection, "GET", "/connections")
+    rows = connections.get("connections") if isinstance(connections.get("connections"), list) else connections.get("data") if isinstance(connections.get("data"), list) else []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        vehicle_id = str(row.get("vehicleId") or row.get("vehicle_id") or row.get("id") or "")
+        if not vehicle_id:
+            continue
+        try:
+            vehicle = _smartcar_request(connection, "GET", f"/vehicles/{vehicle_id}")
+            signals_payload = _smartcar_request(connection, "GET", f"/vehicles/{vehicle_id}/signals?pageSize=100")
+        except ProviderError:
+            vehicle, signals_payload = {}, {}
+        vehicle_data = vehicle.get("data") if isinstance(vehicle.get("data"), dict) else vehicle
+        vehicle_attributes = vehicle_data.get("attributes") if isinstance(vehicle_data, dict) and isinstance(vehicle_data.get("attributes"), dict) else vehicle_data if isinstance(vehicle_data, dict) else {}
+        signal_values, signal_codes = _smartcar_signal_values(signals_payload)
+        signal_readings = _smartcar_readings(signals_payload)
+        info = signals_payload.get("included", {}).get("vehicle", {}).get("attributes", {}) if isinstance(signals_payload.get("included"), dict) else {}
+        info = info if isinstance(info, dict) else vehicle_attributes
+        label = " ".join(str(info.get(key) or "") for key in ("make", "model", "year")).strip() or "Smartcar-voertuig"
+        entity_id = f"smartcar.{connection.id}.{vehicle_id}"
+        HomeEntity.objects.update_or_create(
+            household=connection.household,
+            entity_id=entity_id,
+            defaults={
+                "connection": connection, "source": HomeEntity.Source.SMARTCAR, "domain": "vehicle", "name": label,
+                "state": "available", "is_available": True, "is_supported": True,
+                "attributes": {"smartcar_vehicle_id": vehicle_id, "smartcar_signals": signal_values, "smartcar_readings": signal_readings, "smartcar_signal_codes": sorted(signal_codes), "smartcar_can_lock": controls_enabled and "lock-status" in signal_codes, "smartcar_can_unlock": controls_enabled and "lock-status" in signal_codes, "smartcar_make": info.get("make"), "smartcar_model": info.get("model"), "smartcar_year": info.get("year")},
+            },
+        )
+        seen.add(entity_id)
+    HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.SMARTCAR, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
+    return {"vehicles": len(seen)}
+
+
 def _sonos_optional_request(connection: IntegrationConnection, method: str, path: str, payload: dict | None = None) -> dict:
     try:
         return _sonos_request(connection, method, path, payload)
@@ -195,6 +744,7 @@ def sonos_playback_status_attributes(payload: dict) -> dict:
         "sonos_repeat": bool(play_modes.get("repeat")),
         "sonos_repeat_one": bool(play_modes.get("repeatOne")),
         "sonos_crossfade": bool(play_modes.get("crossfade")),
+        "sonos_can_crossfade": "crossfade" in play_modes,
         "sonos_position_ms": payload.get("positionMillis"),
     }
 
@@ -314,6 +864,7 @@ def sync_sonos(connection: IntegrationConnection) -> dict:
                 if isinstance(player, dict) and player.get("id"):
                     _sonos_request(connection, "POST", f"/players/{player['id']}/playerVolume/subscription")
             settings["sonos_events_status"] = "active"
+            settings["sonos_event_subscriptions_renewed_at"] = timezone.now().isoformat()
             settings.pop("sonos_events_error", None)
         except ProviderError as error:
             # Events improve freshness but must not block normal speaker control.
@@ -338,6 +889,185 @@ def _google_home_request(connection: IntegrationConnection, method: str, path: s
     return _oauth_response(response, "Google Home")
 
 
+def start_google_home_live_stream(entity: HomeEntity) -> dict:
+    """Create a short-lived Google RTSP session and hand it only to the internal relay."""
+    attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    resource_name = str(attributes.get("google_resource_name") or "")
+    protocols = {str(protocol).upper() for protocol in attributes.get("camera_stream_protocols", [])}
+    if not resource_name or "RTSP" not in protocols:
+        raise ProviderError("Deze camera biedt geen RTSP-livestream.")
+    if not entity.connection:
+        raise ProviderError("De Google Home-koppeling voor deze camera ontbreekt.")
+
+    payload = _google_home_request(
+        entity.connection,
+        "POST",
+        f"/{resource_name}:executeCommand",
+        {"command": "sdm.devices.commands.CameraLiveStream.GenerateRtspStream", "params": {}},
+    )
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+    stream_urls = results.get("streamUrls") if isinstance(results.get("streamUrls"), dict) else {}
+    rtsp_url = str(stream_urls.get("rtspUrl") or "")
+    if not rtsp_url.startswith("rtsp"):
+        raise ProviderError("Google Home leverde geen geldige livestream.")
+    try:
+        relay_response = requests.put(
+            f"{_go2rtc_api_url()}/api/streams",
+            params={"name": GO2RTC_STREAM_NAME, "src": rtsp_url},
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise ProviderError("De lokale videorelay is niet bereikbaar.") from error
+    if not relay_response.ok:
+        raise ProviderError("De videorelay kon de Nest-livestream niet starten.")
+    try:
+        mjpeg_response = requests.put(
+            f"{_go2rtc_api_url()}/api/streams",
+            params={"name": GO2RTC_MJPEG_STREAM_NAME, "src": f"ffmpeg:{GO2RTC_STREAM_NAME}#video=mjpeg"},
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+        raise ProviderError("De lokale videorelay is niet bereikbaar.") from error
+    if not mjpeg_response.ok:
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+        raise ProviderError("De videorelay kon de browserstream niet starten.")
+    return {"expires_at": str(results.get("expiresAt") or ""), "stream_name": GO2RTC_MJPEG_STREAM_NAME}
+
+
+def stop_google_home_live_stream() -> None:
+    try:
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_MJPEG_STREAM_NAME}, timeout=10)
+        requests.delete(f"{_go2rtc_api_url()}/api/streams", params={"src": GO2RTC_STREAM_NAME}, timeout=10)
+    except requests.RequestException:
+        pass
+
+
+def google_home_mjpeg_stream(stream_name: str):
+    return _google_home_relay_stream("/api/stream.mjpeg", stream_name)
+
+
+def google_home_mp4_stream(stream_name: str):
+    return _google_home_relay_stream("/api/stream.mp4", stream_name)
+
+
+def _google_home_relay_stream(path: str, stream_name: str):
+    try:
+        response = requests.get(
+            f"{_go2rtc_api_url()}{path}",
+            params={"src": stream_name},
+            stream=True,
+            timeout=(5, 60),
+        )
+    except requests.RequestException as error:
+        raise ProviderError("De videorelay is niet bereikbaar.") from error
+    if not response.ok:
+        response.close()
+        raise ProviderError("De livestream is niet beschikbaar.")
+    return response
+
+
+def _round_temperature(value):
+    try:
+        return round(float(value), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def google_home_thermostat_attributes(traits: dict, device: dict | None = None) -> dict:
+    """Flatten exposed Device Access traits for one consistent Home card model."""
+    device = device if isinstance(device, dict) else {}
+    traits = traits if isinstance(traits, dict) else {}
+    info = traits.get("sdm.devices.traits.Info") if isinstance(traits.get("sdm.devices.traits.Info"), dict) else {}
+    temperature = traits.get("sdm.devices.traits.Temperature") if isinstance(traits.get("sdm.devices.traits.Temperature"), dict) else {}
+    humidity = traits.get("sdm.devices.traits.Humidity") if isinstance(traits.get("sdm.devices.traits.Humidity"), dict) else {}
+    connectivity = traits.get("sdm.devices.traits.Connectivity") if isinstance(traits.get("sdm.devices.traits.Connectivity"), dict) else {}
+    settings = traits.get("sdm.devices.traits.Settings") if isinstance(traits.get("sdm.devices.traits.Settings"), dict) else {}
+    setpoint = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint") if isinstance(traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint"), dict) else {}
+    mode = traits.get("sdm.devices.traits.ThermostatMode") if isinstance(traits.get("sdm.devices.traits.ThermostatMode"), dict) else {}
+    eco = traits.get("sdm.devices.traits.ThermostatEco") if isinstance(traits.get("sdm.devices.traits.ThermostatEco"), dict) else {}
+    hvac = traits.get("sdm.devices.traits.ThermostatHvac") if isinstance(traits.get("sdm.devices.traits.ThermostatHvac"), dict) else {}
+    fan = traits.get("sdm.devices.traits.Fan") if isinstance(traits.get("sdm.devices.traits.Fan"), dict) else {}
+    on_off = traits.get("sdm.devices.traits.OnOff") if isinstance(traits.get("sdm.devices.traits.OnOff"), dict) else {}
+    camera_image = traits.get("sdm.devices.traits.CameraImage") if isinstance(traits.get("sdm.devices.traits.CameraImage"), dict) else {}
+    camera_stream = traits.get("sdm.devices.traits.CameraLiveStream") if isinstance(traits.get("sdm.devices.traits.CameraLiveStream"), dict) else {}
+    locations = [str(item.get("displayName")) for item in device.get("parentRelations", []) if isinstance(item, dict) and item.get("displayName")]
+    return {
+        "google_resource_name": str(device.get("name") or ""),
+        "google_device_type": str(device.get("type") or ""),
+        "google_traits": traits,
+        "google_locations": locations,
+        "google_model": str(info.get("model") or ""),
+        "current_temperature": _round_temperature(temperature.get("ambientTemperatureCelsius")),
+        "humidity": humidity.get("ambientHumidityPercent"),
+        "temperature": _round_temperature(setpoint.get("heatCelsius")) if setpoint.get("heatCelsius") is not None else _round_temperature(setpoint.get("coolCelsius")),
+        "temperature_heat": _round_temperature(setpoint.get("heatCelsius")),
+        "temperature_cool": _round_temperature(setpoint.get("coolCelsius")),
+        "thermostat_mode": str(mode.get("mode") or ""),
+        "thermostat_modes": [str(item) for item in mode.get("availableModes", []) if item],
+        "eco_mode": str(eco.get("mode") or ""),
+        "eco_modes": [str(item) for item in eco.get("availableModes", []) if item],
+        "eco_heat": _round_temperature(eco.get("heatCelsius")),
+        "eco_cool": _round_temperature(eco.get("coolCelsius")),
+        "hvac_status": str(hvac.get("status") or ""),
+        "google_connectivity": str(connectivity.get("status") or ""),
+        "temperature_scale": str(settings.get("temperatureScale") or "CELSIUS"),
+        "fan_timer_mode": str(fan.get("timerMode") or ""),
+        "fan_timer_timeout": str(fan.get("timerTimeout") or ""),
+        "min_temp": 9,
+        "max_temp": 32,
+        "target_temp_step": 0.5,
+        "supports_on_off": bool(on_off),
+        "supports_temperature": "sdm.devices.traits.ThermostatTemperatureSetpoint" in traits,
+        "supports_temperature_range": "sdm.devices.traits.ThermostatTemperatureSetpoint" in traits and mode.get("mode") == "HEATCOOL",
+        "supports_thermostat_mode": bool(mode),
+        "supports_eco": bool(eco),
+        "supports_fan_timer": bool(fan),
+        "supports_camera_image": bool(camera_image),
+        "supports_camera_stream": bool(camera_stream),
+        "camera_stream_protocols": [str(item) for item in camera_stream.get("supportedProtocols", []) if item],
+        "supports_camera_motion": "sdm.devices.traits.CameraMotion" in traits,
+        "supports_camera_person": "sdm.devices.traits.CameraPerson" in traits,
+        "supports_camera_sound": "sdm.devices.traits.CameraSound" in traits,
+        "supports_doorbell_chime": "sdm.devices.traits.DoorbellChime" in traits,
+    }
+
+
+def google_home_entity_name(device: dict, traits: dict) -> str:
+    info = traits.get("sdm.devices.traits.Info") if isinstance(traits.get("sdm.devices.traits.Info"), dict) else {}
+    if info.get("customName") or info.get("name"):
+        return str(info.get("customName") or info.get("name"))
+    device_type = str(device.get("type") or "")
+    if device_type.endswith("THERMOSTAT"):
+        return "Nest Thermostaat"
+    if device_type.endswith("DOORBELL"):
+        return "Nest Deurbel"
+    if device_type.endswith("CAMERA"):
+        return "Nest Camera"
+    return device_type.rsplit(".", 1)[-1].replace("_", " ").title() or "Google Nest-apparaat"
+
+
+def apply_google_home_traits(entity: HomeEntity, traits: dict, device: dict | None = None) -> HomeEntity:
+    attributes = google_home_thermostat_attributes(traits, device)
+    existing = entity.attributes if isinstance(entity.attributes, dict) else {}
+    # Google omits the actual setpoint while a Nest thermostat is off. Keep the
+    # most recently received value so the card can still explain its setting.
+    if attributes["supports_temperature"]:
+        for key in ("temperature", "temperature_heat", "temperature_cool"):
+            if attributes.get(key) is None and existing.get(key) is not None:
+                attributes[key] = existing[key]
+    entity.attributes = {**existing, **attributes}
+    connectivity = attributes["google_connectivity"]
+    hvac = attributes["hvac_status"]
+    entity.is_available = connectivity != "OFFLINE"
+    entity.is_supported = bool(attributes["supports_on_off"] or attributes["supports_temperature"] or attributes["supports_thermostat_mode"] or attributes["supports_eco"] or attributes["supports_fan_timer"])
+    if attributes["supports_temperature"] or attributes["supports_thermostat_mode"]:
+        entity.state = {"HEATING": "heating", "COOLING": "cooling", "OFF": "off"}.get(hvac, "on" if attributes["thermostat_mode"] not in {"", "OFF"} else "off")
+    else:
+        entity.state = "ready" if entity.is_available else "off"
+    return entity
+
+
 def sync_google_home(connection: IntegrationConnection) -> dict:
     project_id = str(connection.settings.get("project_id") or "")
     if not project_id:
@@ -352,26 +1082,24 @@ def sync_google_home(connection: IntegrationConnection) -> dict:
         device_id = resource_name.rsplit("/", 1)[-1]
         traits = device.get("traits") if isinstance(device.get("traits"), dict) else {}
         info = traits.get("sdm.devices.traits.Info", {}) if isinstance(traits.get("sdm.devices.traits.Info"), dict) else {}
-        on_off = traits.get("sdm.devices.traits.OnOff", {}) if isinstance(traits.get("sdm.devices.traits.OnOff"), dict) else {}
-        temperature = traits.get("sdm.devices.traits.Temperature", {}) if isinstance(traits.get("sdm.devices.traits.Temperature"), dict) else {}
-        setpoint = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {}) if isinstance(traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint"), dict) else {}
-        is_climate = bool(temperature or setpoint)
-        room_names = [str(item.get("displayName")) for item in device.get("parentRelations", []) if isinstance(item, dict) and item.get("displayName")]
+        is_climate = any(key in traits for key in ("sdm.devices.traits.Temperature", "sdm.devices.traits.ThermostatTemperatureSetpoint", "sdm.devices.traits.ThermostatMode"))
         entity_id = f"google_home.{connection.id}.{device_id}"
-        HomeEntity.objects.update_or_create(
+        entity, _ = HomeEntity.objects.update_or_create(
             household=connection.household,
             entity_id=entity_id,
             defaults={
                 "connection": connection,
                 "source": HomeEntity.Source.GOOGLE_HOME,
                 "domain": "climate" if is_climate else "device",
-                "name": str(info.get("customName") or info.get("name") or device.get("type") or "Google Nest-apparaat"),
-                "state": "on" if on_off.get("on") else "off",
-                "attributes": {"google_resource_name": resource_name, "google_traits": traits, "google_locations": room_names, "current_temperature": temperature.get("ambientTemperatureCelsius"), "temperature": setpoint.get("heatCelsius") or setpoint.get("coolCelsius"), "min_temp": 9, "max_temp": 32, "supports_on_off": bool(on_off), "supports_temperature": bool(setpoint)},
+                "name": google_home_entity_name(device, traits),
+                "state": "off",
+                "attributes": {},
                 "is_available": True,
-                "is_supported": bool(on_off or setpoint),
+                "is_supported": False,
             },
         )
+        apply_google_home_traits(entity, traits, device)
+        entity.save(update_fields=["state", "attributes", "is_available", "is_supported", "last_seen_at"])
         seen.add(entity_id)
     HomeEntity.objects.for_household(connection.household).filter(source=HomeEntity.Source.GOOGLE_HOME, connection=connection).exclude(entity_id__in=seen).update(is_available=False)
     return {"devices": len(seen)}
@@ -421,6 +1149,113 @@ def control_connected_home_entity(entity: HomeEntity, action: str, value=None) -
     if not connection:
         raise ProviderError("De koppeling voor dit apparaat ontbreekt.")
     attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+    if entity.source == HomeEntity.Source.HOME_CONNECT:
+        appliance_id = str(attributes.get("home_connect_id") or "")
+        if not appliance_id:
+            raise ProviderError("Dit Home Connect-apparaat heeft geen geldige identificatie.")
+        if action == "start_program":
+            if not bool(attributes.get("home_connect_remote_start")):
+                raise ProviderError("Zet eerst Remote Start aan op het apparaat.")
+            if attributes.get("home_connect_can_start") is False:
+                raise ProviderError(str(attributes.get("home_connect_start_status") or "Dit apparaat kan nu geen programma starten."))
+            program = str(value or "").strip()
+            selected_program = next((item for item in attributes.get("home_connect_programs", []) if isinstance(item, dict) and str(item.get("key")) == program), None)
+            if not selected_program:
+                raise ProviderError("Kies een programma dat dit apparaat momenteel toestaat.")
+            options = [
+                {"key": option["key"], "value": option["value"]}
+                for option in selected_program.get("options", [])
+                if isinstance(option, dict) and option.get("key") and "value" in option
+            ]
+            _home_connect_request(connection, "PUT", f"/homeappliances/{appliance_id}/programs/active", payload={"data": {"key": program, "options": options}})
+            return "Programma gestart."
+        if action == "select_program":
+            if not bool(attributes.get("home_connect_can_select_program")):
+                raise ProviderError("Er kan nu geen programma worden geselecteerd.")
+            program = str(value or "").strip()
+            selected_program = next((item for item in attributes.get("home_connect_programs", []) if isinstance(item, dict) and str(item.get("key")) == program), None)
+            if not selected_program:
+                raise ProviderError("Kies een programma dat dit apparaat momenteel toestaat.")
+            _home_connect_request(connection, "PUT", f"/homeappliances/{appliance_id}/programs/selected", payload={"data": {"key": program}})
+            return "Programma geselecteerd; het apparaat start niet automatisch."
+        if action == "stop_program":
+            if not bool(attributes.get("home_connect_can_stop")):
+                raise ProviderError("Dit programma kan nu niet worden gestopt.")
+            _home_connect_request(connection, "DELETE", f"/homeappliances/{appliance_id}/programs/active", allow_empty=True)
+            return "Programma gestopt."
+        command_map = {
+            "pause_program": "BSH.Common.Command.PauseProgram",
+            "resume_program": "BSH.Common.Command.ResumeProgram",
+        }
+        command = command_map.get(action)
+        if not command or not bool(attributes.get(f"home_connect_can_{action.removesuffix('_program')}")):
+            raise ProviderError("Deze Home Connect-bediening is nu niet beschikbaar.")
+        _home_connect_request(connection, "PUT", f"/homeappliances/{appliance_id}/commands/{command}", payload={"data": True})
+        return {"pause_program": "Programma gepauzeerd.", "resume_program": "Programma hervat."}[action]
+    if entity.source == HomeEntity.Source.SPOTIFY:
+        device_id = str(attributes.get("spotify_device_id") or "")
+        if not device_id:
+            raise ProviderError("Dit Spotify-apparaat heeft geen geldige identificatie.")
+        if attributes.get("spotify_is_restricted"):
+            raise ProviderError("Spotify staat bediening van dit apparaat niet toe.")
+        if action == "transfer":
+            _spotify_request(connection, "PUT", "/me/player", payload={"device_ids": [device_id], "play": False}, allow_empty=True)
+            return "Spotify-bediening verplaatst naar dit apparaat."
+        if action == "play_pause":
+            if entity.state == "on":
+                _spotify_request(connection, "PUT", "/me/player/pause", params={"device_id": device_id}, allow_empty=True)
+                return "Spotify gepauzeerd."
+            _spotify_request(connection, "PUT", "/me/player/play", params={"device_id": device_id}, allow_empty=True)
+            return "Spotify afgespeeld."
+        if action in {"next", "previous"}:
+            endpoint = "/me/player/next" if action == "next" else "/me/player/previous"
+            _spotify_request(connection, "POST", endpoint, params={"device_id": device_id}, allow_empty=True)
+            return "Volgend nummer gekozen." if action == "next" else "Vorig nummer gekozen."
+        if action == "set_volume":
+            try:
+                volume = max(0, min(100, int(float(value))))
+            except (TypeError, ValueError) as error:
+                raise ProviderError("Kies een volume tussen 0 en 100.") from error
+            _spotify_request(connection, "PUT", "/me/player/volume", params={"device_id": device_id, "volume_percent": volume}, allow_empty=True)
+            return f"Spotify-volume ingesteld op {volume}%."
+        if action == "toggle_shuffle":
+            state = not bool(attributes.get("spotify_shuffle"))
+            _spotify_request(connection, "PUT", "/me/player/shuffle", params={"device_id": device_id, "state": str(state).lower()}, allow_empty=True)
+            return f"Shuffle {'ingeschakeld' if state else 'uitgeschakeld'}."
+        if action == "set_repeat_mode":
+            repeat = str(value or "off")
+            if repeat not in {"off", "context", "track"}:
+                raise ProviderError("Kies een geldige herhaalmodus.")
+            _spotify_request(connection, "PUT", "/me/player/repeat", params={"device_id": device_id, "state": repeat}, allow_empty=True)
+            return "Herhaalmodus bijgewerkt."
+        if action == "play_context":
+            uri = str(value or "").strip()
+            allowed_types = {"album", "artist", "episode", "playlist", "show", "track"}
+            uri_parts = uri.split(":", 2)
+            if len(uri_parts) != 3 or uri_parts[0] != "spotify" or uri_parts[1] not in allowed_types:
+                raise ProviderError("Kies een geldige Spotify-playlist, album of track.")
+            payload = {"uris": [uri]} if uri_parts[1] in {"track", "episode"} else {"context_uri": uri}
+            _spotify_request(connection, "PUT", "/me/player/play", params={"device_id": device_id}, payload=payload, allow_empty=True)
+            return "Spotify-selectie wordt afgespeeld."
+        if action == "queue_uri":
+            uri = str(value or "").strip()
+            uri_parts = uri.split(":", 2)
+            if len(uri_parts) != 3 or uri_parts[0] != "spotify" or uri_parts[1] not in {"track", "episode"}:
+                raise ProviderError("Kies een geldige Spotify-track of aflevering.")
+            _spotify_request(connection, "POST", "/me/player/queue", params={"device_id": device_id, "uri": uri}, allow_empty=True)
+            return "Aan de Spotify-wachtrij toegevoegd."
+        raise ProviderError("Deze Spotify-bediening is niet beschikbaar.")
+    if entity.source == HomeEntity.Source.SMARTCAR:
+        vehicle_id = str(attributes.get("smartcar_vehicle_id") or "")
+        if not vehicle_id:
+            raise ProviderError("Dit voertuig heeft geen geldige identificatie.")
+        if action not in {"lock", "unlock"}:
+            raise ProviderError("Deze Smartcar-bediening is niet beschikbaar.")
+        if not bool(attributes.get(f"smartcar_can_{action}")):
+            raise ProviderError("Deze Smartcar-bediening is niet voor dit voertuig geautoriseerd.")
+        endpoint = f"/vehicles/{vehicle_id}/commands/security/{action}"
+        _smartcar_request(connection, "POST", endpoint)
+        return "Voertuig vergrendeld." if action == "lock" else "Voertuig ontgrendeld."
     if entity.source == HomeEntity.Source.SONOS:
         group_id = str(attributes.get("sonos_group_id") or "")
         household_id = str(attributes.get("sonos_household_id") or "")
@@ -479,12 +1314,23 @@ def control_connected_home_entity(entity: HomeEntity, action: str, value=None) -
                 {"playerIds": player_ids, "musicContextGroupId": group_id},
             )
             return "Sonos-groep bijgewerkt."
-        if action in {"toggle_shuffle", "toggle_repeat"}:
-            mode_key = "shuffle" if action == "toggle_shuffle" else "repeat"
+        if action in {"toggle_shuffle", "toggle_repeat", "toggle_crossfade"}:
+            mode_key = "shuffle" if action == "toggle_shuffle" else "repeat" if action == "toggle_repeat" else "crossfade"
             mode_value = not bool(attributes.get(f"sonos_{mode_key}"))
             _sonos_request(connection, "POST", f"/groups/{group_id}/playback/playMode", {"playModes": {mode_key: mode_value}})
-            label = "Shuffle" if mode_key == "shuffle" else "Herhalen"
+            label = "Shuffle" if mode_key == "shuffle" else "Herhalen" if mode_key == "repeat" else "Crossfade"
             return f"{label} {'ingeschakeld' if mode_value else 'uitgeschakeld'}."
+        if action == "set_repeat_mode":
+            repeat_mode = str(value or "off")
+            if repeat_mode not in {"off", "all", "one"}:
+                raise ProviderError("Kies een geldige herhaalmodus.")
+            _sonos_request(
+                connection,
+                "POST",
+                f"/groups/{group_id}/playback/playMode",
+                {"playModes": {"repeat": repeat_mode != "off", "repeatOne": repeat_mode == "one"}},
+            )
+            return {"off": "Herhalen uitgeschakeld.", "all": "Herhalen van de wachtrij ingeschakeld.", "one": "Huidig nummer wordt herhaald."}[repeat_mode]
         command = "play" if action in {"on", "play_pause"} and entity.state != "on" else "pause"
         if action == "off":
             command = "pause"
@@ -506,15 +1352,51 @@ def control_connected_home_entity(entity: HomeEntity, action: str, value=None) -
                 temperature = float(value)
             except (TypeError, ValueError) as error:
                 raise ProviderError("Kies een geldige temperatuur.") from error
-            setpoint = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"]
-            if setpoint.get("heatCelsius") is not None:
+            mode = str(attributes.get("thermostat_mode") or (traits.get("sdm.devices.traits.ThermostatMode") or {}).get("mode") or "").upper()
+            if mode == "HEATCOOL":
+                raise ProviderError("Gebruik het warmte- en koelingsbereik in de thermostaatkaart.")
+            if mode == "HEAT":
                 payload = {"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat", "params": {"heatCelsius": temperature}}
-            elif setpoint.get("coolCelsius") is not None:
+            elif mode == "COOL":
                 payload = {"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool", "params": {"coolCelsius": temperature}}
             else:
                 raise ProviderError("Google Home meldt geen instelbare thermostaatmodus.")
             _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", payload)
             return f"Temperatuur ingesteld op {temperature:g} °C."
+        if action == "set_temperature_range" and "sdm.devices.traits.ThermostatTemperatureSetpoint" in traits:
+            try:
+                values = value if isinstance(value, dict) else json.loads(str(value))
+                heat, cool = float(values["heat"]), float(values["cool"])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+                raise ProviderError("Vul een geldig warmte- en koelbereik in.") from error
+            if cool <= heat:
+                raise ProviderError("De koeltemperatuur moet hoger zijn dan de warmtetemperatuur.")
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", {"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange", "params": {"heatCelsius": heat, "coolCelsius": cool}})
+            return f"Bereik ingesteld op {heat:g}–{cool:g} °C."
+        if action == "set_thermostat_mode" and "sdm.devices.traits.ThermostatMode" in traits:
+            mode = str(value or "").upper()
+            available = (traits.get("sdm.devices.traits.ThermostatMode") or {}).get("availableModes") or []
+            if mode not in available:
+                raise ProviderError("Deze thermostaatmodus is niet beschikbaar.")
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", {"command": "sdm.devices.commands.ThermostatMode.SetMode", "params": {"mode": mode}})
+            return "Thermostaatmodus bijgewerkt."
+        if action == "set_eco_mode" and "sdm.devices.traits.ThermostatEco" in traits:
+            mode = str(value or "").upper()
+            available = (traits.get("sdm.devices.traits.ThermostatEco") or {}).get("availableModes") or []
+            if mode not in available:
+                raise ProviderError("Deze Eco-modus is niet beschikbaar.")
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", {"command": "sdm.devices.commands.ThermostatEco.SetMode", "params": {"mode": mode}})
+            return "Eco-modus bijgewerkt."
+        if action == "set_fan_timer" and "sdm.devices.traits.Fan" in traits:
+            try:
+                seconds = int(value)
+            except (TypeError, ValueError) as error:
+                raise ProviderError("Kies een geldige ventilatorduur.") from error
+            if seconds not in {0, 900, 1800, 3600, 7200, 14400}:
+                raise ProviderError("Deze ventilatorduur is niet beschikbaar.")
+            params = {"timerMode": "OFF"} if seconds == 0 else {"timerMode": "ON", "duration": f"{seconds}s"}
+            _google_home_request(connection, "POST", f"/{resource_name}:executeCommand", {"command": "sdm.devices.commands.Fan.SetTimer", "params": params})
+            return "Ventilatortimer bijgewerkt."
         raise ProviderError("Deze Google Home-bediening is niet beschikbaar voor dit apparaat.")
     if entity.source == HomeEntity.Source.LG_THINQ:
         raise ProviderError("LG ThinQ-apparaten worden na synchronisatie veilig als status getoond. Bedieningscommando's verschillen per apparaat en worden toegevoegd zodra de Smart Solution API de device-capabilities levert.")

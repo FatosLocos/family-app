@@ -136,9 +136,8 @@ def control_entity(household, entity, action, target_temperature=None):
 
         try:
             probe = LocalProbe.objects.for_household(household).get(pk=probe_id, revoked_at__isnull=True)
-            send_probe_command(probe, entity, action, target_temperature)
-            HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=True, detail="Lokale opdracht naar probe verzonden.")
-            return
+            command_id = send_probe_command(probe, entity, action, target_temperature)
+            return {"queued": True, "command_id": command_id}
         except (LocalProbe.DoesNotExist, ProbeError) as error:
             HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
             raise HomeAssistantError(str(error)) from error
@@ -153,7 +152,7 @@ def control_entity(household, entity, action, target_temperature=None):
         except ProviderError as error:
             HomeActionAudit.objects.create(household=household, entity=entity, action=action, succeeded=False, detail=str(error))
             raise HomeAssistantError(str(error)) from error
-    if entity.source in {HomeEntity.Source.SONOS, HomeEntity.Source.GOOGLE_HOME, HomeEntity.Source.LG_THINQ}:
+    if entity.source in {HomeEntity.Source.SONOS, HomeEntity.Source.SPOTIFY, HomeEntity.Source.SMARTCAR, HomeEntity.Source.GOOGLE_HOME, HomeEntity.Source.LG_THINQ, HomeEntity.Source.HOME_CONNECT}:
         from integrations.providers import ProviderError, control_connected_home_entity
 
         try:
@@ -164,6 +163,23 @@ def control_entity(household, entity, action, target_temperature=None):
                     from integrations.providers import sync_sonos
 
                     sync_sonos(entity.connection)
+            elif entity.source == HomeEntity.Source.SPOTIFY:
+                _apply_spotify_control_state(entity, action, target_temperature)
+                if entity.connection:
+                    from integrations.providers import sync_spotify
+
+                    sync_spotify(entity.connection)
+                    entity.refresh_from_db()
+            elif entity.source == HomeEntity.Source.SMARTCAR and entity.connection:
+                from integrations.providers import sync_smartcar
+
+                sync_smartcar(entity.connection)
+                entity.refresh_from_db()
+            elif entity.source == HomeEntity.Source.HOME_CONNECT and entity.connection:
+                from integrations.providers import sync_home_connect
+
+                sync_home_connect(entity.connection)
+                entity.refresh_from_db()
             elif action == "on":
                 entity.state = "on"
             elif action == "play_pause":
@@ -173,6 +189,29 @@ def control_entity(household, entity, action, target_temperature=None):
             elif action == "set_temperature":
                 attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
                 attributes["temperature"] = float(target_temperature)
+                entity.attributes = attributes
+            elif entity.source == HomeEntity.Source.GOOGLE_HOME and action == "set_temperature_range" and isinstance(target_temperature, dict):
+                attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+                attributes["temperature_heat"] = float(target_temperature["heat"])
+                attributes["temperature_cool"] = float(target_temperature["cool"])
+                entity.attributes = attributes
+            elif entity.source == HomeEntity.Source.GOOGLE_HOME and action == "set_thermostat_mode":
+                if entity.connection:
+                    from integrations.providers import sync_google_home
+
+                    sync_google_home(entity.connection)
+                    entity.refresh_from_db()
+                else:
+                    attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+                    attributes["thermostat_mode"] = str(target_temperature or "").upper()
+                    entity.attributes = attributes
+            elif entity.source == HomeEntity.Source.GOOGLE_HOME and action == "set_eco_mode":
+                attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+                attributes["eco_mode"] = str(target_temperature or "").upper()
+                entity.attributes = attributes
+            elif entity.source == HomeEntity.Source.GOOGLE_HOME and action == "set_fan_timer":
+                attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+                attributes["fan_timer_mode"] = "OFF" if str(target_temperature) == "0" else "ON"
                 entity.attributes = attributes
             entity.save(update_fields=["state", "attributes", "last_seen_at"])
             broadcast_home_entity(entity)
@@ -265,12 +304,44 @@ def _apply_sonos_control_state(entity, action, value=None):
         attributes["sonos_shuffle"] = not bool(attributes.get("sonos_shuffle"))
     elif action == "toggle_repeat":
         attributes["sonos_repeat"] = not bool(attributes.get("sonos_repeat"))
+        attributes["sonos_repeat_one"] = False
+    elif action == "toggle_crossfade":
+        attributes["sonos_crossfade"] = not bool(attributes.get("sonos_crossfade"))
+    elif action == "set_repeat_mode":
+        repeat_mode = str(value or "off")
+        attributes["sonos_repeat"] = repeat_mode != "off"
+        attributes["sonos_repeat_one"] = repeat_mode == "one"
     elif action in {"volume_up", "volume_down"}:
         current = attributes.get("sonos_volume")
         if isinstance(current, (int, float)):
             attributes["sonos_volume"] = max(0, min(100, int(current) + (5 if action == "volume_up" else -5)))
     elif action in {"mute", "unmute"}:
         attributes["sonos_muted"] = action == "mute"
+    entity.attributes = attributes
+
+
+def _apply_spotify_control_state(entity, action, value=None):
+    """Keep the selected Connect card responsive until the next provider refresh."""
+    attributes = dict(entity.attributes) if isinstance(entity.attributes, dict) else {}
+    if action == "transfer":
+        HomeEntity.objects.filter(
+            household=entity.household,
+            connection=entity.connection,
+            source=HomeEntity.Source.SPOTIFY,
+        ).exclude(pk=entity.pk).update(state="off")
+        attributes["spotify_is_active"] = True
+    elif action == "play_pause":
+        entity.state = "off" if entity.state == "on" else "on"
+        attributes["spotify_is_playing"] = entity.state == "on"
+    elif action == "set_volume":
+        try:
+            attributes["spotify_volume"] = max(0, min(100, int(float(value))))
+        except (TypeError, ValueError):
+            pass
+    elif action == "toggle_shuffle":
+        attributes["spotify_shuffle"] = not bool(attributes.get("spotify_shuffle"))
+    elif action == "set_repeat_mode":
+        attributes["spotify_repeat"] = str(value or "off")
     entity.attributes = attributes
 
 

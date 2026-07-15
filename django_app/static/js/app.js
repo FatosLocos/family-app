@@ -3,6 +3,7 @@
   const dialogs = () => document.querySelectorAll("dialog");
   const themeToggle = () => document.querySelector("[data-theme-toggle]");
   const networkStatus = () => document.querySelector("[data-network-status]");
+  const probeCommandResults = new Map();
 
   const applyTheme = () => {
     const saved = localStorage.getItem("family-app-theme");
@@ -13,6 +14,102 @@
   };
 
   const refreshIcons = () => window.lucide?.createIcons({ attrs: { "stroke-width": 1.8 } });
+
+  const updateSonosPlayToggle = (card, isPlaying) => {
+    const button = card?.querySelector("[data-sonos-play-toggle]");
+    if (!button) return;
+    button.classList.toggle("is-playing", isPlaying);
+    button.title = isPlaying ? "Pauzeren" : "Afspelen";
+    button.setAttribute("aria-label", isPlaying ? "Pauzeren" : "Afspelen");
+    const icon = document.createElement("i");
+    icon.dataset.lucide = isPlaying ? "pause" : "play";
+    button.replaceChildren(icon);
+    refreshIcons();
+  };
+
+  const formatSonosTime = (value) => {
+    const seconds = Math.max(0, Math.floor(Number(value) || 0));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = String(seconds % 60).padStart(2, "0");
+    return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`;
+  };
+
+  const renderSonosProgress = (nowPlaying, position, duration) => {
+    const label = nowPlaying.querySelector("[data-sonos-progress-label]");
+    const wrap = nowPlaying.querySelector("[data-sonos-progress-wrap]");
+    const fill = nowPlaying.querySelector("[data-sonos-progress-fill]");
+    const safeDuration = Math.max(0, Number(duration) || 0);
+    const safePosition = Math.min(safeDuration || Number.MAX_SAFE_INTEGER, Math.max(0, Number(position) || 0));
+    if (label) label.textContent = safeDuration ? `${formatSonosTime(safePosition)} / ${formatSonosTime(safeDuration)}` : "";
+    if (wrap) {
+      wrap.hidden = !safeDuration;
+      wrap.setAttribute("aria-valuemin", "0");
+      wrap.setAttribute("aria-valuenow", String(Math.floor(safePosition)));
+      wrap.setAttribute("aria-valuemax", String(Math.floor(safeDuration)));
+    }
+    if (fill) fill.style.width = `${safeDuration ? (safePosition / safeDuration) * 100 : 0}%`;
+  };
+
+  const setSonosProgressBase = (nowPlaying, attributes) => {
+    const position = Number(attributes.sonos_position_seconds || 0);
+    const duration = Number(attributes.sonos_duration_seconds || 0);
+    nowPlaying.dataset.sonosPositionSeconds = String(position);
+    nowPlaying.dataset.sonosDurationSeconds = String(duration);
+    nowPlaying.dataset.sonosPlaybackState = attributes.sonos_playback_state || "";
+    nowPlaying.dataset.sonosProgressMeasuredAt = String(Date.now());
+    renderSonosProgress(nowPlaying, position, duration);
+  };
+
+  const tickSonosProgress = () => {
+    if (document.hidden) return;
+    document.querySelectorAll("[data-sonos-now-playing]").forEach((nowPlaying) => {
+      const position = Number(nowPlaying.dataset.sonosPositionSeconds || 0);
+      const duration = Number(nowPlaying.dataset.sonosDurationSeconds || 0);
+      const measuredAt = Number(nowPlaying.dataset.sonosProgressMeasuredAt || Date.now());
+      const playing = nowPlaying.dataset.sonosPlaybackState === "PLAYBACK_STATE_PLAYING";
+      const estimatedPosition = playing ? position + (Date.now() - measuredAt) / 1000 : position;
+      renderSonosProgress(nowPlaying, estimatedPosition, duration);
+    });
+  };
+
+  const renderCastProgress = (nowPlaying, position, duration) => {
+    const label = nowPlaying.querySelector("[data-cast-progress-label]");
+    const wrap = nowPlaying.querySelector("[data-cast-progress-wrap]");
+    const fill = nowPlaying.querySelector("[data-cast-progress-fill]");
+    const safeDuration = Math.max(0, Number(duration) || 0);
+    const safePosition = Math.min(safeDuration || Number.MAX_SAFE_INTEGER, Math.max(0, Number(position) || 0));
+    if (label) label.textContent = safeDuration ? `${formatSonosTime(safePosition)} / ${formatSonosTime(safeDuration)}` : "";
+    if (wrap) {
+      wrap.hidden = !safeDuration;
+      wrap.setAttribute("aria-valuemin", "0");
+      wrap.setAttribute("aria-valuenow", String(Math.floor(safePosition)));
+      wrap.setAttribute("aria-valuemax", String(Math.floor(safeDuration)));
+    }
+    if (fill) fill.style.width = `${safeDuration ? (safePosition / safeDuration) * 100 : 0}%`;
+  };
+
+  const setCastProgressBase = (nowPlaying, attributes) => {
+    const position = Number(attributes.cast_position || 0);
+    const duration = Number(attributes.cast_duration || 0);
+    nowPlaying.dataset.castPositionSeconds = String(position);
+    nowPlaying.dataset.castDurationSeconds = String(duration);
+    nowPlaying.dataset.castPlaybackState = attributes.cast_player_state || "";
+    nowPlaying.dataset.castProgressMeasuredAt = String(Date.now());
+    renderCastProgress(nowPlaying, position, duration);
+  };
+
+  const tickCastProgress = () => {
+    if (document.hidden) return;
+    document.querySelectorAll("[data-cast-now-playing]").forEach((nowPlaying) => {
+      const position = Number(nowPlaying.dataset.castPositionSeconds || 0);
+      const duration = Number(nowPlaying.dataset.castDurationSeconds || 0);
+      const measuredAt = Number(nowPlaying.dataset.castProgressMeasuredAt || Date.now());
+      const playing = nowPlaying.dataset.castPlaybackState === "PLAYING";
+      const estimatedPosition = playing ? position + (Date.now() - measuredAt) / 1000 : position;
+      renderCastProgress(nowPlaying, estimatedPosition, duration);
+    });
+  };
 
   const showToast = ({ message, level = "info" }) => {
     if (!message) return;
@@ -54,15 +151,44 @@
   };
 
   const markHomeControlValuesConfirmed = (fields) => {
-    fields.forEach((field) => { field.dataset.confirmedValue = field.value; });
+    fields.forEach((field) => {
+      field.dataset.confirmedValue = field.value;
+      if (field.type === "checkbox") field.dataset.confirmedChecked = String(field.checked);
+    });
   };
 
   const restoreHomeControlValues = (fields) => {
     fields.forEach((field) => {
       if (field.dataset.confirmedValue !== undefined) field.value = field.dataset.confirmedValue;
+      if (field.type === "checkbox" && field.dataset.confirmedChecked !== undefined) field.checked = field.dataset.confirmedChecked === "true";
       if (field.matches("[data-temperature-slider]")) updateTemperatureAppearance(field);
       if (field.matches("[data-color-value]")) updateColorPicker(field.closest("[data-color-picker]"));
     });
+  };
+
+  const finishPendingProbeControl = (payload) => {
+    const commandId = String(payload?.command_id || "");
+    if (!commandId) return;
+    const forms = [...document.querySelectorAll(`[data-probe-command-id="${CSS.escape(commandId)}"]`)];
+    if (!forms.length) {
+      // A very fast local device can reply before the HTTP response has
+      // attached the command id to its form. Keep that one result briefly.
+      probeCommandResults.set(commandId, payload);
+      window.setTimeout(() => {
+        if (probeCommandResults.get(commandId) === payload) probeCommandResults.delete(commandId);
+      }, 10000);
+      return;
+    }
+    forms.forEach((form) => {
+      const fields = [...form.querySelectorAll("input:not([type='hidden']), input[data-color-value], select")];
+      if (payload.succeeded) markHomeControlValuesConfirmed(fields);
+      else restoreHomeControlValues(fields);
+      delete form.dataset.probeCommandId;
+    });
+    probeCommandResults.delete(commandId);
+    if (!payload.succeeded) {
+      showToast({ message: payload.error || "De lokale bediening kon niet worden uitgevoerd.", level: "error" });
+    }
   };
 
   const updateHomeControl = ({ entity_id: entityId, action, value, state, member_light_ids: memberLightIds = [], sonos_group_id: sonosGroupId = "", sonos_volume: sonosVolume, sonos_muted: sonosMuted }) => {
@@ -84,6 +210,7 @@
     if (card && ["on", "off", "play_pause"].includes(action)) {
       const playback = card.querySelector("[data-sonos-playback]");
       if (playback) playback.textContent = resultingState === "on" ? "Speelt af" : "Gepauzeerd";
+      updateSonosPlayToggle(card, resultingState === "on");
     }
     if (sonosGroupId && ["on", "off", "play_pause"].includes(action)) {
       document.querySelectorAll(`[data-sonos-group-id="${CSS.escape(String(sonosGroupId))}"]`).forEach((memberCard) => {
@@ -156,9 +283,21 @@
     }
   };
 
+  const updateSonosDialogControl = (form) => {
+    const button = form.querySelector("button[type='submit'], button:not([type])");
+    if (!button) return;
+    const action = new URL(form.action, window.location.origin).pathname.split("/").filter(Boolean).at(-1) || "";
+    if (action === "set_home_theater_eq") {
+      const value = form.querySelector("input[name='value']")?.value;
+      button.classList.toggle("is-active", value === "1");
+      return;
+    }
+    if (action.startsWith("toggle_")) button.classList.toggle("is-active");
+  };
+
   const registerHomeControls = () => {
     document.addEventListener("submit", async (event) => {
-      const form = event.target.closest(".home-controls form, form.hue-color-dialog-form, form.hue-effect-choice-form");
+      const form = event.target.closest(".home-controls form, form.hue-color-dialog-form, form.hue-effect-choice-form, .sonos-controls-dialog form");
       if (!form || !window.fetch) return;
       event.preventDefault();
       const submitter = form.querySelector("button[type='submit'], button:not([type])");
@@ -186,11 +325,21 @@
           showToast(triggers["family:toast"]);
           return;
         }
+        const homeControl = triggers["family:home-control"];
+        if (homeControl?.queued) {
+          const commandId = String(homeControl.command_id || "");
+          form.dataset.probeCommandId = commandId;
+          const alreadyFinished = probeCommandResults.get(commandId);
+          if (triggers["family:toast"]) showToast(triggers["family:toast"]);
+          if (alreadyFinished) finishPendingProbeControl(alreadyFinished);
+          return;
+        }
         markHomeControlValuesConfirmed(fields);
+        if (form.closest(".sonos-controls-dialog")) updateSonosDialogControl(form);
         if (triggers["family:toast"]) showToast(triggers["family:toast"]);
-        if (triggers["family:home-control"]) {
-          updateHomeControl(triggers["family:home-control"]);
-          if (triggers["family:home-control"].refresh) window.setTimeout(() => window.location.reload(), 250);
+        if (homeControl) {
+          updateHomeControl(homeControl);
+          if (homeControl.refresh) window.setTimeout(() => window.location.reload(), 250);
         }
       } catch (error) {
         restoreHomeControlValues(fields);
@@ -312,8 +461,9 @@
   };
 
   const registerHueRangeControls = () => {
-    document.querySelectorAll(".home-controls input:not([type='hidden']), .home-controls input[data-color-value], .home-controls select, .hue-color-dialog-form input[data-color-value]").forEach((field) => {
+    document.querySelectorAll(".home-controls input:not([type='hidden']), .home-controls input[data-color-value], .home-controls select, .hue-color-dialog-form input[data-color-value], .sonos-controls-dialog select, .sonos-controls-dialog input").forEach((field) => {
       field.dataset.confirmedValue = field.value;
+      if (field.type === "checkbox") field.dataset.confirmedChecked = String(field.checked);
     });
     document.querySelectorAll("[data-temperature-slider]").forEach(updateTemperatureAppearance);
     document.querySelectorAll("[data-hue-tint-card]").forEach(refreshHomeCardTint);
@@ -326,6 +476,44 @@
       if (!slider || slider.disabled) return;
       slider.closest("form")?.requestSubmit();
     });
+
+    const temperatureIdleTimers = new WeakMap();
+    const queueTemperatureUpdate = (form) => {
+      window.clearTimeout(temperatureIdleTimers.get(form));
+      temperatureIdleTimers.set(form, window.setTimeout(() => form.requestSubmit(), 1000));
+    };
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-temperature-step]");
+      if (!button || button.disabled) return;
+      const form = button.closest(".google-temperature-stepper");
+      const input = form?.querySelector("[data-temperature-idle]");
+      if (!form || !input) return;
+      const next = Math.min(Number(input.max), Math.max(Number(input.min), Number(input.value || input.min) + Number(button.dataset.temperatureStep)));
+      input.value = String(Math.round((next + Number.EPSILON) * 10) / 10);
+      queueTemperatureUpdate(form);
+    });
+    document.addEventListener("input", (event) => {
+      const input = event.target.closest("[data-temperature-idle]");
+      if (input?.closest(".google-temperature-stepper")) queueTemperatureUpdate(input.closest("form"));
+    });
+    document.addEventListener("change", (event) => {
+      const toggle = event.target.closest("[data-google-mode-toggle]");
+      if (!toggle) return;
+      const form = toggle.closest("form");
+      const value = form?.querySelector("[data-google-mode-value]");
+      if (!form || !value) return;
+      value.value = toggle.checked ? "HEAT" : "OFF";
+      form.requestSubmit();
+    });
+    document.addEventListener("change", (event) => {
+      const toggle = event.target.closest("[data-google-eco-toggle]");
+      if (!toggle) return;
+      const form = toggle.closest("form");
+      const value = form?.querySelector("[data-google-eco-value]");
+      if (!form || !value) return;
+      value.value = toggle.checked ? "MANUAL_ECO" : "OFF";
+      form.requestSubmit();
+    });
   };
 
   const registerHueSyncRefresh = () => {
@@ -335,17 +523,138 @@
     }, 4000);
   };
 
+  const formatHomeEventTime = (value) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("nl-NL", {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
+  };
+
   const applyHomeRealtimeEntity = (entity) => {
     const card = document.querySelector(`[data-home-entity-id="${CSS.escape(String(entity?.id || ""))}"]`);
     if (!card) return;
     const attributes = entity.attributes || {};
     card.classList.toggle("is-unavailable", !entity.is_available);
     setHomeCardState(card, entity.state);
+    if (entity.source === "google_home") {
+      const temperature = card.querySelector("[data-google-temperature]");
+      if (temperature && attributes.current_temperature !== null && attributes.current_temperature !== undefined) {
+        temperature.textContent = `${Math.round(Number(attributes.current_temperature) * 10) / 10} °C`;
+      }
+      const humidity = card.querySelector("[data-google-humidity]");
+      if (humidity && attributes.humidity !== null && attributes.humidity !== undefined) humidity.textContent = `${attributes.humidity}%`;
+      const hvac = card.querySelector("[data-google-hvac]");
+      if (hvac && attributes.hvac_status) {
+        hvac.textContent = { HEATING: "Verwarmen", COOLING: "Koelen", OFF: "Uit" }[attributes.hvac_status] || attributes.hvac_status;
+        hvac.classList.toggle("is-active", ["HEATING", "COOLING"].includes(attributes.hvac_status));
+      }
+      const connectivity = card.querySelector("[data-google-connectivity]");
+      if (connectivity && attributes.google_connectivity) {
+        const offline = attributes.google_connectivity === "OFFLINE";
+        connectivity.textContent = offline ? "Niet verbonden" : "Verbonden";
+        connectivity.classList.toggle("is-alert", offline);
+      }
+      const mode = card.querySelector("select[name='thermostat_mode']");
+      if (mode && attributes.thermostat_mode) mode.value = attributes.thermostat_mode;
+      const lastEvent = card.querySelector("[data-google-last-event]");
+      const lastEventLabel = card.querySelector("[data-google-last-event-label]");
+      const lastEventTime = card.querySelector("[data-google-last-event-time]");
+      if (lastEvent && attributes.google_last_event) {
+        lastEvent.hidden = false;
+        if (lastEventLabel) lastEventLabel.textContent = attributes.google_last_event;
+        if (lastEventTime && attributes.google_last_event_at) {
+          lastEventTime.dateTime = attributes.google_last_event_at;
+          lastEventTime.textContent = formatHomeEventTime(attributes.google_last_event_at);
+        }
+        showToast({ message: `${card.querySelector(".home-entity-heading strong")?.textContent || "Google Nest"}: ${attributes.google_last_event}`, level: "info" });
+      }
+      return;
+    }
+    if (entity.source === "home_connect") {
+      const updateText = (selector, value) => {
+        const element = card.querySelector(selector);
+        if (element) element.textContent = value || "";
+      };
+      updateText("[data-home-connect-operation]", attributes.home_connect_operation || "Status onbekend");
+      updateText("[data-home-connect-program]", attributes.home_connect_program || (attributes.home_connect_selected_program ? `Gekozen: ${attributes.home_connect_selected_program}` : ""));
+      updateText("[data-home-connect-remaining]", attributes.home_connect_remaining_label ? `Nog ${attributes.home_connect_remaining_label}` : "");
+      updateText("[data-home-connect-door]", attributes.home_connect_door_label);
+      const progress = card.querySelector("[data-home-connect-progress]");
+      if (progress && attributes.home_connect_program_progress !== null && attributes.home_connect_program_progress !== undefined) {
+        progress.setAttribute("aria-valuenow", attributes.home_connect_program_progress);
+        const fill = progress.querySelector("div > span");
+        const label = progress.querySelector("strong");
+        if (fill) fill.style.width = `${attributes.home_connect_program_progress}%`;
+        if (label) label.textContent = `${attributes.home_connect_program_progress}%`;
+      }
+      const readiness = card.querySelector("[data-home-connect-start-status]");
+      if (readiness) {
+        const ready = Boolean(attributes.home_connect_can_start);
+        readiness.classList.toggle("home-connect-remote-start-ready", ready);
+        readiness.classList.toggle("home-connect-remote-start-note", !ready);
+        readiness.textContent = ready ? "Remote Start klaar" : (attributes.home_connect_start_status || "Programma starten is nu niet beschikbaar.");
+      }
+      const lastEvent = card.querySelector("[data-home-connect-last-event]");
+      if (lastEvent && attributes.home_connect_last_event) {
+        lastEvent.hidden = false;
+        const label = lastEvent.querySelector("[data-home-connect-last-event-label]");
+        const timestamp = lastEvent.querySelector("[data-home-connect-last-event-time]");
+        if (label) label.textContent = attributes.home_connect_last_event;
+        if (timestamp && attributes.home_connect_last_event_at) {
+          timestamp.dateTime = attributes.home_connect_last_event_at;
+          timestamp.textContent = formatHomeEventTime(attributes.home_connect_last_event_at);
+        }
+        showToast({ message: `${card.querySelector(".home-entity-heading strong")?.textContent || "Home Connect"}: ${attributes.home_connect_last_event}`, level: "info" });
+      }
+      return;
+    }
+    if (entity.source === "google_cast") {
+      const playback = card.querySelector("[data-cast-playback]");
+      if (playback) {
+        const labels = { PLAYING: "Speelt af", PAUSED: "Gepauzeerd", BUFFERING: "Bufferen", IDLE: "Gereed", UNKNOWN: "Gereed" };
+        playback.textContent = labels[attributes.cast_player_state] || "Gereed";
+        updateSonosPlayToggle(card, attributes.cast_player_state === "PLAYING");
+      }
+      const volume = card.querySelector("[data-cast-volume]");
+      if (volume && attributes.cast_volume !== null && attributes.cast_volume !== undefined) {
+        volume.textContent = attributes.cast_muted ? "Gedempt" : `Volume ${attributes.cast_volume}%`;
+        const slider = card.querySelector(".sonos-volume input[type='range']");
+        if (slider) {
+          slider.value = attributes.cast_volume;
+          slider.dataset.confirmedValue = attributes.cast_volume;
+        }
+      }
+      let nowPlaying = card.querySelector("[data-cast-now-playing]");
+      if (!nowPlaying && attributes.cast_title) {
+        nowPlaying = document.createElement("div");
+        nowPlaying.className = "sonos-now-playing cast-now-playing";
+        nowPlaying.dataset.castNowPlaying = "";
+        nowPlaying.innerHTML = '<div><strong data-cast-title></strong><small data-cast-artist></small><small data-cast-progress-label></small><span class="sonos-progress" data-cast-progress-wrap role="progressbar"><span><span data-cast-progress-fill></span></span></span></div>';
+        const status = card.querySelector(".spotify-status");
+        if (status) status.insertAdjacentElement("afterend", nowPlaying);
+      }
+      if (nowPlaying && attributes.cast_title) {
+        const title = nowPlaying.querySelector("[data-cast-title]");
+        const artist = nowPlaying.querySelector("[data-cast-artist]");
+        if (title) title.textContent = attributes.cast_title;
+        if (artist) artist.textContent = attributes.cast_artist || "";
+        setCastProgressBase(nowPlaying, attributes);
+      } else if (nowPlaying && !attributes.cast_title) {
+        nowPlaying.remove();
+      }
+      return;
+    }
     if (entity.source !== "sonos") return;
     const playback = card.querySelector("[data-sonos-playback]");
     if (playback) {
       const labels = { PLAYBACK_STATE_PLAYING: "Speelt af", PLAYBACK_STATE_BUFFERING: "Bufferen", PLAYBACK_STATE_PAUSED: "Gepauzeerd", PLAYBACK_STATE_IDLE: "Geen audio" };
       playback.textContent = labels[attributes.sonos_playback_state] || "Geen audio";
+      updateSonosPlayToggle(card, attributes.sonos_playback_state === "PLAYBACK_STATE_PLAYING");
     }
     const volume = card.querySelector("[data-sonos-volume]");
     if (volume && attributes.sonos_volume !== null && attributes.sonos_volume !== undefined) {
@@ -366,7 +675,7 @@
       nowPlaying = document.createElement("div");
       nowPlaying.className = "sonos-now-playing";
       nowPlaying.dataset.sonosNowPlaying = "";
-      nowPlaying.innerHTML = '<img alt="" data-sonos-artwork><div><strong data-sonos-title></strong><small data-sonos-artist></small><small data-sonos-album></small><small class="sonos-source" data-sonos-source></small><small data-sonos-progress></small></div>';
+      nowPlaying.innerHTML = '<img alt="" data-sonos-artwork><div><strong data-sonos-title></strong><small data-sonos-artist></small><small data-sonos-album></small><small class="sonos-source" data-sonos-source></small><small data-sonos-progress-label></small><span class="sonos-progress" data-sonos-progress-wrap role="progressbar"><span><span data-sonos-progress-fill></span></span></span></div>';
       const status = card.querySelector(".sonos-status");
       if (status) status.insertAdjacentElement("afterend", nowPlaying);
     }
@@ -379,7 +688,8 @@
       text("[data-sonos-artist]", attributes.sonos_now_playing_artist);
       text("[data-sonos-album]", attributes.sonos_now_playing_album);
       text("[data-sonos-source]", attributes.sonos_source_name);
-      text("[data-sonos-progress]", [attributes.sonos_position, attributes.sonos_duration].filter(Boolean).join(" / "));
+      text("[data-sonos-progress-label]", [attributes.sonos_position, attributes.sonos_duration].filter(Boolean).join(" / "));
+      setSonosProgressBase(nowPlaying, attributes);
       const artwork = nowPlaying.querySelector("[data-sonos-artwork]");
       if (artwork && attributes.sonos_now_playing_artwork) artwork.src = attributes.sonos_now_playing_artwork;
     } else if (nowPlaying && !attributes.sonos_now_playing_title) {
@@ -400,6 +710,7 @@
         try {
           const payload = JSON.parse(event.data);
           if (payload?.type === "home.entity.updated") applyHomeRealtimeEntity(payload.entity);
+          if (payload?.type === "home.control.result") finishPendingProbeControl(payload);
         } catch (_) {
           // Ignore malformed live events; the normal refresh remains available.
         }
@@ -413,6 +724,84 @@
       }, { once: true });
     };
     connect();
+  };
+
+  const csrfToken = () => {
+    const formToken = document.querySelector("input[name='csrfmiddlewaretoken']")?.value;
+    if (formToken) return formToken;
+    return document.cookie.split("; ").find((value) => value.startsWith("csrftoken="))?.split("=")[1] || "";
+  };
+
+  const registerGoogleLiveStreams = () => {
+    document.querySelectorAll("[data-open-google-live]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const modal = button.nextElementSibling;
+        if (!(modal instanceof HTMLDialogElement)) return;
+        const status = modal.querySelector("[data-google-live-status]");
+        const image = modal.querySelector("[data-google-live-image]");
+        const stage = modal.querySelector(".google-live-stage");
+        let video = modal.querySelector("[data-google-live-video]");
+        if (!video && stage) {
+          video = document.createElement("video");
+          video.dataset.googleLiveVideo = "";
+          video.autoplay = true;
+          video.muted = true;
+          video.playsInline = true;
+          video.controls = true;
+          video.hidden = true;
+          stage.append(video);
+        }
+        openDialog(modal.id, button);
+        if (status) {
+          status.hidden = false;
+          status.innerHTML = '<span class="google-live-loader" aria-hidden="true"></span><span>Livestream voorbereiden…</span>';
+        }
+        if (image) {
+          image.hidden = true;
+          image.removeAttribute("src");
+        }
+        if (video instanceof HTMLVideoElement) {
+          video.hidden = true;
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+          video.onloadeddata = () => {
+            if (status) status.hidden = true;
+            video.hidden = false;
+          };
+          video.onerror = () => {
+            if (status) {
+              status.hidden = false;
+              status.textContent = "Livestream kon niet worden geladen.";
+            }
+          };
+        }
+        try {
+          const response = await fetch(button.dataset.liveStartUrl, { method: "POST", headers: { "X-CSRFToken": csrfToken(), Accept: "application/json" }, credentials: "same-origin" });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Livestream kon niet worden gestart.");
+          if (video instanceof HTMLVideoElement) {
+            video.src = `${payload.media_url}?session=${Date.now()}`;
+            video.play().catch(() => {});
+          }
+        } catch (error) {
+          if (status) status.textContent = error.message || "Livestream kon niet worden gestart.";
+        }
+      });
+    });
+    document.querySelectorAll(".google-live-dialog").forEach((modal) => {
+      modal.addEventListener("close", () => {
+        modal.querySelector("[data-google-live-image]")?.removeAttribute("src");
+        const video = modal.querySelector("[data-google-live-video]");
+        if (video instanceof HTMLVideoElement) {
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+        }
+        const opener = [...document.querySelectorAll("[data-open-google-live]")].find((button) => button.nextElementSibling === modal);
+        if (opener?.dataset.liveStopUrl) fetch(opener.dataset.liveStopUrl, { method: "POST", headers: { "X-CSRFToken": csrfToken() }, credentials: "same-origin" }).catch(() => {});
+      });
+    });
   };
 
   const refreshNetworkStatus = async () => {
@@ -514,12 +903,114 @@
     });
   };
 
+  const registerSonosDialogTabs = () => {
+    const categories = [
+      { id: "now", label: "Nu", icon: "play", match: /afspeelpositie|afspeelmodus|^bron$|^tv en|slaaptimer/i },
+      { id: "sound", label: "Geluid", icon: "audio-lines", match: /geluid afstellen|line-in|home-theatergeluid|uitvoer en kalibratie/i },
+      { id: "music", label: "Muziek", icon: "music-2", match: /wekkers|wachtrij|favoriet|directe bron|muziekbibliotheek/i },
+      { id: "speakers", label: "Speakers", icon: "speaker", match: /losse speakers|speakers groeperen|speakerinstellingen|^ruimte$/i },
+      { id: "manage", label: "Beheer", icon: "settings-2", match: /fysieke speakeropstelling|stereopaar|room calibration|surround of sub|tv-autoplayruimte|tv-afstandsbediening/i },
+    ];
+
+    const categoryFor = (section) => {
+      const text = section.querySelector("h3, summary")?.textContent?.trim() || "";
+      return categories.find((category) => category.match.test(text))?.id || "manage";
+    };
+
+    document.querySelectorAll("[data-sonos-tabbed]").forEach((modal) => {
+      if (modal.dataset.tabsReady === "true") return;
+      const grid = modal.querySelector(".sonos-capability-grid");
+      if (!grid) return;
+
+      const sections = [...grid.children].filter((element) => element.tagName === "SECTION");
+      const advanced = modal.querySelector(".sonos-advanced-controls");
+      if (advanced) {
+        sections.push(...[...advanced.children].filter((element) => element.tagName === "SECTION"));
+        advanced.remove();
+      }
+      if (!sections.length) return;
+
+      const tablist = document.createElement("div");
+      tablist.className = "sonos-tablist";
+      tablist.dataset.sonosTablist = "";
+      tablist.setAttribute("role", "tablist");
+      tablist.setAttribute("aria-label", "Extra Sonos-bediening");
+      const panels = document.createElement("div");
+      panels.className = "sonos-tab-panels";
+
+      const grouped = new Map(categories.map((category) => [category.id, []]));
+      sections.forEach((section) => grouped.get(categoryFor(section)).push(section));
+      const visibleCategories = categories.filter((category) => grouped.get(category.id).length);
+
+      visibleCategories.forEach((category, index) => {
+        const tab = document.createElement("button");
+        tab.type = "button";
+        tab.className = "sonos-tab";
+        tab.dataset.sonosTab = category.id;
+        tab.id = `sonos-tab-${category.id}-${modal.id}`;
+        tab.setAttribute("role", "tab");
+        tab.setAttribute("aria-selected", String(index === 0));
+        tab.setAttribute("aria-controls", `sonos-panel-${category.id}-${modal.id}`);
+        tab.innerHTML = `<i data-lucide="${category.icon}"></i><span>${category.label}</span>`;
+        tablist.append(tab);
+
+        const panel = document.createElement("section");
+        panel.className = "sonos-tab-panel";
+        panel.dataset.sonosPanel = category.id;
+        panel.id = `sonos-panel-${category.id}-${modal.id}`;
+        panel.setAttribute("role", "tabpanel");
+        panel.setAttribute("aria-labelledby", tab.id);
+        panel.tabIndex = 0;
+        panel.hidden = index !== 0;
+        if (category.id === "manage") {
+          const note = document.createElement("p");
+          note.className = "sonos-advanced-note";
+          note.textContent = "Wijzig hier alleen instellingen die niet nodig zijn voor dagelijkse bediening.";
+          panel.append(note);
+        }
+        grouped.get(category.id).forEach((section) => panel.append(section));
+        panels.append(panel);
+      });
+
+      const activate = (tab, focus = false) => {
+        const target = tab.dataset.sonosTab;
+        tablist.querySelectorAll("[data-sonos-tab]").forEach((candidate) => {
+          const selected = candidate === tab;
+          candidate.setAttribute("aria-selected", String(selected));
+          candidate.tabIndex = selected ? 0 : -1;
+        });
+        panels.querySelectorAll("[data-sonos-panel]").forEach((panel) => { panel.hidden = panel.dataset.sonosPanel !== target; });
+        if (focus) tab.focus({ preventScroll: true });
+      };
+
+      tablist.addEventListener("click", (event) => {
+        const tab = event.target.closest("[data-sonos-tab]");
+        if (tab) activate(tab);
+      });
+      tablist.addEventListener("keydown", (event) => {
+        const tabs = [...tablist.querySelectorAll("[data-sonos-tab]")];
+        const current = tabs.indexOf(document.activeElement);
+        if (current < 0) return;
+        const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : direction ? (current + direction + tabs.length) % tabs.length : null;
+        if (next === null) return;
+        event.preventDefault();
+        activate(tabs[next], true);
+      });
+
+      grid.replaceWith(tablist, panels);
+      modal.classList.add("is-tabbed");
+      modal.dataset.tabsReady = "true";
+    });
+    refreshIcons();
+  };
+
   const registerForms = () => {
     document.querySelectorAll("form").forEach((form) => {
       form.addEventListener("input", () => setFormState(form));
       form.addEventListener("focusout", () => setFormState(form));
       form.addEventListener("submit", () => {
-        if (form.getAttribute("method") !== "dialog" && !form.closest(".home-controls")) setSubmitting(form);
+        if (form.getAttribute("method") !== "dialog" && !form.closest(".home-controls, .sonos-controls-dialog, .hue-color-dialog, .hue-effect-dialog")) setSubmitting(form);
       });
     });
   };
@@ -614,6 +1105,7 @@
     });
     registerHoverMenus();
     registerDialogs();
+    registerSonosDialogTabs();
     registerForms();
     registerWishAutofill();
     registerAgendaEvents();
@@ -622,7 +1114,20 @@
     registerHueColorPickers();
     registerHueSyncRefresh();
     registerHomeRealtime();
+    registerGoogleLiveStreams();
+    document.querySelectorAll("[data-sonos-now-playing]").forEach((nowPlaying) => {
+      nowPlaying.dataset.sonosProgressMeasuredAt = String(Date.now());
+      renderSonosProgress(nowPlaying, nowPlaying.dataset.sonosPositionSeconds, nowPlaying.dataset.sonosDurationSeconds);
+    });
+    document.querySelectorAll("[data-cast-now-playing]").forEach((nowPlaying) => {
+      nowPlaying.dataset.castProgressMeasuredAt = String(Date.now());
+      renderCastProgress(nowPlaying, nowPlaying.dataset.castPositionSeconds, nowPlaying.dataset.castDurationSeconds);
+    });
+    window.setInterval(() => {
+      tickSonosProgress();
+      tickCastProgress();
+    }, 250);
   });
   document.body.addEventListener("htmx:afterSwap", refreshIcons);
-  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=5", { scope: "/" }).catch(() => {}));
+  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=7", { scope: "/" }).catch(() => {}));
 })();

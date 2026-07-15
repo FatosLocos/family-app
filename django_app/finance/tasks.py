@@ -4,9 +4,21 @@ from datetime import timedelta
 from decimal import Decimal
 
 from celery import shared_task
+from django.utils import timezone
 from common.db_scope import household_db_scope
 from finance.models import RecurringRule, Transaction
 from households.models import Household
+
+
+def next_recurring_due_date(rule: RecurringRule, today=None):
+    """Estimate the next occurrence from the observed cadence without inventing a calendar rule."""
+    if not rule.last_seen_at:
+        return None
+    target = rule.last_seen_at + timedelta(days=max(1, rule.cadence_days))
+    reference = today or timezone.localdate()
+    while target < reference:
+        target += timedelta(days=max(1, rule.cadence_days))
+    return target
 
 
 def fingerprint(transaction: Transaction) -> str:

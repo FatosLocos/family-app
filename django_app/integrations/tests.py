@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import timedelta
 from io import BytesIO
@@ -10,17 +11,19 @@ from django.urls import reverse
 from django.utils import timezone
 
 from finance.models import BankAccount, Transaction
-from home.models import HomeEntity
+from home.models import HomeActionAudit, HomeEntity
 from household.models import Task
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
-from integrations.local_probe import ProbeError, apply_discovery, apply_inventory, authenticate_probe, create_pairing, mark_probe_offline, pair_probe, revoke_probe
+from integrations.home_connect_events import listen_home_connect_events_once, parse_sse_events
+from integrations.local_probe import ProbeError, apply_discovery, apply_inventory, authenticate_probe, create_pairing, expire_stale_probes, mark_probe_offline, mark_probe_seen, pair_probe, record_probe_command_result, revoke_probe, send_probe_command, send_probe_system_command
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, SyncRun
-from integrations.providers import HueProviderError, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, sync_bunq, sync_google_home, sync_hue, sync_lg_thinq, sync_outlook, sync_sonos
+from integrations.providers import HueProviderError, ProviderError, _home_connect_appliance_meta, _home_connect_display_name, _home_connect_label, _home_connect_program_forecasts, _home_connect_start_status, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, google_home_thermostat_attributes, start_google_home_live_stream, sync_bunq, sync_google_home, sync_home_connect, sync_hue, sync_lg_thinq, sync_outlook, sync_smartcar, sync_sonos, sync_spotify
 from integrations.services import get_sonos_event_callback_token, save_app_config, save_sonos_config
 from integrations.sonos_events import sonos_event_signature
-from integrations.tasks import sync_connection_task
+from integrations.tasks import sync_active_connections, sync_connection_task, sync_home_connect_connections
+from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource
 
 
@@ -62,6 +65,145 @@ class LocalProbeTests(TestCase):
         probe.refresh_from_db()
         self.assertEqual(probe.status, "offline")
 
+    def test_stale_probe_is_marked_offline_and_local_entities_are_unavailable(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.SONOS,
+            entity_id=f"probe.{probe.id}.sonos.group:woonkamer",
+            domain="speaker",
+            name="Woonkamer",
+            is_available=True,
+            attributes={"probe_id": str(probe.id), "probe_local_key": "group:woonkamer"},
+        )
+        probe.last_seen_at = timezone.now() - timedelta(minutes=3)
+        probe.save(update_fields=["last_seen_at"])
+
+        expired = expire_stale_probes(self.household)
+
+        self.assertEqual([item.id for item in expired], [probe.id])
+        probe.refresh_from_db()
+        entity.refresh_from_db()
+        self.assertEqual(probe.status, "offline")
+        self.assertFalse(entity.is_available)
+
+    def test_stale_probe_keeps_cloud_entity_available_but_removes_local_route(self):
+        connection = IntegrationConnection.objects.create(household=self.household, user=self.user, provider="hue", display_name="Hue")
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HUE,
+            entity_id="hue.woonkamer",
+            domain="light",
+            name="Woonkamer",
+            is_available=True,
+            attributes={"hue_light_id": "woonkamer", "probe_id": str(probe.id), "probe_local_key": "light:woonkamer"},
+        )
+        probe.last_seen_at = timezone.now() - timedelta(minutes=3)
+        probe.save(update_fields=["last_seen_at"])
+
+        expire_stale_probes(self.household)
+
+        entity.refresh_from_db()
+        self.assertTrue(entity.is_available)
+        self.assertEqual(entity.attributes, {"hue_light_id": "woonkamer"})
+
+    def test_stale_probe_cannot_receive_new_commands(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id=f"probe.{probe.id}.hue.light-1",
+            domain="light",
+            name="Keuken",
+            attributes={"probe_id": str(probe.id), "probe_local_key": "light:light-1"},
+        )
+        probe.last_seen_at = timezone.now() - timedelta(minutes=3)
+        probe.save(update_fields=["last_seen_at"])
+
+        with self.assertRaisesMessage(ProbeError, "niet verbonden"):
+            send_probe_command(probe, entity, "on")
+
+        probe.refresh_from_db()
+        self.assertEqual(probe.status, "offline")
+
+    def test_partial_heartbeat_preserves_other_adapter_statuses(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+
+        mark_probe_seen(
+            probe,
+            "0.1.0",
+            {"hue": {"status": "active", "entities": 8}, "sonos": {"status": "active", "entities": 1}},
+            replace_adapters=True,
+        )
+        mark_probe_seen(probe, "0.1.0", {"sonos": {"status": "active", "entities": 2}})
+
+        probe.refresh_from_db()
+        self.assertEqual(probe.adapters["hue"]["entities"], 8)
+        self.assertEqual(probe.adapters["sonos"]["entities"], 2)
+
+    def test_local_command_has_an_id_and_reports_its_confirmed_result(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            source=HomeEntity.Source.HUE,
+            entity_id="probe.test.hue.light-1",
+            domain="light",
+            name="Keuken",
+            attributes={"probe_id": str(probe.id), "probe_local_key": "light:light-1"},
+        )
+
+        class Layer:
+            def __init__(self):
+                self.calls = []
+
+            async def group_send(self, group, payload):
+                self.calls.append((group, payload))
+
+        layer = Layer()
+        with patch("integrations.local_probe.get_channel_layer", return_value=layer):
+            command_id = send_probe_command(probe, entity, "on")
+
+        self.assertTrue(command_id)
+        self.assertEqual(layer.calls[0][0], f"local-probe-{probe.id}")
+        self.assertEqual(layer.calls[0][1]["payload"]["command_id"], command_id)
+        self.assertEqual(layer.calls[0][1]["payload"]["entity"]["id"], entity.id)
+        with patch("home.realtime.broadcast_home_control_result") as broadcast:
+            record_probe_command_result(probe, False, "Lamp reageert niet.", command_id=command_id, entity_id=str(entity.id), action="on")
+
+        audit = HomeActionAudit.objects.get(entity=entity, action="on")
+        self.assertFalse(audit.succeeded)
+        self.assertEqual(audit.detail, "Lamp reageert niet.")
+        broadcast.assert_called_once_with(entity, command_id=command_id, succeeded=False, error="Lamp reageert niet.")
+
+    def test_local_hue_bridge_command_has_no_entity_but_is_scoped_to_the_probe(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+
+        class Layer:
+            def __init__(self):
+                self.calls = []
+
+            async def group_send(self, group, payload):
+                self.calls.append((group, payload))
+
+        layer = Layer()
+        with patch("integrations.local_probe.get_channel_layer", return_value=layer):
+            command_id = send_probe_system_command(probe, "link_hue_bridge", {"bridge": "http://192.168.1.30"})
+
+        payload = layer.calls[0][1]["payload"]
+        self.assertEqual(layer.calls[0][0], f"local-probe-{probe.id}")
+        self.assertEqual(payload["command_id"], command_id)
+        self.assertEqual(payload["action"], "link_hue_bridge")
+        self.assertEqual(payload["entity"], {})
+        self.assertEqual(payload["value"], {"bridge": "http://192.168.1.30"})
+
     def test_inventory_matches_cloud_entity_and_stores_probe_origin(self):
         connection = IntegrationConnection.objects.create(household=self.household, user=self.user, provider="hue", display_name="Hue")
         cloud_entity = HomeEntity.objects.create(
@@ -87,6 +229,18 @@ class LocalProbeTests(TestCase):
         self.assertEqual(cloud_entity.attributes["brightness"], 55)
         self.assertEqual(cloud_entity.attributes["hue_group_name"], "Keuken")
 
+    def test_inventory_accepts_read_only_nest_protect_entities(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Woonkamer probe", "0.2.0")
+
+        count = apply_inventory(probe, [{"source": "nest_protect", "local_key": "topaz.device-1", "external_id": "protect-1", "domain": "safety", "name": "Hal", "state": "normal", "is_available": True, "is_supported": False, "attributes": {"nest_protect_id": "topaz.device-1", "nest_co_status": 0}}])
+
+        self.assertEqual(count, 1)
+        entity = HomeEntity.objects.get(household=self.household, source=HomeEntity.Source.NEST_PROTECT)
+        self.assertEqual(entity.name, "Hal")
+        self.assertFalse(entity.is_supported)
+        self.assertEqual(entity.attributes["probe_name"], "Woonkamer probe")
+
     def test_discovery_is_read_only_and_scoped_to_probe(self):
         _, code = create_pairing(self.household)
         probe, _ = pair_probe(code, "Laptop", "0.1.0")
@@ -95,7 +249,113 @@ class LocalProbeTests(TestCase):
         self.assertEqual(result, 1)
         device = LocalDiscovery.objects.get(probe=probe)
         self.assertEqual(device.name, "Printer")
+
+    def test_discovery_collapses_multiple_protocol_advertisements_for_one_device(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+
+        result = apply_discovery(
+            probe,
+            [
+                {
+                    "key": "mdns:airplay:tv",
+                    "name": "Woonkamer TV",
+                    "kind": "airplay",
+                    "address": "192.168.1.20",
+                    "method": "mdns",
+                    "details": {"properties": {"deviceid": "AA:BB:CC:DD"}},
+                },
+                {
+                    "key": "mdns:googlecast:tv",
+                    "name": "Woonkamer TV",
+                    "kind": "googlecast",
+                    "address": "192.168.1.20",
+                    "method": "mdns",
+                    "details": {"location": "http://192.168.1.20:8008/description.xml"},
+                },
+            ],
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(LocalDiscovery.objects.filter(probe=probe).count(), 1)
         self.assertFalse(HomeEntity.objects.filter(household=self.household, name="Printer").exists())
+
+    def test_integrations_page_prioritizes_actionable_discoveries_over_generic_bluetooth(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        apply_discovery(
+            probe,
+            [
+                {
+                    "key": "ble:unknown",
+                    "name": "Bluetooth LE-apparaat",
+                    "kind": "Bluetooth LE",
+                    "method": "bluetooth_le",
+                    "details": {"suggested_integration": "Bluetooth LE"},
+                },
+                {
+                    "key": "tv:living-room",
+                    "name": "Woonkamer TV",
+                    "kind": "Android TV",
+                    "address": "192.168.1.20",
+                    "method": "ssdp",
+                    "details": {"suggested_integration": "Google Cast / Android TV"},
+                },
+            ],
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("integrations:index"))
+
+        self.assertEqual(response.context["local_discoveries"][0].name, "Woonkamer TV")
+
+    def test_rotating_bluetooth_addresses_do_not_create_duplicate_discoveries(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        first = {
+            "key": "ble:airpods:first",
+            "name": "AirPods Pro van Fatih",
+            "kind": "Bluetooth LE",
+            "method": "bluetooth_le",
+            "details": {
+                "bluetooth_address": "AA:AA:AA:AA:AA:01",
+                "manufacturer_ids": ["76"],
+                "suggested_integration": "Bluetooth LE",
+            },
+        }
+        second = {
+            **first,
+            "key": "ble:airpods:rotated",
+            "details": {**first["details"], "bluetooth_address": "BB:BB:BB:BB:BB:02"},
+        }
+
+        apply_discovery(probe, [first])
+        apply_discovery(probe, [second])
+
+        discoveries = LocalDiscovery.objects.filter(probe=probe)
+        self.assertEqual(discoveries.count(), 1)
+        self.assertEqual(discoveries.get().name, "AirPods Pro van Fatih")
+
+    def test_integrations_page_shows_one_discovery_when_two_probes_see_the_same_device(self):
+        _, code = create_pairing(self.household)
+        first_probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        _, code = create_pairing(self.household)
+        second_probe, _ = pair_probe(code, "Raspberry Pi", "0.1.0")
+        discovery = {
+            "name": "Woonkamer TV",
+            "kind": "Android TV",
+            "address": "192.168.1.20",
+            "method": "ssdp",
+            "details": {"suggested_integration": "Google Cast / Android TV"},
+        }
+        apply_discovery(first_probe, [{**discovery, "key": "tv:first"}])
+        apply_discovery(second_probe, [{**discovery, "key": "tv:second"}])
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("integrations:index"))
+
+        names = [item.name for item in response.context["local_discoveries"]]
+        self.assertEqual(names.count("Woonkamer TV"), 1)
 
     def test_parent_can_create_pairing_and_probe_can_pair_over_json_api(self):
         self.client.force_login(self.user)
@@ -119,6 +379,10 @@ class LocalProbeTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/zip")
         archive = ZipFile(BytesIO(b"".join(response.streaming_content)))
         self.assertIn("family-app-probe/family_app_probe/main.py", archive.namelist())
+        self.assertIn("family-app-probe/family_app_probe/nest_protect.py", archive.namelist())
+        self.assertIn("family-app-probe/family_app_probe/philips_tv.py", archive.namelist())
+        self.assertIn("ha-philipsjs==3.2.5", archive.read("family-app-probe/requirements.txt").decode())
+        self.assertIn("philips-tv-link", archive.read("family-app-probe/family_app_probe/main.py").decode())
         self.assertNotIn("family-app-probe/config.json", archive.namelist())
 
     def test_integrations_page_shows_probe_download_and_guide(self):
@@ -130,6 +394,44 @@ class LocalProbeTests(TestCase):
         self.assertContains(response, 'id="local-probe-guide"')
         self.assertContains(response, "Lokale probe installeren")
 
+    def test_probe_guide_uses_the_discovered_hue_bridge_address(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        apply_discovery(
+            probe,
+            [
+                {
+                    "key": "hue:bridge",
+                    "name": "Hue Bridge",
+                    "kind": "Philips Hue",
+                    "address": "192.168.1.30",
+                    "method": "ssdp",
+                    "details": {"suggested_integration": "Philips Hue"},
+                }
+            ],
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("integrations:index"))
+
+        self.assertContains(response, "https://192.168.1.30")
+
+    def test_parent_can_request_local_hue_bridge_link(self):
+        _, code = create_pairing(self.household)
+        probe, _ = pair_probe(code, "Laptop", "0.1.0")
+        apply_discovery(
+            probe,
+            [{"key": "hue:bridge", "name": "Hue Bridge", "kind": "Philips Hue", "address": "192.168.1.30", "method": "ssdp", "details": {"suggested_integration": "Philips Hue"}}],
+        )
+        bridge = LocalDiscovery.objects.get(probe=probe)
+        self.client.force_login(self.user)
+
+        with patch("integrations.views.send_probe_system_command") as send:
+            response = self.client.post(reverse("integrations:link_local_hue_bridge", args=[probe.id, bridge.id]))
+
+        self.assertRedirects(response, reverse("integrations:index"))
+        send.assert_called_once_with(probe, "link_hue_bridge", {"bridge": "http://192.168.1.30"})
+
 
 class ProviderSyncTests(TestCase):
     def setUp(self):
@@ -137,9 +439,155 @@ class ProviderSyncTests(TestCase):
         self.household = Household.objects.create(name="Gezin")
         Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
 
+    def test_home_connect_is_queued_by_its_own_faster_sync_task(self):
+        home_connect = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            status="configured",
+        )
+        sonos = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.SONOS,
+            display_name="Sonos",
+            status="configured",
+        )
+
+        with patch("integrations.tasks.sync_connection_task.delay") as delay:
+            sync_active_connections()
+            delay.assert_called_once_with(sonos.id, self.household.id)
+            delay.reset_mock()
+            sync_home_connect_connections()
+            delay.assert_called_once_with(home_connect.id, self.household.id)
+
     def test_hue_empty_color_capability_still_supports_color_control(self):
         self.assertTrue(_hue_supports_color({"color": {}}))
         self.assertFalse(_hue_supports_color({}))
+
+    def test_home_connect_uses_a_clear_domain_and_icon_per_appliance_type(self):
+        self.assertEqual(_home_connect_appliance_meta("Dishwasher"), ("dishwasher", "dishwasher"))
+        self.assertEqual(_home_connect_appliance_meta("ConsumerProducts.CoffeeMaker"), ("coffee_maker", "coffee"))
+        self.assertEqual(_home_connect_appliance_meta("Refrigeration.FridgeFreezer"), ("refrigerator", "refrigerator"))
+
+    def test_home_connect_display_name_prefers_brand_and_type_over_account_label(self):
+        self.assertEqual(
+            _home_connect_display_name({"name": "Fatih", "brand": "Siemens"}, "dishwasher"),
+            ("Siemens vaatwasser", "Fatih"),
+        )
+
+    def test_home_connect_program_labels_are_user_friendly_in_dutch(self):
+        self.assertEqual(_home_connect_label("Dishcare.Dishwasher.Program.Eco50"), "Eco 50 °C")
+        self.assertEqual(_home_connect_label("Dishcare.Dishwasher.Program.Kurz60"), "Kort 60 °C")
+
+    def test_home_connect_start_requires_ready_remote_and_no_local_control(self):
+        appliance = {"connected": True}
+        ready_status = {
+            "BSH.Common.Status.RemoteControlActive": True,
+            "BSH.Common.Status.RemoteControlStartAllowed": True,
+            "BSH.Common.Status.LocalControlActive": False,
+            "BSH.Common.Status.OperationState": "BSH.Common.EnumType.OperationState.Ready",
+        }
+        self.assertEqual(_home_connect_start_status(appliance, ready_status), (True, "Klaar om een programma te starten."))
+
+        local_status = {**ready_status, "BSH.Common.Status.LocalControlActive": True}
+        self.assertEqual(_home_connect_start_status(appliance, local_status), (False, "Het apparaat wordt lokaal bediend."))
+
+    def test_home_connect_selected_program_forecasts_are_extracted(self):
+        forecasts = _home_connect_program_forecasts(
+            {
+                "options": [
+                    {"key": "BSH.Common.Option.EnergyForecast", "value": 47},
+                    {"key": "BSH.Common.Option.WaterForecast", "value": 43.4},
+                    {"key": "Dishcare.Dishwasher.Option.HalfLoad", "value": False},
+                ]
+            }
+        )
+        self.assertEqual(forecasts, {"energy": 47, "water": 43})
+
+    def test_home_connect_sse_parser_handles_status_and_keep_alive_events(self):
+        events = list(
+            parse_sse_events(
+                [
+                    "event: KEEP-ALIVE",
+                    "",
+                    "event: STATUS",
+                    "id: dishwasher-1",
+                    'data: {"key":"BSH.Common.Status.OperationState","value":"BSH.Common.EnumType.OperationState.Run"}',
+                    "",
+                ]
+            )
+        )
+
+        self.assertEqual(events, [{"event": "STATUS", "id": "dishwasher-1", "data": {"key": "BSH.Common.Status.OperationState", "value": "BSH.Common.EnumType.OperationState.Run"}}])
+
+    def test_home_connect_event_stream_triggers_a_confirmed_resync(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+
+        class StreamResponse:
+            ok = True
+
+            @staticmethod
+            def iter_lines(**_kwargs):
+                return iter(["event: STATUS", "id: dishwasher-1", 'data: {"key":"BSH.Common.Status.OperationState"}', ""])
+
+            @staticmethod
+            def close():
+                return None
+
+        with patch("integrations.home_connect_events.requests.get", return_value=StreamResponse()), patch("integrations.home_connect_events.sync_home_connect") as sync:
+            result = listen_home_connect_events_once(connection)
+
+        self.assertEqual(result, {"events": 1})
+        sync.assert_called_once_with(connection)
+        connection.refresh_from_db()
+        self.assertEqual(connection.settings["home_connect_events_status"], "active")
+        self.assertTrue(connection.settings["home_connect_events_last_at"])
+
+    def test_home_connect_event_stream_records_a_timestamped_appliance_event(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id=f"home_connect.{connection.id}.dishwasher-1",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            attributes={"home_connect_id": "dishwasher-1"},
+        )
+
+        class StreamResponse:
+            ok = True
+
+            @staticmethod
+            def iter_lines(**_kwargs):
+                return iter(["event: EVENT", "id: dishwasher-1", 'data: {"key":"Dishcare.Dishwasher.Event.SaltLack"}', ""])
+
+            @staticmethod
+            def close():
+                return None
+
+        with patch("integrations.home_connect_events.requests.get", return_value=StreamResponse()), patch("integrations.home_connect_events.sync_home_connect"):
+            listen_home_connect_events_once(connection)
+
+        entity.refresh_from_db()
+        self.assertEqual(entity.attributes["home_connect_last_event"], "Zout bijvullen")
+        self.assertTrue(entity.attributes["home_connect_last_event_at"])
 
     def test_sonos_sync_creates_groups_and_individual_speakers(self):
         connection = IntegrationConnection.objects.create(
@@ -181,6 +629,278 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(player.attributes["sonos_volume"], 26)
         self.assertTrue(player.attributes["sonos_muted"])
 
+    def test_spotify_sync_creates_connect_devices_and_active_playback(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.SPOTIFY,
+            display_name="Spotify Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        with patch(
+            "integrations.providers.requests.request",
+            side_effect=[
+                FakeResponse({"devices": [{"id": "speaker-1", "name": "Woonkamer", "type": "Speaker", "is_active": True, "is_restricted": False, "volume_percent": 24}]}),
+                FakeResponse({"is_playing": True, "device": {"id": "speaker-1"}, "item": {"name": "Testnummer", "duration_ms": 180000, "artists": [{"name": "Testartiest"}], "album": {"name": "Testalbum", "images": [{"url": "https://image.test/cover.jpg"}]}}, "progress_ms": 12000, "shuffle_state": False, "repeat_state": "off"}),
+                FakeResponse({"items": [{"name": "Ochtend", "uri": "spotify:playlist:test", "images": [{"url": "https://image.test/playlist.jpg"}]}]}),
+            ],
+        ):
+            result = sync_spotify(connection)
+
+        entity = HomeEntity.objects.get(household=self.household, entity_id=f"spotify.{connection.id}.speaker-1")
+        self.assertEqual(result, {"devices": 1})
+        self.assertEqual(entity.source, HomeEntity.Source.SPOTIFY)
+        self.assertEqual(entity.state, "on")
+        self.assertEqual(entity.attributes["spotify_track_name"], "Testnummer")
+        self.assertEqual(entity.attributes["spotify_volume"], 24)
+        self.assertEqual(entity.attributes["spotify_playlists"][0]["uri"], "spotify:playlist:test")
+
+    def test_home_connect_sync_creates_a_dishwasher_with_program_status(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        with patch(
+            "integrations.providers.requests.request",
+            side_effect=[
+                FakeResponse({"data": {"homeappliances": [{"haId": "dishwasher-1", "name": "Siemens vaatwasser", "type": "Dishwasher", "brand": "Siemens", "connected": True, "enumber": "SN000"}]}}),
+                FakeResponse({"data": {"status": [{"key": "BSH.Common.Status.OperationState", "value": "BSH.Common.EnumType.OperationState.Run"}, {"key": "BSH.Common.Option.RemainingProgramTime", "value": 2100}, {"key": "BSH.Common.Option.ProgramProgress", "value": 42.4}, {"key": "BSH.Common.Status.DoorState", "value": "BSH.Common.EnumType.DoorState.Closed"}, {"key": "BSH.Common.Status.RemoteControlStartAllowed", "value": True}]}}),
+                FakeResponse({"data": {"active": {"key": "Dishcare.Dishwasher.Program.Eco50"}}}),
+                FakeResponse({"data": {"programs": [{"key": "Dishcare.Dishwasher.Program.Eco50"}]}}),
+                FakeResponse({"data": {"key": "Dishcare.Dishwasher.Program.Eco50", "options": [{"key": "BSH.Common.Option.EnergyForecast", "value": 47}, {"key": "BSH.Common.Option.WaterForecast", "value": 43}]}}),
+                FakeResponse({"data": {"commands": [{"key": "BSH.Common.Command.PauseProgram"}, {"key": "BSH.Common.Command.ResumeProgram"}, {"key": "BSH.Common.Command.StopProgram"}]}}),
+            ],
+        ):
+            result = sync_home_connect(connection)
+
+        entity = HomeEntity.objects.get(household=self.household, entity_id=f"home_connect.{connection.id}.dishwasher-1")
+        self.assertEqual(result, {"devices": 1})
+        self.assertEqual(entity.source, HomeEntity.Source.HOME_CONNECT)
+        self.assertEqual(entity.domain, "dishwasher")
+        self.assertEqual(entity.state, "running")
+        self.assertEqual(entity.attributes["home_connect_operation"], "Bezig")
+        self.assertEqual(entity.attributes["home_connect_program"], "Eco 50 °C")
+        self.assertEqual(entity.attributes["home_connect_remaining_seconds"], 2100)
+        self.assertEqual(entity.attributes["home_connect_remaining_label"], "35 min")
+        self.assertEqual(entity.attributes["home_connect_program_progress"], 42)
+        self.assertEqual(entity.attributes["home_connect_door_label"], "Deur gesloten")
+        self.assertTrue(entity.attributes["home_connect_remote_start"])
+        self.assertTrue(entity.attributes["home_connect_can_stop"])
+        self.assertFalse(entity.attributes["home_connect_can_select_program"])
+        self.assertEqual(entity.attributes["home_connect_programs"][0]["key"], "Dishcare.Dishwasher.Program.Eco50")
+        self.assertEqual(entity.attributes["home_connect_selected_program"], "Eco 50 °C")
+        self.assertEqual(entity.attributes["home_connect_program_forecasts"], {"energy": 47, "water": 43})
+
+    def test_home_connect_starts_only_an_available_program(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id=f"home_connect.{connection.id}.dishwasher-1",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            attributes={
+                "home_connect_id": "dishwasher-1",
+                "home_connect_remote_start": True,
+                "home_connect_programs": [
+                    {
+                        "key": "Dishcare.Dishwasher.Program.Eco50",
+                        "label": "Eco50",
+                        "options": [{"key": "BSH.Common.Option.IntensivZone", "value": True, "label": "IntensivZone"}],
+                    }
+                ],
+            },
+        )
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            result = control_connected_home_entity(entity, "start_program", "Dishcare.Dishwasher.Program.Eco50")
+
+        self.assertEqual(result, "Programma gestart.")
+        self.assertEqual(request.call_args.args[0], "PUT")
+        self.assertTrue(request.call_args.args[1].endswith("/homeappliances/dishwasher-1/programs/active"))
+        self.assertEqual(
+            request.call_args.kwargs["json"],
+            {"data": {"key": "Dishcare.Dishwasher.Program.Eco50", "options": [{"key": "BSH.Common.Option.IntensivZone", "value": True}]}},
+        )
+        with self.assertRaisesRegex(ProviderError, "Kies een programma"):
+            control_connected_home_entity(entity, "start_program", "Dishcare.Dishwasher.Program.Auto2")
+
+    def test_home_connect_stops_an_active_program_via_its_program_endpoint(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id=f"home_connect.{connection.id}.dishwasher-1",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            attributes={"home_connect_id": "dishwasher-1", "home_connect_can_stop": True},
+        )
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            result = control_connected_home_entity(entity, "stop_program")
+
+        self.assertEqual(result, "Programma gestopt.")
+        self.assertEqual(request.call_args.args[0], "DELETE")
+        self.assertTrue(request.call_args.args[1].endswith("/programs/active"))
+
+    def test_home_connect_can_select_an_available_program_without_starting_it(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id=f"home_connect.{connection.id}.dishwasher-1",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            attributes={
+                "home_connect_id": "dishwasher-1",
+                "home_connect_can_select_program": True,
+                "home_connect_programs": [{"key": "Dishcare.Dishwasher.Program.Eco50", "label": "Eco50", "options": []}],
+            },
+        )
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            result = control_connected_home_entity(entity, "select_program", "Dishcare.Dishwasher.Program.Eco50")
+
+        self.assertEqual(result, "Programma geselecteerd; het apparaat start niet automatisch.")
+        self.assertEqual(request.call_args.args[0], "PUT")
+        self.assertTrue(request.call_args.args[1].endswith("/homeappliances/dishwasher-1/programs/selected"))
+        self.assertEqual(request.call_args.kwargs["json"], {"data": {"key": "Dishcare.Dishwasher.Program.Eco50"}})
+
+    def test_home_connect_creates_one_notification_for_finished_program_and_maintenance_event(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.HOME_CONNECT,
+            display_name="Home Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.HOME_CONNECT,
+            entity_id=f"home_connect.{connection.id}.dishwasher-1",
+            domain="dishwasher",
+            name="Siemens vaatwasser",
+            state="running",
+            attributes={"home_connect_events": {}},
+        )
+        responses = [
+            FakeResponse({"data": [{"haId": "dishwasher-1", "name": "Siemens vaatwasser", "type": "Dishwasher", "brand": "Siemens", "connected": True}]}),
+            FakeResponse({"data": [{"key": "BSH.Common.Status.OperationState", "value": "BSH.Common.EnumType.OperationState.Finished"}, {"key": "Dishcare.Dishwasher.Event.SaltLack", "value": "BSH.Common.EnumType.EventStatus.Present"}]}),
+            FakeResponse({"data": {"key": "Dishcare.Dishwasher.Program.Eco50"}}),
+            FakeResponse({"data": []}),
+            FakeResponse({"data": []}),
+            FakeResponse({"data": {}}),
+        ]
+        with patch("integrations.providers.requests.request", side_effect=responses):
+            sync_home_connect(connection)
+
+        self.assertTrue(Notification.objects.filter(household=self.household, title="Siemens vaatwasser is klaar").exists())
+        self.assertTrue(Notification.objects.filter(household=self.household, body="Zout bijvullen").exists())
+
+    def test_spotify_uses_the_right_payload_for_contexts_and_tracks(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.SPOTIFY,
+            display_name="Spotify Connect",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SPOTIFY,
+            entity_id=f"spotify.{connection.id}.speaker-1",
+            domain="media_player",
+            name="Woonkamer",
+            attributes={"spotify_device_id": "speaker-1"},
+        )
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            control_connected_home_entity(entity, "play_context", "spotify:album:album-1")
+            self.assertEqual(request.call_args.kwargs["json"], {"context_uri": "spotify:album:album-1"})
+            control_connected_home_entity(entity, "play_context", "spotify:track:track-1")
+            self.assertEqual(request.call_args.kwargs["json"], {"uris": ["spotify:track:track-1"]})
+            control_connected_home_entity(entity, "queue_uri", "spotify:track:track-2")
+            self.assertEqual(request.call_args.kwargs["params"]["uri"], "spotify:track:track-2")
+        with self.assertRaisesRegex(ProviderError, "geldige Spotify-track"):
+            control_connected_home_entity(entity, "queue_uri", "spotify:playlist:not-a-track")
+
+    def test_smartcar_sync_stores_vehicle_signals(self):
+        IntegrationAppConfig.objects.create(household=self.household, provider="smartcar", client_id="client-id", client_secret_encrypted=encrypt("client-secret"))
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.SMARTCAR,
+            display_name="Smartcar",
+            settings={"smartcar_user_id": "user-1", "access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        with patch(
+            "integrations.providers.requests.request",
+            side_effect=[
+                FakeResponse({"connections": [{"vehicleId": "vehicle-1"}]}),
+                FakeResponse({"data": {"attributes": {"make": "Volvo", "model": "EX30", "year": 2025}}}),
+                FakeResponse({"data": [{"attributes": {"code": "odometer", "name": "Odometer", "body": {"value": 1234, "unit": "km"}}}], "included": {"vehicle": {"attributes": {"make": "Volvo", "model": "EX30", "year": 2025}}}}),
+            ],
+        ):
+            result = sync_smartcar(connection)
+
+        entity = HomeEntity.objects.get(household=self.household, entity_id=f"smartcar.{connection.id}.vehicle-1")
+        self.assertEqual(result, {"vehicles": 1})
+        self.assertEqual(entity.name, "Volvo EX30 2025")
+        self.assertEqual(entity.attributes["smartcar_readings"], [{"label": "Odometer", "value": "1234", "unit": "km"}])
+
+    def test_smartcar_rejects_remote_control_without_vehicle_authorization(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.SMARTCAR,
+            display_name="Smartcar",
+            settings={"smartcar_user_id": "user-1"},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.SMARTCAR,
+            entity_id=f"smartcar.{connection.id}.vehicle-1",
+            domain="vehicle",
+            name="Voorbeeldauto",
+            attributes={"smartcar_vehicle_id": "vehicle-1", "smartcar_can_lock": False, "smartcar_can_unlock": False},
+        )
+
+        with self.assertRaisesRegex(ProviderError, "niet voor dit voertuig geautoriseerd"):
+            control_connected_home_entity(entity, "unlock")
+
     def test_google_home_sync_creates_a_climate_entity_for_a_nest_thermostat(self):
         connection = IntegrationConnection.objects.create(
             household=self.household,
@@ -200,6 +920,127 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(entity.source, HomeEntity.Source.GOOGLE_HOME)
         self.assertEqual(entity.domain, "climate")
         self.assertEqual(entity.attributes["google_locations"], ["Woonkamer"])
+
+    def test_google_home_sync_keeps_all_thermostat_traits_and_controls_them(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.GOOGLE_HOME,
+            display_name="Google Home",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(), "project_id": "project-1"},
+        )
+        traits = {
+            "sdm.devices.traits.Info": {"customName": "Woonkamer"},
+            "sdm.devices.traits.Connectivity": {"status": "ONLINE"},
+            "sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 20.5},
+            "sdm.devices.traits.Humidity": {"ambientHumidityPercent": 47},
+            "sdm.devices.traits.Settings": {"temperatureScale": "CELSIUS"},
+            "sdm.devices.traits.ThermostatMode": {"mode": "HEATCOOL", "availableModes": ["HEAT", "COOL", "HEATCOOL", "OFF"]},
+            "sdm.devices.traits.ThermostatEco": {"mode": "OFF", "availableModes": ["MANUAL_ECO", "OFF"]},
+            "sdm.devices.traits.ThermostatHvac": {"status": "HEATING"},
+            "sdm.devices.traits.ThermostatTemperatureSetpoint": {"heatCelsius": 19, "coolCelsius": 23},
+            "sdm.devices.traits.Fan": {"timerMode": "OFF"},
+        }
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"devices": [{"name": "enterprises/project-1/devices/device-1", "type": "sdm.devices.types.THERMOSTAT", "traits": traits}]})):
+            sync_google_home(connection)
+        entity = HomeEntity.objects.get(household=self.household, entity_id=f"google_home.{connection.id}.device-1")
+        self.assertEqual(entity.state, "heating")
+        self.assertEqual(entity.attributes["humidity"], 47)
+        self.assertEqual(entity.attributes["thermostat_mode"], "HEATCOOL")
+        self.assertTrue(entity.attributes["supports_fan_timer"])
+
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({})) as request:
+            control_connected_home_entity(entity, "set_temperature_range", {"heat": "20", "cool": "24"})
+            control_connected_home_entity(entity, "set_thermostat_mode", "HEAT")
+            control_connected_home_entity(entity, "set_eco_mode", "MANUAL_ECO")
+            control_connected_home_entity(entity, "set_fan_timer", "1800")
+
+        payloads = [call.kwargs["json"] for call in request.call_args_list]
+        self.assertIn({"command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange", "params": {"heatCelsius": 20.0, "coolCelsius": 24.0}}, payloads)
+        self.assertIn({"command": "sdm.devices.commands.ThermostatMode.SetMode", "params": {"mode": "HEAT"}}, payloads)
+        self.assertIn({"command": "sdm.devices.commands.ThermostatEco.SetMode", "params": {"mode": "MANUAL_ECO"}}, payloads)
+        self.assertIn({"command": "sdm.devices.commands.Fan.SetTimer", "params": {"timerMode": "ON", "duration": "1800s"}}, payloads)
+
+    def test_google_home_off_thermostat_still_supports_target_temperature(self):
+        attributes = google_home_thermostat_attributes(
+            {
+                "sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 25.209991},
+                "sdm.devices.traits.ThermostatMode": {"mode": "OFF", "availableModes": ["HEAT", "OFF"]},
+                "sdm.devices.traits.ThermostatTemperatureSetpoint": {},
+            }
+        )
+
+        self.assertEqual(attributes["current_temperature"], 25.2)
+        self.assertTrue(attributes["supports_temperature"])
+        self.assertIsNone(attributes["temperature"])
+
+    def test_google_home_pubsub_event_updates_thermostat_without_full_sync(self):
+        from integrations.google_home_events import poll_google_home_events
+
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.GOOGLE_HOME,
+            display_name="Google Home",
+            settings={"project_id": "project-1"},
+            status="configured",
+        )
+        IntegrationAppConfig.objects.create(
+            household=self.household,
+            provider="google_home",
+            settings={"events_enabled": True, "pubsub_subscription": "projects/cloud-project/subscriptions/family-nest", "pubsub_service_account_json": encrypt('{"private_key":"not-used"}')},
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.GOOGLE_HOME,
+            entity_id="google_home.1.device-1",
+            domain="climate",
+            name="Woonkamer",
+            attributes={"google_resource_name": "enterprises/project-1/devices/device-1", "google_traits": {"sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 20}}},
+        )
+        event = {"eventId": "event-1", "timestamp": "2026-07-14T18:00:00Z", "resourceUpdate": {"name": "enterprises/project-1/devices/device-1", "traits": {"sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 21.5}, "sdm.devices.traits.ThermostatHvac": {"status": "HEATING"}}, "events": {"sdm.devices.events.CameraMotion.Motion": {"eventId": "camera-event"}}}}
+        raw = base64.b64encode(json.dumps(event).encode()).decode()
+        with patch("integrations.google_home_events._service_account_token", return_value="pubsub-token"), patch("integrations.google_home_events._pull", return_value=[{"ackId": "ack-1", "message": {"data": raw}}]), patch("integrations.google_home_events._acknowledge") as acknowledge:
+            result = poll_google_home_events(connection)
+
+        entity.refresh_from_db()
+        self.assertEqual(result, {"status": "active", "events": 1})
+        self.assertEqual(entity.attributes["current_temperature"], 21.5)
+        self.assertEqual(entity.state, "active")
+        self.assertEqual(entity.attributes["google_last_event"], "Beweging gedetecteerd")
+        acknowledge.assert_called_once_with("projects/cloud-project/subscriptions/family-nest", "pubsub-token", ["ack-1"])
+
+    def test_google_doorbell_live_stream_uses_internal_mjpeg_relay(self):
+        connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.GOOGLE_HOME,
+            display_name="Google Home",
+            status="connected",
+        )
+        entity = HomeEntity.objects.create(
+            household=self.household,
+            connection=connection,
+            source=HomeEntity.Source.GOOGLE_HOME,
+            entity_id="google_home.1.doorbell-1",
+            domain="camera",
+            name="Voordeur",
+            attributes={
+                "google_resource_name": "enterprises/project-1/devices/doorbell-1",
+                "camera_stream_protocols": ["RTSP"],
+            },
+        )
+        payload = {"results": {"streamUrls": {"rtspUrl": "rtsps://temporary-stream.example/live"}, "expiresAt": "2026-07-14T21:00:00Z"}}
+
+        with patch("integrations.providers._google_home_request", return_value=payload), patch("integrations.providers.requests.put", return_value=FakeResponse({})) as relay:
+            result = start_google_home_live_stream(entity)
+
+        self.assertEqual(result["stream_name"], "family-app-live-mjpeg")
+        self.assertEqual(relay.call_count, 2)
+        self.assertEqual(relay.call_args_list[0].kwargs["params"]["name"], "family-app-live")
+        self.assertEqual(relay.call_args_list[1].kwargs["params"]["src"], "ffmpeg:family-app-live#video=mjpeg")
 
     def test_lg_thinq_sync_uses_configured_device_path(self):
         connection = IntegrationConnection.objects.create(
@@ -844,6 +1685,63 @@ class SettingsAccessTests(TestCase):
         self.assertContains(response, f"http://testserver/instellingen/sonos/events/{self.household.id}/")
         self.assertContains(response, "Apparatenpad")
 
+    def test_spotify_start_requests_the_playback_and_playlist_scopes(self):
+        save_app_config(self.household, "spotify", "spotify-client", "spotify-secret", {})
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("integrations:start_spotify"))
+
+        self.assertEqual(response.status_code, 302)
+        query = parse_qs(urlparse(response["Location"]).query)
+        scopes = set(query["scope"][0].split())
+        self.assertEqual(query["client_id"], ["spotify-client"])
+        self.assertTrue({"user-read-playback-state", "user-modify-playback-state", "playlist-read-private"}.issubset(scopes))
+        self.assertIn("state", query)
+
+    def test_smartcar_start_requests_read_scopes_and_only_opted_in_control_scope(self):
+        save_app_config(self.household, "smartcar", "smartcar-client", "smartcar-secret", {"country": "NL", "allow_remote_controls": True})
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("integrations:start_smartcar"))
+
+        self.assertEqual(response.status_code, 302)
+        query = parse_qs(urlparse(response["Location"]).query)
+        scopes = set(query["scope"][0].split())
+        self.assertEqual(query["client_id"], ["smartcar-client"])
+        self.assertEqual(query["country"], ["NL"])
+        self.assertTrue({"read_vehicle_info", "read_odometer", "read_location", "read_battery", "read_security", "control_security"}.issubset(scopes))
+
+    def test_smartcar_callback_persists_the_authorized_user_and_queues_a_sync(self):
+        save_app_config(self.household, "smartcar", "smartcar-client", "smartcar-secret", {"country": "NL"})
+        self.client.force_login(self.owner)
+        start = self.client.get(reverse("integrations:start_smartcar"))
+        state = parse_qs(urlparse(start["Location"]).query)["state"][0]
+
+        with patch("integrations.views.sync_connection_task.delay") as delay:
+            response = self.client.get(reverse("integrations:smartcar_callback"), {"user_id": "smartcar-user-1", "state": state})
+
+        self.assertRedirects(response, reverse("integrations:index"))
+        connection = IntegrationConnection.objects.get(household=self.household, provider="smartcar")
+        self.assertEqual(connection.settings["smartcar_user_id"], "smartcar-user-1")
+        self.assertEqual(connection.status, "needs_sync")
+        delay.assert_called_once_with(connection.id, self.household.id)
+
+    def test_spotify_callback_persists_tokens_and_queues_a_sync(self):
+        save_app_config(self.household, "spotify", "spotify-client", "spotify-secret", {})
+        self.client.force_login(self.owner)
+        start = self.client.get(reverse("integrations:start_spotify"))
+        state = parse_qs(urlparse(start["Location"]).query)["state"][0]
+
+        with patch("integrations.services.requests.post", return_value=FakeResponse({"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 3600})), patch("integrations.services.requests.get", return_value=FakeResponse({"display_name": "Gezinsaccount"})), patch("integrations.views.sync_connection_task.delay") as delay:
+            response = self.client.get(reverse("integrations:spotify_callback"), {"code": "code-1", "state": state})
+
+        self.assertRedirects(response, reverse("integrations:index"))
+        connection = IntegrationConnection.objects.get(household=self.household, provider="spotify")
+        self.assertEqual(connection.external_account, "Gezinsaccount")
+        self.assertEqual(connection.status, "needs_sync")
+        self.assertTrue(connection.secret_encrypted)
+        delay.assert_called_once_with(connection.id, self.household.id)
+
     def test_parent_can_save_sonos_configuration_with_events(self):
         self.client.force_login(self.owner)
 
@@ -857,6 +1755,28 @@ class SettingsAccessTests(TestCase):
         self.assertEqual(config.client_id, "sonos-client-id")
         self.assertTrue(config.settings["events_enabled"])
         self.assertTrue(get_sonos_event_callback_token(self.household))
+
+    def test_parent_can_save_google_home_configuration_with_live_events(self):
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse("integrations:save_google_home_config"),
+            {
+                "client_id": "google-client-id",
+                "client_secret": "google-client-secret",
+                "project_id": "device-access-project",
+                "events_enabled": "on",
+                "pubsub_subscription": "projects/family-app/subscriptions/nest-events",
+                "pubsub_service_account_json": '{"type": "service_account", "project_id": "family-app"}',
+            },
+        )
+
+        self.assertRedirects(response, reverse("integrations:index"))
+        config = IntegrationAppConfig.objects.get(household=self.household, provider="google_home")
+        self.assertEqual(config.client_id, "google-client-id")
+        self.assertEqual(config.settings["project_id"], "device-access-project")
+        self.assertTrue(config.settings["events_enabled"])
+        self.assertEqual(config.settings["pubsub_subscription"], "projects/family-app/subscriptions/nest-events")
 
     def test_parent_can_start_sonos_and_google_home_oauth(self):
         save_app_config(self.household, "sonos", "sonos-client-id", "sonos-client-secret", {})

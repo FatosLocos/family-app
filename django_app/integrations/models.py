@@ -26,6 +26,9 @@ class IntegrationConnection(models.Model):
         SONOS = "sonos", "Sonos"
         LG_THINQ = "lg_thinq", "LG ThinQ"
         GOOGLE_HOME = "google_home", "Google Home"
+        SPOTIFY = "spotify", "Spotify"
+        SMARTCAR = "smartcar", "Smartcar"
+        HOME_CONNECT = "home_connect", "Home Connect"
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)

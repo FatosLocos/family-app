@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import secrets
+from uuid import uuid4
 from datetime import timedelta
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.contrib.auth.hashers import check_password, make_password
+from django.db.models import Q
 from django.utils import timezone
 
 from common.db_scope import household_db_scope
@@ -16,6 +18,10 @@ from integrations.models import IntegrationConnection, LocalDiscovery, LocalProb
 
 
 PAIRING_LIFETIME = timedelta(minutes=10)
+# The agent normally emits a heartbeat and inventory at least every 25 seconds.
+# A short grace period prevents a restarted server from treating yesterday's
+# websocket as a live, controllable local connection.
+PROBE_STALE_AFTER = timedelta(minutes=2)
 
 
 class ProbeError(Exception):
@@ -70,7 +76,13 @@ def authenticate_probe(probe_id: str, token: str) -> LocalProbe:
         return probe
 
 
-def mark_probe_seen(probe: LocalProbe, version: str = "", adapters: dict | None = None) -> None:
+def mark_probe_seen(
+    probe: LocalProbe,
+    version: str = "",
+    adapters: dict | None = None,
+    *,
+    replace_adapters: bool = False,
+) -> None:
     with household_db_scope(probe.household_id):
         probe.status = "online"
         probe.last_seen_at = timezone.now()
@@ -78,7 +90,8 @@ def mark_probe_seen(probe: LocalProbe, version: str = "", adapters: dict | None 
         if version:
             probe.version = version[:80]
         if isinstance(adapters, dict):
-            probe.adapters = adapters
+            known_adapters = probe.adapters if isinstance(probe.adapters, dict) else {}
+            probe.adapters = adapters if replace_adapters else {**known_adapters, **adapters}
         probe.save(update_fields=["status", "last_seen_at", "last_error", "version", "adapters", "updated_at"])
 
 
@@ -91,16 +104,102 @@ def mark_probe_offline(probe: LocalProbe) -> None:
         probe.save(update_fields=["status", "updated_at"])
 
 
-def record_probe_command_result(probe: LocalProbe, succeeded: bool, error: str = "") -> None:
+def probe_is_current(probe: LocalProbe, *, now=None) -> bool:
+    """Return whether the probe has recently confirmed its websocket tunnel."""
+    now = now or timezone.now()
+    return bool(
+        not probe.revoked_at
+        and probe.status == "online"
+        and probe.last_seen_at
+        and probe.last_seen_at >= now - PROBE_STALE_AFTER
+    )
+
+
+def expire_stale_probes(household, *, now=None) -> list[LocalProbe]:
+    """Mark abandoned probes offline and remove their local-control overlay.
+
+    Cloud entities can be enriched by a probe. Those entities remain visible
+    and controllable through their cloud provider when the probe disappears.
+    Synthetic local records remain in the audit-friendly inventory, but are
+    explicitly unavailable until the probe reconnects.
+    """
+    now = now or timezone.now()
+    cutoff = now - PROBE_STALE_AFTER
+    with household_db_scope(household.id):
+        stale_probes = list(
+            LocalProbe.objects.for_household(household)
+            .filter(status="online", revoked_at__isnull=True)
+            .filter(Q(last_seen_at__lt=cutoff) | Q(last_seen_at__isnull=True))
+        )
+        for probe in stale_probes:
+            probe.status = "offline"
+            probe.save(update_fields=["status", "updated_at"])
+
+            entities = HomeEntity.objects.for_household(household).filter(
+                attributes__probe_id=str(probe.id)
+            )
+            for entity in entities:
+                attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+                if entity.entity_id.startswith(f"probe.{probe.id}."):
+                    entity.is_available = False
+                    entity.save(update_fields=["is_available", "last_seen_at"])
+                    broadcast_home_entity(entity)
+                    continue
+
+                # This is a cloud entity that was temporarily enriched with a
+                # local source of truth. Preserve cloud state but never route
+                # a later action through a disconnected probe.
+                clean_attributes = {
+                    key: value
+                    for key, value in attributes.items()
+                    if key not in {"probe_id", "probe_name", "probe_local_key", "probe_updated_at"}
+                }
+                entity.attributes = clean_attributes
+                entity.save(update_fields=["attributes", "last_seen_at"])
+                broadcast_home_entity(entity)
+    return stale_probes
+
+
+def record_probe_command_result(
+    probe: LocalProbe,
+    succeeded: bool,
+    error: str = "",
+    *,
+    command_id: str = "",
+    entity_id: str = "",
+    action: str = "",
+) -> None:
     with household_db_scope(probe.household_id):
         probe.last_seen_at = timezone.now()
         probe.status = "online"
         probe.last_error = "" if succeeded else str(error or "Lokale apparaatopdracht mislukt.")[:500]
         probe.save(update_fields=["status", "last_seen_at", "last_error", "updated_at"])
+        try:
+            entity_pk = int(entity_id)
+        except (TypeError, ValueError):
+            return
+        entity = HomeEntity.objects.for_household(probe.household).filter(
+            pk=entity_pk,
+            attributes__probe_id=str(probe.id),
+        ).first()
+        if not entity:
+            return
+        from home.models import HomeActionAudit
+        from home.realtime import broadcast_home_control_result
+
+        detail = "Lokale opdracht bevestigd." if succeeded else str(error or "Lokale apparaatopdracht mislukt.")[:300]
+        HomeActionAudit.objects.create(
+            household=probe.household,
+            entity=entity,
+            action=str(action or "local_command")[:64],
+            succeeded=succeeded,
+            detail=detail,
+        )
+        broadcast_home_control_result(entity, command_id=str(command_id or ""), succeeded=succeeded, error=detail if not succeeded else "")
 
 
 def _source(value: str) -> str:
-    if value not in {HomeEntity.Source.HUE, HomeEntity.Source.SONOS}:
+    if value not in {HomeEntity.Source.HUE, HomeEntity.Source.SONOS, HomeEntity.Source.NEST_PROTECT, HomeEntity.Source.GOOGLE_CAST, HomeEntity.Source.PHILIPS_TV}:
         raise ProbeError("Deze lokale bron wordt nog niet ondersteund.")
     return value
 
@@ -111,7 +210,20 @@ def _existing_entity(probe: LocalProbe, source: str, local_key: str, external_id
     if by_probe:
         return by_probe
     if external_id:
-        return entities.filter(entity_id__endswith=f".{external_id}").first()
+        exact_entity = entities.filter(entity_id__endswith=f".{external_id}").first()
+        if exact_entity:
+            return exact_entity
+        if source == HomeEntity.Source.SONOS and external_id.startswith("group:"):
+            group_id = external_id.partition(":")[2]
+            for entity in entities.filter(attributes__sonos_entity_type="group"):
+                attributes = entity.attributes if isinstance(entity.attributes, dict) else {}
+                known_ids = {
+                    str(attributes.get("sonos_group_id") or ""),
+                    str(attributes.get("sonos_coordinator_id") or ""),
+                    *{str(player_id) for player_id in attributes.get("sonos_player_ids", []) if player_id},
+                }
+                if group_id in known_ids:
+                    return entity
     return None
 
 
@@ -179,14 +291,81 @@ def apply_inventory(probe: LocalProbe, entities: list[dict]) -> int:
     return updated
 
 
+def _discovery_identity(*, key: str, name: str, address: str, details: dict, method: str = "") -> str:
+    """Use stable network identifiers so one device is not listed per protocol."""
+    properties = details.get("properties") if isinstance(details.get("properties"), dict) else {}
+    if str(method).casefold() == "bluetooth_le":
+        # BLE privacy addresses change regularly. A rotating address must not
+        # create a new discovery on every scan. Named advertisements are
+        # stable enough for a useful suggestion; anonymous advertisements are
+        # deliberately grouped by the limited metadata they disclose.
+        normalized_name = " ".join(str(name or "").casefold().split())
+        manufacturer_ids = details.get("manufacturer_ids") if isinstance(details.get("manufacturer_ids"), list) else []
+        service_uuids = details.get("service_uuids") if isinstance(details.get("service_uuids"), list) else []
+        manufacturer_key = ",".join(sorted(str(item).casefold() for item in manufacturer_ids if item))
+        service_key = ",".join(sorted(str(item).casefold() for item in service_uuids if item))
+        if normalized_name not in {"", "bluetooth le-apparaat", "onbekend apparaat"}:
+            return f"ble:name:{normalized_name}:{manufacturer_key}"
+        return f"ble:anonymous:{manufacturer_key}:{service_key}"
+    normalized_address = str(address or "").strip().casefold()
+    if normalized_address:
+        return f"network:{normalized_address}"
+    for value in (
+        details.get("serial"),
+        details.get("endpoint"),
+        details.get("bluetooth_address"),
+        properties.get("deviceid"),
+        properties.get("pi"),
+        details.get("location"),
+        details.get("server"),
+    ):
+        normalized = str(value or "").strip().casefold()
+        if normalized:
+            return f"id:{normalized}"
+    normalized_key = str(key or "").strip().casefold()
+    if normalized_key.startswith("uuid:"):
+        return f"id:{normalized_key}"
+    normalized_name = " ".join(str(name or "").casefold().split())
+    return f"name:{normalized_name}"
+
+
 def apply_discovery(probe: LocalProbe, devices: list[dict]) -> int:
     if not isinstance(devices, list):
         raise ProbeError("Discovery-resultaat heeft een ongeldige vorm.")
-    count = 0
     with household_db_scope(probe.household_id):
+        existing_by_identity = {}
+        duplicate_ids = []
+        for discovery in LocalDiscovery.objects.for_household(probe.household).filter(probe=probe).order_by("-last_seen_at", "-id"):
+            identity = _discovery_identity(
+                key=discovery.key,
+                name=discovery.name,
+                address=discovery.address or "",
+                details=discovery.details if isinstance(discovery.details, dict) else {},
+                method=discovery.method,
+            )
+            if identity in existing_by_identity:
+                duplicate_ids.append(discovery.id)
+            else:
+                existing_by_identity[identity] = discovery
+        if duplicate_ids:
+            LocalDiscovery.objects.for_household(probe.household).filter(pk__in=duplicate_ids).delete()
+
+        incoming_by_identity = {}
         for device in devices[:300]:
             if not isinstance(device, dict) or not device.get("key"):
                 continue
+            details = device.get("details") if isinstance(device.get("details"), dict) else {}
+            identity = _discovery_identity(
+                key=str(device["key"]),
+                name=str(device.get("name") or ""),
+                address=str(device.get("address") or ""),
+                details=details,
+                method=str(device.get("method") or ""),
+            )
+            incoming_by_identity.setdefault(identity, device)
+
+        count = 0
+        for identity, device in incoming_by_identity.items():
             address = str(device.get("address") or "")
             values = {
                 "household": probe.household,
@@ -196,33 +375,55 @@ def apply_discovery(probe: LocalProbe, devices: list[dict]) -> int:
                 "method": str(device.get("method") or "lan")[:40],
                 "details": device.get("details") if isinstance(device.get("details"), dict) else {},
             }
-            LocalDiscovery.objects.update_or_create(probe=probe, key=str(device["key"])[:300], defaults=values)
+            existing = existing_by_identity.get(identity)
+            if existing:
+                for field, value in values.items():
+                    setattr(existing, field, value)
+                existing.save(update_fields=[*values.keys(), "last_seen_at"])
+            else:
+                LocalDiscovery.objects.create(probe=probe, key=str(device["key"])[:300], **values)
             count += 1
     return count
 
 
-def send_probe_command(probe: LocalProbe, entity: HomeEntity, action: str, value=None) -> None:
-    if probe.revoked_at or probe.status != "online":
+def _send_probe_payload(probe: LocalProbe, payload: dict) -> str:
+    if not probe_is_current(probe):
+        if not probe.revoked_at:
+            expire_stale_probes(probe.household)
         raise ProbeError("De lokale probe is niet verbonden.")
     layer = get_channel_layer()
     if not layer:
         raise ProbeError("Live verbinding met de lokale probe is niet beschikbaar.")
+    command_id = uuid4().hex
     async_to_sync(layer.group_send)(
         f"local-probe-{probe.id}",
         {
             "type": "probe.command",
-            "payload": {
-                "type": "command",
-                "entity": {
-                    "local_key": entity.attributes.get("probe_local_key"),
-                    "source": entity.source,
-                    "domain": entity.domain,
-                },
-                "action": action,
-                "value": value,
-            },
+            "payload": {"type": "command", "command_id": command_id, **payload},
         },
     )
+    return command_id
+
+
+def send_probe_command(probe: LocalProbe, entity: HomeEntity, action: str, value=None) -> str:
+    return _send_probe_payload(
+        probe,
+        {
+            "action": action,
+            "entity": {
+                "id": entity.id,
+                "local_key": entity.attributes.get("probe_local_key"),
+                "source": entity.source,
+                "domain": entity.domain,
+            },
+            "value": value,
+        },
+    )
+
+
+def send_probe_system_command(probe: LocalProbe, action: str, value=None) -> str:
+    """Send a household-approved probe action that is not tied to an entity."""
+    return _send_probe_payload(probe, {"action": action, "entity": {}, "value": value})
 
 
 def revoke_probe(probe: LocalProbe) -> None:

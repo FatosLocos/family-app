@@ -63,6 +63,29 @@ class MealPlan(HouseholdRecord):
         ordering = ("planned_for",)
 
 
+class MealIngredient(HouseholdRecord):
+    meal = models.ForeignKey(MealPlan, on_delete=models.CASCADE, related_name="ingredients")
+    name = models.CharField(max_length=200)
+    quantity = models.CharField(max_length=60, blank=True)
+    category = models.CharField(max_length=80, blank=True)
+
+    class Meta:
+        ordering = ("created_at", "id")
+
+
+class PantryItem(HouseholdRecord):
+    name = models.CharField(max_length=200)
+    quantity = models.DecimalField(max_digits=9, decimal_places=2, default=0)
+    unit = models.CharField(max_length=32, default="stuks")
+    minimum_quantity = models.DecimalField(max_digits=9, decimal_places=2, default=0)
+    category = models.CharField(max_length=80, blank=True)
+    expires_on = models.DateField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("household", "name"), name="unique_household_pantry_item")]
+        ordering = ("category", "name")
+
+
 class Routine(HouseholdRecord):
     title = models.CharField(max_length=200)
     cadence = models.CharField(max_length=80, default="wekelijks")
@@ -101,6 +124,46 @@ class ShoppingPrice(HouseholdRecord):
     class Meta:
         constraints = [models.UniqueConstraint(fields=("item", "retailer"), name="unique_price_per_item_retailer")]
         ordering = ("price",)
+
+
+class ShoppingOffer(HouseholdRecord):
+    """A retailer promotion kept separate from the comparable base price."""
+
+    item = models.ForeignKey(ShoppingItem, on_delete=models.CASCADE, related_name="offers")
+    retailer = models.CharField(max_length=20, choices=ShoppingPrice.Retailer.choices)
+    price = models.DecimalField(max_digits=8, decimal_places=2)
+    matched_product_name = models.CharField(max_length=240, blank=True)
+    offer_label = models.CharField(max_length=160, blank=True)
+    regular_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    offer_valid_until = models.DateField(null=True, blank=True)
+    product_url = models.URLField(blank=True)
+    source = models.CharField(max_length=20, choices=ShoppingPrice.Source.choices, default=ShoppingPrice.Source.PRIJSPROFEET)
+    observed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("item", "retailer", "source"), name="unique_offer_per_item_retailer_source")]
+        ordering = ("price",)
+
+
+class ShoppingPriceProviderStatus(HouseholdRecord):
+    """Last known result for each external shopping-price source."""
+
+    class Provider(models.TextChoices):
+        CHECKJEBON = "checkjebon", "Checkjebon"
+        PRIJSPROFEET = "prijsprofeet", "PrijsProfeet"
+
+    class Status(models.TextChoices):
+        SUCCEEDED = "succeeded", "Beschikbaar"
+        FAILED = "failed", "Niet bereikbaar"
+
+    provider = models.CharField(max_length=20, choices=Provider.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUCCEEDED)
+    detail = models.CharField(max_length=240, blank=True)
+    checked_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("household", "provider"), name="unique_household_price_provider_status")]
+        ordering = ("provider",)
 
 
 class ShoppingPriceSnapshot(HouseholdRecord):
@@ -144,3 +207,18 @@ class Receipt(HouseholdRecord):
 
     class Meta:
         ordering = ("-purchased_on", "-created_at")
+
+
+class ReceiptLineItem(HouseholdRecord):
+    """A conservative product row recognised from a receipt image or PDF."""
+
+    receipt = models.ForeignKey(Receipt, on_delete=models.CASCADE, related_name="line_items")
+    shopping_item = models.ForeignKey(ShoppingItem, null=True, blank=True, on_delete=models.SET_NULL, related_name="receipt_line_items")
+    name = models.CharField(max_length=240)
+    quantity = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    raw_line = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ("id",)

@@ -18,6 +18,54 @@ def _xy_from_hex(value):
     return {"x": round(x_value / total, 4), "y": round(y_value / total, 4)}
 
 
+def _hex_from_xy(value):
+    """Return a presentational sRGB color from a Hue xy point when available."""
+    if not isinstance(value, dict):
+        return ""
+    try:
+        x_value, y_value = float(value.get("x")), float(value.get("y"))
+    except (TypeError, ValueError):
+        return ""
+    if not 0 < y_value <= 1 or not 0 <= x_value <= 1:
+        return ""
+    z_value = max(0.0, 1 - x_value - y_value)
+    x_xyz = x_value / y_value
+    z_xyz = z_value / y_value
+    red = 3.2406 * x_xyz - 1.5372 - 0.4986 * z_xyz
+    green = -0.9689 * x_xyz + 1.8758 + 0.0415 * z_xyz
+    blue = 0.0557 * x_xyz - 0.204 + 1.057 * z_xyz
+    maximum = max(red, green, blue, 1.0)
+    channels = [max(0.0, min(1.0, channel / maximum)) for channel in (red, green, blue)]
+    channels = [12.92 * channel if channel <= 0.0031308 else 1.055 * channel ** (1 / 2.4) - 0.055 for channel in channels]
+    return "#" + "".join(f"{round(channel * 255):02x}" for channel in channels)
+
+
+def _light_capabilities(resource):
+    dimming = resource.get("dimming") if isinstance(resource.get("dimming"), dict) else {}
+    color = resource.get("color") if isinstance(resource.get("color"), dict) else {}
+    color_temperature = resource.get("color_temperature") if isinstance(resource.get("color_temperature"), dict) else {}
+    mirek_schema = color_temperature.get("mirek_schema") if isinstance(color_temperature.get("mirek_schema"), dict) else {}
+    effects = resource.get("effects_v2") if isinstance(resource.get("effects_v2"), dict) else resource.get("effects") if isinstance(resource.get("effects"), dict) else {}
+    effect_values = [str(item) for item in effects.get("effect_values", []) if isinstance(item, str)]
+    effects_resource = "effects_v2" if isinstance(resource.get("effects_v2"), dict) else "effects" if isinstance(resource.get("effects"), dict) else ""
+    return {
+        "brightness": dimming.get("brightness"),
+        "supports_dimming": bool(dimming),
+        "color_xy": color.get("xy") if isinstance(color.get("xy"), dict) else {},
+        "color_hex": _hex_from_xy(color.get("xy")),
+        "supports_color": bool(color),
+        "color_temperature": color_temperature.get("mirek"),
+        "color_temperature_min": mirek_schema.get("mirek_minimum") or 153,
+        "color_temperature_max": mirek_schema.get("mirek_maximum") or 500,
+        "supports_color_temperature": bool(color_temperature),
+        "supports_effects": bool(effect_values),
+        "effect_values": effect_values,
+        "effect_current": str(effects.get("status") or "no_effect") if effect_values else "",
+        "effects_resource": effects_resource,
+        "effects_action_key": "action" if effects_resource == "effects_v2" else "effect" if effects_resource else "",
+    }
+
+
 SENSOR_FIELDS = {
     "motion": ("motion", "motion", "Beweging"),
     "temperature": ("temperature", "temperature", "Temperatuur"),
@@ -68,6 +116,17 @@ class HueAdapter:
         self.config["app_key"] = username
         self.app_key = username
 
+    def link_bridge(self, bridge: str) -> None:
+        """Register this probe as a local Hue application for one bridge."""
+        normalized_bridge = str(bridge or "").strip().rstrip("/")
+        if not normalized_bridge.startswith(("http://", "https://")):
+            raise RuntimeError("Het lokale Hue Bridge-adres is ongeldig.")
+        self.config["bridge"] = normalized_bridge
+        self.config.pop("app_key", None)
+        self.bridge = normalized_bridge
+        self.app_key = ""
+        self.link()
+
     def inventory(self):
         if not self.enabled:
             return []
@@ -77,6 +136,7 @@ class HueAdapter:
         grouped_light_context = {}
         owner_context = {}
         device_locations = {}
+        device_light_ids = {}
         for item in result:
             resource_type = item.get("type")
             if resource_type not in {"room", "zone"}:
@@ -87,11 +147,14 @@ class HueAdapter:
                 "name": name,
                 "group_type": resource_type,
                 "locations": [name],
+                "device_ids": [],
             }
             owner_context[str(item.get("id") or "")] = context
             for child in item.get("children") or []:
                 if isinstance(child, dict) and child.get("rtype") == "device" and child.get("rid"):
-                    device_locations.setdefault(str(child["rid"]), set()).add(name)
+                    device_id = str(child["rid"])
+                    device_locations.setdefault(device_id, set()).add(name)
+                    context["device_ids"].append(device_id)
             for service in item.get("services") or []:
                 if not isinstance(service, dict) or service.get("rtype") != "grouped_light" or not service.get("rid"):
                     continue
@@ -109,6 +172,28 @@ class HueAdapter:
                 "battery_level": None,
                 "connectivity": "",
             }
+            device_light_ids[str(item["id"])] = [
+                str(service["rid"])
+                for service in item.get("services") or []
+                if isinstance(service, dict) and service.get("rtype") == "light" and service.get("rid")
+            ]
+        for context in owner_context.values():
+            member_device_ids = context.get("device_ids", [])
+            context["member_light_ids"] = [
+                light_id
+                for device_id in member_device_ids
+                for light_id in device_light_ids.get(device_id, [])
+            ]
+            context["member_names"] = [
+                str(device_context.get(device_id, {}).get("name") or "")
+                for device_id in member_device_ids
+                if device_context.get(device_id, {}).get("name")
+            ]
+        light_capabilities = {
+            str(item.get("id") or ""): _light_capabilities(item)
+            for item in result
+            if item.get("type") == "light" and item.get("id")
+        }
         for item in result:
             owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
             context = device_context.get(str(owner.get("rid") or ""))
@@ -125,8 +210,7 @@ class HueAdapter:
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             if resource_type == "light":
                 on = bool((item.get("on") or {}).get("on"))
-                dimming = item.get("dimming") or {}
-                output.append({"source": "hue", "local_key": f"light:{resource_id}", "external_id": resource_id, "domain": "light", "name": metadata.get("name") or "Hue lamp", "state": "on" if on else "off", "is_available": True, "is_supported": True, "attributes": {"hue_light_id": resource_id, "hue_resource_type": "light", "brightness": dimming.get("brightness"), "supports_dimming": bool(dimming), "supports_color": bool(item.get("color")), "supports_color_temperature": bool(item.get("color_temperature"))}})
+                output.append({"source": "hue", "local_key": f"light:{resource_id}", "external_id": resource_id, "domain": "light", "name": metadata.get("name") or "Hue lamp", "state": "on" if on else "off", "is_available": True, "is_supported": True, "attributes": {"hue_light_id": resource_id, "hue_resource_type": "light", **_light_capabilities(item)}})
             elif resource_type == "grouped_light":
                 on = bool((item.get("on") or {}).get("on"))
                 owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
@@ -135,7 +219,19 @@ class HueAdapter:
                 # The app presents rooms and zones, not these implementation groups.
                 if not context:
                     continue
-                output.append({"source": "hue", "local_key": f"grouped_light:{resource_id}", "external_id": resource_id, "domain": "group", "name": context.get("name") or metadata.get("name") or "Hue kamer", "state": "on" if on else "off", "is_available": True, "is_supported": True, "attributes": {"hue_grouped_light_id": resource_id, "hue_resource_type": "grouped_light", "hue_group_name": context.get("name", ""), "hue_group_type": context.get("group_type", ""), "hue_locations": context.get("locations", []), "supports_dimming": bool(item.get("dimming"))}})
+                member_light_ids = context.get("member_light_ids", [])
+                member_color_hexes = [
+                    capabilities["color_hex"]
+                    for light_id in member_light_ids
+                    if (capabilities := light_capabilities.get(str(light_id))) and capabilities.get("color_hex")
+                ]
+                group_capabilities = _light_capabilities(item)
+                unique_colors = list(dict.fromkeys(member_color_hexes))
+                if not group_capabilities.get("color_hex") and len(unique_colors) == 1:
+                    group_capabilities["color_hex"] = unique_colors[0]
+                group_capabilities["member_color_hexes"] = unique_colors
+                group_capabilities["color_mixed"] = len(unique_colors) > 1
+                output.append({"source": "hue", "local_key": f"grouped_light:{resource_id}", "external_id": resource_id, "domain": "group", "name": context.get("name") or metadata.get("name") or "Hue kamer", "state": "on" if on else "off", "is_available": True, "is_supported": True, "attributes": {"hue_grouped_light_id": resource_id, "hue_resource_type": "grouped_light", "hue_group_name": context.get("name", ""), "hue_group_type": context.get("group_type", ""), "hue_locations": context.get("locations", []), "member_light_ids": member_light_ids, "member_names": context.get("member_names", []), "member_count": len(member_light_ids), **group_capabilities}})
             elif resource_type == "scene":
                 group = item.get("group") if isinstance(item.get("group"), dict) else {}
                 context = owner_context.get(str(group.get("rid") or ""), {})

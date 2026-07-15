@@ -18,27 +18,69 @@ from django.views.decorators.http import require_GET, require_POST
 from households.decorators import household_required, owner_required, parent_required
 from households.forms import HouseholdSettingsForm
 from identity.forms import ProfileForm
-from integrations.forms import BunqConfigForm, GoogleHomeConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SonosConfigForm
+from integrations.forms import BunqConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
 from integrations.audit import log_integration_event
 from integrations.data_export import household_export
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, SyncRun
-from integrations.local_probe import ProbeError, create_pairing, pair_probe, revoke_probe
+from integrations.local_probe import ProbeError, _discovery_identity, create_pairing, expire_stale_probes, pair_probe, revoke_probe, send_probe_system_command
 from planning.models import CalendarSource
 from integrations.providers import ProviderError, arm_hue_bridge_link, finish_hue_bridge_link
-from integrations.services import finish_bunq_connection, finish_google_home_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_sonos_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_google_home_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_sonos_connection
+from integrations.services import finish_bunq_connection, finish_google_home_connection, finish_home_connect_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_smartcar_connection, finish_sonos_connection, finish_spotify_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_google_home_config as save_google_home_integration_config, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_google_home_connection, start_home_connect_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_smartcar_connection, start_sonos_connection, start_spotify_connection
 from integrations.sonos_events import SonosEventError, process_sonos_event
 from integrations.tasks import sync_connection_task
 
 
+def _prioritized_local_discoveries(household):
+    discoveries = list(LocalDiscovery.objects.for_household(household).select_related("probe").order_by("-last_seen_at", "-id"))
+
+    def device_key(discovery):
+        details = discovery.details if isinstance(discovery.details, dict) else {}
+        return _discovery_identity(
+            key=discovery.key,
+            name=discovery.name,
+            address=discovery.address or "",
+            details=details,
+            method=discovery.method,
+        )
+
+    def sort_key(discovery):
+        details = discovery.details if isinstance(discovery.details, dict) else {}
+        suggestion = str(details.get("suggested_integration") or "")
+        generic_name = discovery.name.casefold() in {"bluetooth le-apparaat", "onbekend apparaat"}
+        is_bluetooth = discovery.method == "bluetooth_le"
+        is_manual = suggestion in {"", "Handmatige beoordeling", "Bluetooth LE"}
+        return (is_bluetooth, generic_name, is_manual, discovery.kind.casefold(), discovery.name.casefold())
+
+    unique = {}
+    for discovery in discoveries:
+        unique.setdefault(device_key(discovery), discovery)
+    return sorted(unique.values(), key=sort_key)[:20]
+
+
 @household_required
 def index(request):
+    expire_stale_probes(request.household)
     outlook_client_id, _, outlook_settings = get_app_config(request.household, "outlook")
     bunq_client_id, _, bunq_settings = get_app_config(request.household, "bunq")
     hue_client_id, _, hue_settings = get_app_config(request.household, "hue")
     sonos_client_id, _, sonos_settings = get_app_config(request.household, "sonos")
+    spotify_client_id, _, _ = get_app_config(request.household, "spotify")
+    home_connect_client_id, _, _ = get_app_config(request.household, "home_connect")
+    smartcar_client_id, _, smartcar_settings = get_app_config(request.household, "smartcar")
     sonos_event_callback_token = get_sonos_event_callback_token(request.household)
     google_home_client_id, _, google_home_settings = get_app_config(request.household, "google_home")
     lg_thinq_client_id, _, lg_thinq_settings = get_app_config(request.household, "lg_thinq")
+    local_hue_bridge = (
+        LocalDiscovery.objects.for_household(request.household)
+        .select_related("probe")
+        .filter(
+            details__suggested_integration="Philips Hue",
+            probe__status="online",
+            probe__revoked_at__isnull=True,
+        )
+        .order_by("-last_seen_at")
+        .first()
+    )
     return render(request, "integrations/index.html", {
         "connections": IntegrationConnection.objects.for_household(request.household).order_by("provider"),
         "recent_audits": IntegrationAudit.objects.for_household(request.household).select_related("user")[:8],
@@ -49,16 +91,23 @@ def index(request):
         "sonos_form": SonosConfigForm(initial={"client_id": sonos_client_id, "events_enabled": sonos_settings.get("events_enabled", False)}),
         "sonos_redirect_url": f"{public_origin(request)}/instellingen/sonos/callback/",
         "sonos_event_callback_url": f"{public_origin(request)}/instellingen/sonos/events/{request.household.id}/{sonos_event_callback_token}/" if sonos_event_callback_token else "Sla eerst de Sonos-configuratie op.",
-        "google_home_form": GoogleHomeConfigForm(initial={"client_id": google_home_client_id, "project_id": google_home_settings.get("project_id", "")}),
+        "spotify_form": SpotifyConfigForm(initial={"client_id": spotify_client_id}),
+        "spotify_redirect_url": f"{public_origin(request)}/instellingen/spotify/callback/",
+        "home_connect_form": HomeConnectConfigForm(initial={"client_id": home_connect_client_id}),
+        "home_connect_redirect_url": f"{public_origin(request)}/instellingen/home-connect/callback/",
+        "smartcar_form": SmartcarConfigForm(initial={"client_id": smartcar_client_id, "country": smartcar_settings.get("country", "NL"), "allow_remote_controls": smartcar_settings.get("allow_remote_controls", False)}),
+        "smartcar_redirect_url": f"{public_origin(request)}/instellingen/smartcar/callback/",
+        "google_home_form": GoogleHomeConfigForm(initial={"client_id": google_home_client_id, "project_id": google_home_settings.get("project_id", ""), "events_enabled": google_home_settings.get("events_enabled", False), "pubsub_subscription": google_home_settings.get("pubsub_subscription", "")}),
         "google_home_redirect_url": f"{public_origin(request)}/instellingen/google-home/callback/",
         "lg_thinq_form": LgThinQConfigForm(initial={"client_id": lg_thinq_client_id, "authorize_url": lg_thinq_settings.get("authorize_url", ""), "token_url": lg_thinq_settings.get("token_url", ""), "api_base_url": lg_thinq_settings.get("api_base_url", ""), "devices_path": lg_thinq_settings.get("devices_path", "/devices")}),
         "lg_thinq_redirect_url": f"{public_origin(request)}/instellingen/lg-thinq/callback/",
         "profile_form": ProfileForm(instance=request.user),
         "household_form": HouseholdSettingsForm(instance=request.household),
         "local_probes": LocalProbe.objects.for_household(request.household).all(),
-        "local_discoveries": LocalDiscovery.objects.for_household(request.household).select_related("probe")[:20],
+        "local_discoveries": _prioritized_local_discoveries(request.household),
         "probe_pairing_code": request.session.pop("probe_pairing_code", ""),
         "probe_server_url": public_origin(request),
+        "local_hue_bridge": local_hue_bridge,
     })
 
 
@@ -104,8 +153,11 @@ def download_local_probe(request):
         "family_app_probe/__init__.py",
         "family_app_probe/config.py",
         "family_app_probe/discovery.py",
+        "family_app_probe/google_cast.py",
         "family_app_probe/hue.py",
         "family_app_probe/main.py",
+        "family_app_probe/nest_protect.py",
+        "family_app_probe/philips_tv.py",
         "family_app_probe/sonos.py",
     )
     archive = BytesIO()
@@ -124,6 +176,23 @@ def revoke_local_probe(request, probe_id):
     probe = LocalProbe.objects.for_household(request.household).get(pk=probe_id)
     revoke_probe(probe)
     messages.success(request, f"{probe.name} is ingetrokken.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
+def link_local_hue_bridge(request, probe_id, discovery_id):
+    probe = LocalProbe.objects.for_household(request.household).get(pk=probe_id, revoked_at__isnull=True)
+    bridge = LocalDiscovery.objects.for_household(request.household).get(
+        pk=discovery_id,
+        probe=probe,
+        details__suggested_integration="Philips Hue",
+    )
+    try:
+        send_probe_system_command(probe, "link_hue_bridge", {"bridge": f"http://{bridge.address}"})
+        messages.info(request, "Koppelverzoek naar de lokale Hue Bridge verstuurd. Druk eerst op de fysieke Bridge-knop; de apparaten verschijnen na de volgende probe-update.")
+    except ProbeError as error:
+        messages.error(request, str(error))
     return redirect("integrations:index")
 
 
@@ -195,10 +264,62 @@ def save_sonos_config(request):
 
 @parent_required
 @require_POST
+def save_spotify_config(request):
+    form = SpotifyConfigForm(request.POST)
+    if form.is_valid():
+        save_app_config(
+            request.household,
+            "spotify",
+            form.cleaned_data["client_id"],
+            form.cleaned_data["client_secret"],
+            {},
+        )
+        messages.success(request, "Spotify-configuratie veilig opgeslagen.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
+def save_home_connect_config(request):
+    form = HomeConnectConfigForm(request.POST)
+    if form.is_valid():
+        save_app_config(request.household, "home_connect", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {})
+        messages.success(request, "Home Connect-configuratie veilig opgeslagen.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
+def save_smartcar_config(request):
+    form = SmartcarConfigForm(request.POST)
+    if form.is_valid():
+        save_app_config(request.household, "smartcar", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {"country": (form.cleaned_data["country"] or "NL").upper(), "allow_remote_controls": form.cleaned_data["allow_remote_controls"]})
+        messages.success(request, "Smartcar-configuratie veilig opgeslagen.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
 def save_google_home_config(request):
     form = GoogleHomeConfigForm(request.POST)
     if form.is_valid():
-        save_app_config(request.household, "google_home", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {"project_id": form.cleaned_data["project_id"]})
+        try:
+            if form.cleaned_data["pubsub_service_account_json"]:
+                json.loads(form.cleaned_data["pubsub_service_account_json"])
+            if form.cleaned_data["events_enabled"] and (not form.cleaned_data["pubsub_subscription"] or not (form.cleaned_data["pubsub_service_account_json"] or get_app_config(request.household, "google_home")[2].get("pubsub_service_account_json"))):
+                raise ValueError("Vul voor live Nest-events een Pub/Sub subscription en serviceaccount JSON in.")
+            save_google_home_integration_config(
+                request.household,
+                form.cleaned_data["client_id"],
+                form.cleaned_data["client_secret"],
+                form.cleaned_data["project_id"],
+                form.cleaned_data["events_enabled"],
+                form.cleaned_data["pubsub_subscription"],
+                form.cleaned_data["pubsub_service_account_json"],
+            )
+        except (ValueError, json.JSONDecodeError):
+            messages.error(request, "Het serviceaccount JSON is ongeldig of de live-eventconfiguratie is onvolledig.")
+            return redirect("integrations:index")
         messages.success(request, "Google Home-configuratie veilig opgeslagen.")
     return redirect("integrations:index")
 
@@ -302,6 +423,77 @@ def sonos_callback(request):
         log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Sonos-account geautoriseerd.")
         sync_connection_task.delay(connection.id, request.household.id)
         messages.success(request, "Sonos is gekoppeld. Speakers worden nu opgehaald.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def start_spotify(request):
+    try:
+        return redirect(start_spotify_connection(request))
+    except ValueError as error:
+        messages.error(request, str(error))
+        return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def spotify_callback(request):
+    try:
+        connection = finish_spotify_connection(request, request.GET.get("code", ""), request.GET.get("state", ""))
+        log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Spotify-account geautoriseerd.")
+        sync_connection_task.delay(connection.id, request.household.id)
+        messages.success(request, "Spotify is gekoppeld. Beschikbare Connect-apparaten worden nu opgehaald.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def start_home_connect(request):
+    try:
+        return redirect(start_home_connect_connection(request))
+    except ValueError as error:
+        messages.error(request, str(error))
+        return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def home_connect_callback(request):
+    try:
+        connection = finish_home_connect_connection(request, request.GET.get("code", ""), request.GET.get("state", ""))
+        log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Home Connect-account geautoriseerd.")
+        sync_connection_task.delay(connection.id, request.household.id)
+        messages.success(request, "Home Connect is gekoppeld. Apparaten worden nu opgehaald.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def start_smartcar(request):
+    try:
+        return redirect(start_smartcar_connection(request))
+    except ValueError as error:
+        messages.error(request, str(error))
+        return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def smartcar_callback(request):
+    try:
+        if request.GET.get("error"):
+            raise ValueError(request.GET.get("error_description") or "Smartcar-koppeling geannuleerd.")
+        connection = finish_smartcar_connection(request, request.GET.get("user_id", ""), request.GET.get("state", ""))
+        log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Smartcar-voertuigverbinding geautoriseerd.")
+        sync_connection_task.delay(connection.id, request.household.id)
+        messages.success(request, "Smartcar is gekoppeld. Voertuigen worden nu opgehaald.")
     except ValueError as error:
         messages.error(request, str(error))
     return redirect("integrations:index")

@@ -1,6 +1,6 @@
 from django import forms
 
-from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingPrice, Task
+from household.models import MealIngredient, MealPlan, PantryItem, Receipt, Routine, ShoppingItem, ShoppingPrice, Task
 
 
 class TaskForm(forms.ModelForm):
@@ -18,10 +18,34 @@ class ShoppingItemForm(forms.ModelForm):
 
 
 class MealPlanForm(forms.ModelForm):
+    ingredients_text = forms.CharField(
+        required=False,
+        label="Ingrediënten",
+        help_text="Eén per regel. Optioneel: product | hoeveelheid | categorie.",
+        widget=forms.Textarea(attrs={"rows": 4, "placeholder": "Pasta | 500 g | Pasta, rijst en wereldkeuken\nTomaten | 4 stuks | Groente"}),
+    )
+
     class Meta:
         model = MealPlan
         fields = ("title", "planned_for", "notes")
         widgets = {"planned_for": forms.DateInput(attrs={"type": "date"}), "notes": forms.Textarea(attrs={"rows": 2})}
+
+
+class MealIngredientForm(forms.ModelForm):
+    class Meta:
+        model = MealIngredient
+        fields = ("name", "quantity", "category")
+
+
+class PantryItemForm(forms.ModelForm):
+    class Meta:
+        model = PantryItem
+        fields = ("name", "quantity", "unit", "minimum_quantity", "category", "expires_on")
+        widgets = {
+            "quantity": forms.NumberInput(attrs={"step": "0.1", "min": "0"}),
+            "minimum_quantity": forms.NumberInput(attrs={"step": "0.1", "min": "0"}),
+            "expires_on": forms.DateInput(attrs={"type": "date"}),
+        }
 
 
 class RoutineForm(forms.ModelForm):
@@ -37,7 +61,7 @@ class RoutineForm(forms.ModelForm):
 class ShoppingPriceForm(forms.ModelForm):
     class Meta:
         model = ShoppingPrice
-        fields = ("retailer", "price", "unit_label", "is_offer", "offer_label", "product_url")
+        fields = ("retailer", "price", "unit_label", "product_url")
         widgets = {"price": forms.NumberInput(attrs={"step": "0.01", "min": "0"})}
 
 
@@ -45,6 +69,12 @@ class ReceiptForm(forms.ModelForm):
     class Meta:
         model = Receipt
         fields = ("retailer", "purchased_on", "total_amount", "image")
+        labels = {
+            "retailer": "Supermarkt",
+            "purchased_on": "Aankoopdatum",
+            "total_amount": "Totaalbedrag",
+            "image": "Bonbestand",
+        }
         widgets = {"purchased_on": forms.DateInput(attrs={"type": "date"}), "total_amount": forms.NumberInput(attrs={"step": "0.01"})}
 
     def clean_image(self):

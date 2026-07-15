@@ -20,6 +20,17 @@ De app accepteert uitsluitend PostgreSQL. Open `http://localhost:8000/account/si
 
 Gebruik daarna `./ops/run-checks.sh` voor de testdatabase. Productie gebruikt `TEST_DATABASE_URL` nooit.
 
+Voor de lokale RLS-proef moet je met een beperkte database-rol werken. Wanneer
+je lokale beheeraccount superuser is, gebruik dan bijvoorbeeld:
+
+```bash
+RLS_ROLE=family_app DATABASE_URL=postgresql://<lokale-admin>@127.0.0.1:5432/family_app \
+  ./ops/verify_rls.sh
+```
+
+De productiecontainer gebruikt de beperkte applicatierol al rechtstreeks; daar
+is `RLS_ROLE` niet nodig.
+
 ## VPS
 
 1. Kopieer `django_app/.env.example` naar `django_app/.env` en vul alle secrets in.

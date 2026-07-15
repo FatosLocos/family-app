@@ -26,10 +26,30 @@ class SonosConfigForm(forms.Form):
     events_enabled = forms.BooleanField(label="Sonos-events ontvangen", required=False, help_text="Schakel pas in nadat de event callback URL in het Sonos Developer Portal is geregistreerd.")
 
 
+class SpotifyConfigForm(forms.Form):
+    client_id = forms.CharField(label="Spotify client ID", max_length=240)
+    client_secret = forms.CharField(label="Spotify client secret", required=False, widget=forms.PasswordInput(render_value=False))
+
+
+class HomeConnectConfigForm(forms.Form):
+    client_id = forms.CharField(label="Home Connect client ID", max_length=240)
+    client_secret = forms.CharField(label="Home Connect client secret", required=False, widget=forms.PasswordInput(render_value=False))
+
+
+class SmartcarConfigForm(forms.Form):
+    client_id = forms.CharField(label="Smartcar client ID", max_length=240)
+    client_secret = forms.CharField(label="Smartcar client secret", required=False, widget=forms.PasswordInput(render_value=False))
+    country = forms.CharField(label="Standaardland", max_length=2, initial="NL", required=False, help_text="Tweeletterige landcode voor de voertuigkiezer, bijvoorbeeld NL.")
+    allow_remote_controls = forms.BooleanField(label="Vergrendelen en ontgrendelen toestaan", required=False, help_text="Vraag alleen aan als je deze externe voertuigbediening bewust wilt gebruiken.")
+
+
 class GoogleHomeConfigForm(forms.Form):
     client_id = forms.CharField(label="Google OAuth client ID", max_length=240)
     client_secret = forms.CharField(label="Google OAuth client secret", required=False, widget=forms.PasswordInput(render_value=False))
     project_id = forms.CharField(label="Device Access project ID", max_length=240)
+    events_enabled = forms.BooleanField(label="Live Nest-events ontvangen", required=False)
+    pubsub_subscription = forms.CharField(label="Pub/Sub subscription", max_length=300, required=False, help_text="Volledige naam: projects/PROJECT/subscriptions/NAAM.")
+    pubsub_service_account_json = forms.CharField(label="Serviceaccount JSON", required=False, widget=forms.Textarea(attrs={"rows": 4}), help_text="Alleen nodig voor live events. Wordt versleuteld opgeslagen en daarna niet opnieuw getoond.")
 
 
 class LgThinQConfigForm(forms.Form):

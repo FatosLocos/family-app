@@ -59,7 +59,9 @@ def process_sonos_event(household_id: int, callback_token: str, headers, raw_bod
             if not isinstance(payload, dict):
                 raise SonosEventError("Sonos stuurde ongeldige eventdata.")
 
-            household_key = headers["X-Sonos-Household-Id"]
+            household_key = headers.get("X-Sonos-Household-Id", "")
+            if not household_key:
+                raise SonosEventError("Sonos-event mist het huishouden.")
             # A Sonos account can expose more than one household. JSON lookup only
             # covers the primary household, so also inspect the stored full list.
             connection = next(

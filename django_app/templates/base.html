@@ -9,17 +9,18 @@
   <title>{% block title %}Family App{% endblock %}</title>
   <link rel="manifest" href="{% static 'manifest.webmanifest' %}">
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
-  <link rel="stylesheet" href="{% static 'css/ux.css' %}?v=5">
+  <link rel="stylesheet" href="{% static 'css/ux.css' %}?v=6">
   <link rel="stylesheet" href="{% static 'css/planning.css' %}">
   <link rel="stylesheet" href="{% static 'css/family.css' %}?v=2">
-  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=4">
+  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=7">
   <link rel="stylesheet" href="{% static 'css/finance.css' %}">
   <link rel="stylesheet" href="{% static 'css/search.css' %}">
   <link rel="stylesheet" href="{% static 'css/integrations.css' %}?v=1">
-<link rel="stylesheet" href="{% static 'css/home.css' %}?v=22">
+  <link rel="stylesheet" href="{% static 'css/home.css' %}?v=61">
+  <link rel="stylesheet" href="{% static 'css/notifications.css' %}?v=1">
   <script src="https://unpkg.com/htmx.org@2.0.8" defer></script>
   <script src="https://unpkg.com/lucide@0.468.0" defer></script>
-  <script src="{% static 'js/app.js' %}?v=16" defer></script>
+  <script src="{% static 'js/app.js' %}?v=34" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#inhoud">Naar inhoud</a>
@@ -39,6 +40,7 @@
     <div class="header-tools">
       <button class="icon-button" type="button" data-theme-toggle aria-label="Thema wisselen" title="Thema wisselen" aria-pressed="false"><i data-lucide="sun-moon"></i></button>
       <button class="icon-button" type="button" data-command-open aria-label="Zoeken en snel toevoegen"><i data-lucide="search"></i></button>
+      <a class="icon-button notification-button {% if unread_notification_count %}has-unread{% endif %}" href="{% url 'notifications:index' %}" aria-label="Meldingen{% if unread_notification_count %}, {{ unread_notification_count }} ongelezen{% endif %}" title="Meldingen"><i data-lucide="bell"></i>{% if unread_notification_count %}<span>{{ unread_notification_count|floatformat:0 }}</span>{% endif %}</a>
       <details class="account-menu" data-hover-menu><summary class="avatar" title="Account" aria-label="Accountmenu">{{ user.display_name|default:user.email|slice:":1"|upper }}</summary><div class="speed-panel account-panel"><span>{{ user.display_name|default:user.email }}</span>{% if active_household %}<small>{{ active_household.name }}</small>{% endif %}<a href="{% url 'identity:logout' %}"><i data-lucide="log-out"></i>Uitloggen</a></div></details>
     </div>
   </header>
@@ -53,7 +55,7 @@
     <a href="{% url 'household:index' %}" title="Huishouden" {% if request.resolver_match.namespace == 'household' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="list-checks"></i><span>Doen</span></a>
     <a href="{% url 'planning:index' %}" title="Planning" {% if request.resolver_match.namespace == 'planning' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="calendar-days"></i><span>Plan</span></a>
     {% if active_membership.can_manage %}<a href="{% url 'finance:index' %}" title="Geld" {% if request.resolver_match.namespace == 'finance' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="wallet-cards"></i><span>Geld</span></a>{% endif %}
-    <details><summary title="Meer"><i data-lucide="menu"></i><span>Meer</span></summary><div class="speed-panel mobile-more"><a href="{% url 'family:index' %}" aria-label="Gezin"><i data-lucide="users-round"></i>Gezin</a><a href="{% url 'home:index' %}" aria-label="Huis"><i data-lucide="lightbulb"></i>Huis</a>{% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}</div></details>
+    <details><summary title="Meer"><i data-lucide="menu"></i><span>Meer</span></summary><div class="speed-panel mobile-more"><a href="{% url 'family:index' %}" aria-label="Gezin"><i data-lucide="users-round"></i>Gezin</a><a href="{% url 'home:index' %}" aria-label="Huis"><i data-lucide="lightbulb"></i>Huis</a><a href="{% url 'notifications:index' %}" aria-label="Meldingen"><i data-lucide="bell"></i>Meldingen{% if unread_notification_count %}<small>{{ unread_notification_count }}</small>{% endif %}</a>{% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}</div></details>
   </nav>
   <dialog id="command-palette" class="command-palette"><form method="dialog"><div class="dialog-title"><strong>Snel zoeken</strong><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Waar zoek je naar?<input autofocus type="search" name="q" placeholder="Taken, agenda, boodschappen…" hx-get="{% url 'search' %}" hx-trigger="keyup changed delay:220ms" hx-target="#command-results" hx-swap="innerHTML"></label><div id="command-results" class="command-results"><a href="{% url 'household:index' %}"><i data-lucide="plus"></i>Taak of boodschap toevoegen</a><a href="{% url 'planning:index' %}"><i data-lucide="calendar-plus"></i>Afspraak plannen</a><a href="{% url 'family:index' %}"><i data-lucide="contact-round"></i>Contact of wens beheren</a><a href="{% url 'search' %}"><i data-lucide="search"></i>Uitgebreid zoeken</a></div></form></dialog>
   {% endif %}

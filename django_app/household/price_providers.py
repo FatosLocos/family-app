@@ -12,7 +12,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from household.models import ShoppingItem, ShoppingPrice
+from household.models import ShoppingItem, ShoppingOffer, ShoppingPrice, ShoppingPriceProviderStatus
 from household.price_history import save_price_observation
 
 
@@ -52,6 +52,21 @@ class PriceResult:
     offer_label: str = ""
     regular_price: Decimal | None = None
     offer_valid_until: date | None = None
+
+
+def _record_provider_status(household, provider: str, succeeded: bool, detail: str) -> None:
+    ShoppingPriceProviderStatus.objects.update_or_create(
+        household=household,
+        provider=provider,
+        defaults={
+            "status": (
+                ShoppingPriceProviderStatus.Status.SUCCEEDED
+                if succeeded
+                else ShoppingPriceProviderStatus.Status.FAILED
+            ),
+            "detail": detail[:240],
+        },
+    )
 
 
 def _normalized(value: str) -> str:
@@ -198,12 +213,14 @@ def _offer_label(offer: dict) -> str:
 def fetch_prijsprofeet_offers(items) -> list[PriceResult]:
     retailers = {"albert_heijn": ShoppingPrice.Retailer.ALBERT_HEIJN, "jumbo": ShoppingPrice.Retailer.JUMBO, "lidl": ShoppingPrice.Retailer.LIDL}
     results: list[PriceResult] = []
+    failures = 0
     for item in items:
         try:
             response = requests.get(PRIJSPROFEET_URL, params={"q": item.name, "page_size": 20}, headers={"User-Agent": "FamilyApp/1.0"}, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError):
+            failures += 1
             continue
         offers = payload.get("results") if isinstance(payload, dict) and isinstance(payload.get("results"), list) else []
         for retailer_key, retailer in retailers.items():
@@ -228,6 +245,8 @@ def fetch_prijsprofeet_offers(items) -> list[PriceResult]:
                 offer_valid_until=valid_until,
                 product_url=str(offer.get("product_url") or "")[:500],
             ))
+    if items and failures == len(items):
+        raise PriceProviderError("PrijsProfeet is tijdelijk niet bereikbaar.")
     return results
 
 
@@ -241,10 +260,40 @@ def refresh_household_prices(household) -> dict[str, int]:
     try:
         base_prices = fetch_checkjebon_prices(items)
         checkjebon_available = True
-    except PriceProviderError:
+        _record_provider_status(
+            household,
+            ShoppingPriceProviderStatus.Provider.CHECKJEBON,
+            True,
+            f"{len(base_prices)} prijsvergelijkingen bijgewerkt.",
+        )
+    except PriceProviderError as error:
         base_prices = []
         errors += 1
-    offers = fetch_prijsprofeet_offers(items)
+        _record_provider_status(
+            household,
+            ShoppingPriceProviderStatus.Provider.CHECKJEBON,
+            False,
+            str(error),
+        )
+    try:
+        offers = fetch_prijsprofeet_offers(items)
+        offers_available = True
+        _record_provider_status(
+            household,
+            ShoppingPriceProviderStatus.Provider.PRIJSPROFEET,
+            True,
+            f"{len(offers)} aanbiedingen bijgewerkt.",
+        )
+    except PriceProviderError as error:
+        offers = []
+        offers_available = False
+        errors += 1
+        _record_provider_status(
+            household,
+            ShoppingPriceProviderStatus.Provider.PRIJSPROFEET,
+            False,
+            str(error),
+        )
     if checkjebon_available:
         matched_base_prices = {(result.item_id, result.retailer) for result in base_prices}
         stale_prices = ShoppingPrice.objects.for_household(household).filter(
@@ -254,9 +303,7 @@ def refresh_household_prices(household) -> dict[str, int]:
         for stale_price in stale_prices:
             if (stale_price.item_id, stale_price.retailer) not in matched_base_prices:
                 stale_price.delete()
-    # Offers intentionally overwrite an indicative base price for the same item/store.
     results = {(result.item_id, result.retailer): result for result in base_prices}
-    results.update({(result.item_id, result.retailer): result for result in offers})
     updated = offers_count = 0
     for result in results.values():
         existing = ShoppingPrice.objects.for_household(household).filter(item_id=result.item_id, retailer=result.retailer).first()
@@ -280,5 +327,31 @@ def refresh_household_prices(household) -> dict[str, int]:
             values=values,
         )
         updated += 1
-        offers_count += int(result.is_offer)
+    if offers_available:
+        matched_offers = {(result.item_id, result.retailer, result.source) for result in offers}
+        stale_offers = ShoppingOffer.objects.for_household(household).filter(
+            item__in=items,
+            source=ShoppingPrice.Source.PRIJSPROFEET,
+        )
+        for stale_offer in stale_offers:
+            if (stale_offer.item_id, stale_offer.retailer, stale_offer.source) not in matched_offers:
+                stale_offer.delete()
+    for result in offers:
+        if result.item_id not in items_by_id:
+            continue
+        ShoppingOffer.objects.update_or_create(
+            household=household,
+            item=items_by_id[result.item_id],
+            retailer=result.retailer,
+            source=result.source,
+            defaults={
+                "price": result.price,
+                "matched_product_name": result.matched_product_name,
+                "offer_label": result.offer_label,
+                "regular_price": result.regular_price,
+                "offer_valid_until": result.offer_valid_until,
+                "product_url": result.product_url,
+            },
+        )
+        offers_count += 1
     return {"updated": updated, "offers": offers_count, "errors": errors}

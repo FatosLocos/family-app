@@ -1,5 +1,6 @@
 from django.contrib import messages
 from django.db.models import Count, Max
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from datetime import timedelta
@@ -10,8 +11,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from households.decorators import household_required
-from household.forms import MealPlanForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
-from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceSnapshot, Task
+from household.forms import MealIngredientForm, MealPlanForm, PantryItemForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
+from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
 from notifications.models import Notification
@@ -24,10 +25,44 @@ def _shopping_item_multiplier(item):
     return Decimal(match.group(1)) if match else Decimal("1")
 
 
+def _receipt_retailer_code(retailer: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(retailer or "").casefold())
+    if normalized in {"ah", "albertheijn"}:
+        return ShoppingPrice.Retailer.ALBERT_HEIJN
+    if normalized == "jumbo":
+        return ShoppingPrice.Retailer.JUMBO
+    if normalized == "lidl":
+        return ShoppingPrice.Retailer.LIDL
+    if normalized == "kaufland":
+        return ShoppingPrice.Retailer.KAUFLAND
+    return ""
+
+
+def _receipt_product_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _create_meal_ingredients(meal, ingredient_lines):
+    """Turn a compact meal form into structured, reusable grocery ingredients."""
+    for raw_line in ingredient_lines.splitlines()[:40]:
+        parts = [part.strip() for part in raw_line.split("|", maxsplit=2)]
+        name = parts[0] if parts else ""
+        if not name:
+            continue
+        MealIngredient.objects.create(
+            household=meal.household,
+            meal=meal,
+            name=name[:200],
+            quantity=(parts[1] if len(parts) > 1 else "")[:60],
+            category=(parts[2] if len(parts) > 2 else "")[:80],
+        )
+
+
 @household_required
 def index(request):
     tab = request.GET.get("tab", "taken")
     task_filter = request.GET.get("filter", "open")
+    shopping_filter = request.GET.get("shopping_filter", "open")
     household = request.household
     default_list, _ = ShoppingList.objects.get_or_create(household=household, name="Boodschappen", defaults={"is_default": True})
     tasks = Task.objects.for_household(household).select_related("assigned_to")
@@ -42,10 +77,32 @@ def index(request):
     task_form.fields["assigned_to"].queryset = members
     routine_form = RoutineForm()
     routine_form.fields["assigned_to"].queryset = members
-    receipts = list(Receipt.objects.for_household(household).select_related("transaction", "transaction__account")[:30])
+    receipts = list(
+        Receipt.objects.for_household(household)
+        .select_related("transaction", "transaction__account")
+        .prefetch_related("line_items__shopping_item__prices")[:30]
+    )
     for receipt in receipts:
         receipt.bank_amount = abs(receipt.transaction.amount) if receipt.transaction_id else None
         receipt.amount_difference = abs(receipt.bank_amount - receipt.total_amount) if receipt.transaction_id and receipt.total_amount else None
+        receipt.recognized_line_items = list(receipt.line_items.all())
+        retailer_code = _receipt_retailer_code(receipt.retailer)
+        for line_item in receipt.recognized_line_items:
+            line_item.comparison_price = None
+            line_item.comparison_expected = None
+            line_item.comparison_delta = None
+            if not retailer_code or not line_item.shopping_item_id:
+                continue
+            current_price = next(
+                (price for price in line_item.shopping_item.prices.all() if price.retailer == retailer_code),
+                None,
+            )
+            if current_price is None:
+                continue
+            line_item.comparison_price = current_price
+            quantity = line_item.quantity if line_item.quantity and line_item.quantity > 0 else Decimal("1")
+            line_item.comparison_expected = current_price.price * quantity
+            line_item.comparison_delta = line_item.total_price - line_item.comparison_expected
     frequent_products = list(
         ShoppingItem.objects.for_household(household)
         .filter(completed_at__gte=timezone.now() - timedelta(days=90))
@@ -53,7 +110,59 @@ def index(request):
         .annotate(times_bought=Count("id"), last_bought=Max("completed_at"))
         .order_by("-times_bought", "-last_bought")[:8]
     )
-    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices")[:50])
+    receipt_product_map = {}
+    receipt_product_rows = (
+        ReceiptLineItem.objects.for_household(household)
+        .filter(receipt__ocr_status=Receipt.OcrStatus.COMPLETE, receipt__purchased_on__gte=timezone.localdate() - timedelta(days=90))
+        .select_related("shopping_item", "receipt")
+        .order_by("-receipt__purchased_on", "-id")
+    )
+    for line_item in receipt_product_rows:
+        label = line_item.shopping_item.name if line_item.shopping_item_id else line_item.name
+        key = _receipt_product_key(label)
+        if not key:
+            continue
+        row = receipt_product_map.setdefault(
+            key,
+            {"name": label, "times_bought": 0, "last_bought": line_item.receipt.purchased_on, "total_spend": Decimal("0")},
+        )
+        row["times_bought"] += 1
+        row["total_spend"] += line_item.total_price
+        if line_item.receipt.purchased_on and line_item.receipt.purchased_on > row["last_bought"]:
+            row["last_bought"] = line_item.receipt.purchased_on
+    receipt_products = sorted(receipt_product_map.values(), key=lambda row: (-row["times_bought"], -row["last_bought"].toordinal()))[:8]
+    price_items = list(ShoppingItem.objects.for_household(household).filter(list=default_list, completed_at__isnull=True).prefetch_related("prices", "offers")[:50])
+    recurring_item_map = {}
+    for item in (
+        ShoppingItem.objects.for_household(household)
+        .filter(list=default_list, recurring=True)
+        .order_by("name", "completed_at")
+    ):
+        key = _receipt_product_key(item.name)
+        existing = recurring_item_map.get(key)
+        if existing is None or (item.completed_at is None and existing.completed_at is not None) or (
+            item.completed_at and existing.completed_at and item.completed_at > existing.completed_at
+        ):
+            recurring_item_map[key] = item
+    recurring_items = list(recurring_item_map.values())
+    for item in recurring_items:
+        item.is_on_shopping_list = item.completed_at is None
+        if item.completed_at is None:
+            item.next_replenish_on = None
+            item.recurrence_status = "Staat op de lijst"
+            continue
+        item.next_replenish_on = timezone.localtime(item.completed_at).date() + timedelta(days=item.recurrence_days)
+        days_until = (item.next_replenish_on - timezone.localdate()).days
+        item.recurrence_status = "Vandaag opnieuw" if days_until <= 0 else f"Over {days_until} dag{'en' if days_until != 1 else ''}"
+    recurring_items.sort(key=lambda item: (not item.is_on_shopping_list, item.next_replenish_on or timezone.localdate(), item.name.casefold()))
+    shopping_items = ShoppingItem.objects.for_household(household).filter(list=default_list)
+    if shopping_filter == "afgerond":
+        shopping_items = shopping_items.filter(completed_at__isnull=False)
+    elif shopping_filter == "alles":
+        pass
+    else:
+        shopping_filter = "open"
+        shopping_items = shopping_items.filter(completed_at__isnull=True)
     snapshots_by_item = {}
     for snapshot in ShoppingPriceSnapshot.objects.for_household(household).filter(item__in=price_items).order_by("item_id", "-observed_at"):
         if len(snapshots_by_item.setdefault(snapshot.item_id, [])) < 8:
@@ -77,6 +186,10 @@ def index(request):
             "direction": "up" if delta > 0 else "down",
         })
     price_trends.sort(key=lambda trend: abs(trend["delta"]), reverse=True)
+    pantry_items = list(PantryItem.objects.for_household(household).order_by("category", "name"))
+    for pantry_item in pantry_items:
+        pantry_item.is_low = pantry_item.quantity <= pantry_item.minimum_quantity
+        pantry_item.is_expiring = bool(pantry_item.expires_on and pantry_item.expires_on <= timezone.localdate() + timedelta(days=7))
     retailer_choices = ShoppingPrice.Retailer.choices
     retailer_marks = {
         ShoppingPrice.Retailer.ALBERT_HEIJN: "AH",
@@ -86,9 +199,13 @@ def index(request):
     }
     price_rows = []
     latest_price_at = None
+    provider_statuses = list(
+        ShoppingPriceProviderStatus.objects.for_household(household).order_by("provider")
+    )
     retailer_totals = {retailer: {"retailer": retailer, "label": label, "total": Decimal("0"), "priced_items": 0} for retailer, label in retailer_choices}
     for item in price_items:
         prices_by_retailer = {price.retailer: price for price in item.prices.all()}
+        offers_by_retailer = {offer.retailer: offer for offer in item.offers.all()}
         for price in prices_by_retailer.values():
             if latest_price_at is None or price.observed_at > latest_price_at:
                 latest_price_at = price.observed_at
@@ -99,15 +216,21 @@ def index(request):
             "item": item,
             "history": snapshots_by_item.get(item.id, []),
             "cells": [
-                {"retailer": retailer, "label": label, "price": prices_by_retailer.get(retailer)}
+                {
+                    "retailer": retailer,
+                    "label": label,
+                    "price": prices_by_retailer.get(retailer),
+                    "offer": offers_by_retailer.get(retailer),
+                }
                 for retailer, label in retailer_choices
             ],
         })
     context = {
-        "tab": tab, "task_filter": task_filter, "today": timezone.localdate(),
-        "task_form": task_form, "shopping_form": ShoppingItemForm(), "meal_form": MealPlanForm(), "routine_form": routine_form,
+        "tab": tab, "task_filter": task_filter, "shopping_filter": shopping_filter, "today": timezone.localdate(),
+        "task_form": task_form, "shopping_form": ShoppingItemForm(initial={"recurring": tab == "terugkerend"}), "meal_form": MealPlanForm(), "pantry_form": PantryItemForm(), "routine_form": routine_form,
         "tasks": tasks[:50],
-        "shopping_items": ShoppingItem.objects.for_household(household).filter(list=default_list)[:50],
+        "shopping_items": shopping_items[:50],
+        "recurring_items": recurring_items,
         "price_items": price_items,
         "price_rows": price_rows,
         "retailer_choices": retailer_choices,
@@ -124,12 +247,16 @@ def index(request):
             for retailer, total in retailer_totals.items()
         ],
         "latest_price_at": latest_price_at,
+        "price_provider_statuses": provider_statuses,
         "price_form": ShoppingPriceForm(),
         "receipts": receipts,
         "frequent_products": frequent_products,
+        "receipt_products": receipt_products,
         "price_trends": price_trends[:8],
         "receipt_form": ReceiptForm(),
-        "meals": MealPlan.objects.for_household(household).order_by("planned_for")[:14],
+        "meals": MealPlan.objects.for_household(household).prefetch_related("ingredients").order_by("planned_for")[:14],
+        "pantry_items": pantry_items,
+        "low_pantry_count": sum(item.is_low for item in pantry_items),
         "routines": Routine.objects.for_household(household).filter(is_active=True).select_related("assigned_to").order_by("next_due_on", "title"),
         "members": members,
     }
@@ -159,8 +286,12 @@ def toggle_task(request, task_id):
     task.save(update_fields=["completed_at", "updated_at"])
     if task.completed_at:
         Notification.objects.for_household(request.household).filter(dedupe_key=f"task-overdue:{task.id}", read_at__isnull=True).update(read_at=timezone.now())
+    if request.headers.get("HX-Request") and request.headers.get("HX-Target", "").startswith("today-task-"):
+        return render(request, "today/partials/task_row.html", {"task": task})
     if request.headers.get("HX-Request"):
         return render(request, "household/partials/task_row.html", {"task": task})
+    if request.GET.get("next") == "today":
+        return redirect("today")
     return redirect("household:index")
 
 
@@ -188,7 +319,12 @@ def toggle_shopping_item(request, item_id):
     item.completed_at = None if item.completed_at else timezone.now()
     item.save(update_fields=["completed_at", "updated_at"])
     if request.headers.get("HX-Request"):
-        return render(request, "household/partials/shopping_row.html", {"item": item})
+        if request.headers.get("HX-Target", "").startswith("today-shopping-"):
+            return render(request, "today/partials/shopping_row.html", {"item": item})
+        shopping_filter = request.GET.get("shopping_filter", "open")
+        if (shopping_filter == "open" and item.completed_at) or (shopping_filter == "afgerond" and not item.completed_at):
+            return HttpResponse("")
+        return render(request, "household/partials/shopping_row.html", {"item": item, "shopping_filter": shopping_filter})
     return redirect("household:index")
 
 
@@ -200,8 +336,9 @@ def add_meal(request):
         meal = form.save(commit=False)
         meal.household = request.household
         meal.save()
+        _create_meal_ingredients(meal, form.cleaned_data["ingredients_text"])
         messages.success(request, "Maaltijd ingepland.")
-    return redirect("household:index")
+    return _household_tab_redirect("maaltijden")
 
 
 @household_required
@@ -290,6 +427,8 @@ def save_shopping_price(request, item_id):
             retailer=form.cleaned_data["retailer"],
             values={
                 **{key: value for key, value in form.cleaned_data.items() if key != "retailer"},
+                "is_offer": False,
+                "offer_label": "",
                 "regular_price": None,
                 "offer_valid_until": None,
                 "source": ShoppingPrice.Source.MANUAL,
@@ -344,6 +483,142 @@ def delete_meal(request, meal_id):
     meal.delete()
     messages.success(request, "Maaltijd verwijderd.")
     return _household_tab_redirect("maaltijden")
+
+
+@household_required
+@require_POST
+def add_meal_ingredient(request, meal_id):
+    meal = get_object_or_404(MealPlan.objects.for_household(request.household), pk=meal_id)
+    form = MealIngredientForm(request.POST)
+    if form.is_valid():
+        ingredient = form.save(commit=False)
+        ingredient.household = request.household
+        ingredient.meal = meal
+        ingredient.save()
+        messages.success(request, "Ingrediënt toegevoegd.")
+    else:
+        messages.error(request, "Vul een ingrediënt in.")
+    return _household_tab_redirect("maaltijden")
+
+
+@household_required
+@require_POST
+def delete_meal_ingredient(request, ingredient_id):
+    ingredient = get_object_or_404(MealIngredient.objects.for_household(request.household), pk=ingredient_id)
+    ingredient.delete()
+    messages.success(request, "Ingrediënt verwijderd.")
+    return _household_tab_redirect("maaltijden")
+
+
+@household_required
+@require_POST
+def add_meal_ingredients_to_shopping_list(request, meal_id):
+    meal = get_object_or_404(MealPlan.objects.for_household(request.household).prefetch_related("ingredients"), pk=meal_id)
+    shopping_list, _ = ShoppingList.objects.get_or_create(
+        household=request.household,
+        name="Boodschappen",
+        defaults={"is_default": True},
+    )
+    added = 0
+    for ingredient in meal.ingredients.all():
+        exists = ShoppingItem.objects.for_household(request.household).filter(
+            list=shopping_list,
+            completed_at__isnull=True,
+            name__iexact=ingredient.name,
+            quantity__iexact=ingredient.quantity,
+            category__iexact=ingredient.category,
+        ).exists()
+        if not exists:
+            ShoppingItem.objects.create(
+                household=request.household,
+                list=shopping_list,
+                name=ingredient.name,
+                quantity=ingredient.quantity,
+                category=ingredient.category,
+            )
+            added += 1
+    if added:
+        refresh_household_shopping_prices.delay(request.household.id)
+        messages.success(request, f"{added} ingrediënten aan de boodschappenlijst toegevoegd.")
+    else:
+        messages.info(request, "Deze ingrediënten staan al op de open boodschappenlijst.")
+    return _household_tab_redirect("maaltijden")
+
+
+@household_required
+@require_POST
+def add_pantry_item(request):
+    form = PantryItemForm(request.POST)
+    if form.is_valid():
+        item = form.save(commit=False)
+        item.household = request.household
+        item.save()
+        messages.success(request, "Voorraadproduct toegevoegd.")
+    else:
+        messages.error(request, "Controleer de voorraadvelden.")
+    return _household_tab_redirect("voorraad")
+
+
+@household_required
+@require_POST
+def update_pantry_item(request, item_id):
+    item = get_object_or_404(PantryItem.objects.for_household(request.household), pk=item_id)
+    form = PantryItemForm(request.POST, instance=item)
+    if form.is_valid():
+        form.save()
+        messages.success(request, "Voorraadproduct aangepast.")
+    else:
+        messages.error(request, "Controleer de voorraadvelden.")
+    return _household_tab_redirect("voorraad")
+
+
+@household_required
+@require_POST
+def adjust_pantry_item(request, item_id):
+    item = get_object_or_404(PantryItem.objects.for_household(request.household), pk=item_id)
+    try:
+        delta = Decimal(str(request.POST.get("delta", "0")))
+    except Exception:
+        messages.error(request, "Ongeldige voorraadwijziging.")
+        return _household_tab_redirect("voorraad")
+    item.quantity = max(Decimal("0"), item.quantity + delta)
+    item.save(update_fields=["quantity", "updated_at"])
+    messages.success(request, f"Voorraad {item.name.lower()} bijgewerkt.")
+    return _household_tab_redirect("voorraad")
+
+
+@household_required
+@require_POST
+def add_pantry_item_to_shopping_list(request, item_id):
+    item = get_object_or_404(PantryItem.objects.for_household(request.household), pk=item_id)
+    shopping_list, _ = ShoppingList.objects.get_or_create(
+        household=request.household,
+        name="Boodschappen",
+        defaults={"is_default": True},
+    )
+    quantity = f"{format(item.minimum_quantity.normalize(), 'f')} {item.unit}" if item.minimum_quantity else ""
+    shopping_item, created = ShoppingItem.objects.get_or_create(
+        household=request.household,
+        list=shopping_list,
+        completed_at__isnull=True,
+        name__iexact=item.name,
+        defaults={"name": item.name, "quantity": quantity, "category": item.category},
+    )
+    if created:
+        refresh_household_shopping_prices.delay(request.household.id)
+        messages.success(request, f"{shopping_item.name} staat op de boodschappenlijst.")
+    else:
+        messages.info(request, f"{item.name} staat al op de open boodschappenlijst.")
+    return _household_tab_redirect("voorraad")
+
+
+@household_required
+@require_POST
+def delete_pantry_item(request, item_id):
+    item = get_object_or_404(PantryItem.objects.for_household(request.household), pk=item_id)
+    item.delete()
+    messages.success(request, "Voorraadproduct verwijderd.")
+    return _household_tab_redirect("voorraad")
 
 
 @household_required

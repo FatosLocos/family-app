@@ -24,6 +24,9 @@ class HomeLiveConsumer(AsyncJsonWebsocketConsumer):
     async def home_entity_update(self, event):
         await self.send_json(event["payload"])
 
+    async def home_control_result(self, event):
+        await self.send_json(event["payload"])
+
     @database_sync_to_async
     def _is_member(self, user_id, household_id):
         return Membership.objects.filter(user_id=user_id, household_id=household_id).exists()
