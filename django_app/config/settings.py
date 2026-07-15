@@ -13,6 +13,7 @@ DEVELOPMENT_SECRET_KEY = "development-only-change-me"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", DEVELOPMENT_SECRET_KEY)
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "")
+FIELD_ENCRYPTION_KEY_ROTATION = [k.strip() for k in os.environ.get("FIELD_ENCRYPTION_KEY_ROTATION", "").split(",") if k.strip()]
 
 if not DEBUG:
     if SECRET_KEY == DEVELOPMENT_SECRET_KEY or len(SECRET_KEY) < 50:

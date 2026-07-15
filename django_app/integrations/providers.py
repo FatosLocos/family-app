@@ -202,13 +202,26 @@ def _oauth_response(response, provider: str) -> dict:
 
 def _refresh_connection_token(connection: IntegrationConnection, provider: str, token_url: str) -> str:
     from django.db import transaction
+    from cryptography.fernet import InvalidToken
 
     with transaction.atomic():
         connection = IntegrationConnection.objects.select_for_update().get(pk=connection.pk)
         data = dict(connection.settings) if isinstance(connection.settings, dict) else {}
         if _stored_token_is_current(data):
-            return decrypt(data["access_token"])
-        refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+            try:
+                return decrypt(data["access_token"])
+            except InvalidToken:
+                connection.status = "needs_reauth"
+                connection.last_error = "Encryptie-sleutel is vernieuwd. Herauriseer de koppeling."
+                connection.save(update_fields=["status", "last_error", "updated_at"])
+                raise ProviderError(connection.last_error)
+        try:
+            refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+        except InvalidToken:
+            connection.status = "needs_reauth"
+            connection.last_error = "Encryptie-sleutel is vernieuwd. Herauriseer de koppeling."
+            connection.save(update_fields=["status", "last_error", "updated_at"])
+            raise ProviderError(connection.last_error)
         if not refresh_token:
             raise ProviderError(f"{provider} moet opnieuw worden geautoriseerd.")
         from integrations.services import get_app_config
