@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("planning", "0004_calendareventsearch"),
+        ("planning", "0001_initial"),
     ]
 
     operations = [
