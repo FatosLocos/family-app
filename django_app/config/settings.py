@@ -68,6 +68,7 @@ TEMPLATES = [{
         "django.contrib.auth.context_processors.auth",
         "django.contrib.messages.context_processors.messages",
         "households.context_processors.household_context",
+        "notifications.context_processors.webpush_context",
     ]},
 }]
 WSGI_APPLICATION = "config.wsgi.application"
@@ -199,6 +200,10 @@ OUTLOOK_CALENDAR_CLIENT_ID = os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID", "")
 OUTLOOK_CALENDAR_CLIENT_SECRET = os.environ.get("OUTLOOK_CALENDAR_CLIENT_SECRET", "")
 
 INVITE_ONLY_MODE = os.environ.get("INVITE_ONLY_MODE", "0") == "1"
+
+WEBPUSH_VAPID_PUBLIC_KEY = os.environ.get("WEBPUSH_VAPID_PUBLIC_KEY", "")
+WEBPUSH_VAPID_PRIVATE_KEY = os.environ.get("WEBPUSH_VAPID_PRIVATE_KEY", "")
+WEBPUSH_VAPID_ADMIN_EMAIL = os.environ.get("WEBPUSH_VAPID_ADMIN_EMAIL", "admin@example.com")
 
 SESSION_COOKIE_AGE = 1209600
 SESSION_SAVE_EVERY_REQUEST = False

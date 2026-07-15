@@ -1170,5 +1170,51 @@
     window.setTimeout(() => toast.remove(), 5000);
     refreshIcons();
   });
-  if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=7", { scope: "/" }).catch(() => {}));
+  const requestPushNotificationPermission = async () => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    if (Notification.permission === "denied") return;
+    if (Notification.permission === "granted") {
+      await subscribeToPush();
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission === "granted") {
+      await subscribeToPush();
+    }
+  };
+
+  const subscribeToPush = async () => {
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription();
+      if (subscription) return;
+      const key = document.querySelector("meta[name='webpush-vapid-key']")?.content;
+      if (!key) return;
+      const newSubscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+      });
+      await fetch("/meldingen/push/abonneer/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: newSubscription.toJSON() }),
+      });
+    } catch (error) {
+      console.error("Failed to subscribe to push notifications:", error);
+    }
+  };
+
+  const urlBase64ToUint8Array = (base64String) => {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/\-/g, "+").replace(/_/g, "/");
+    const rawData = window.atob(base64);
+    return new Uint8Array([...rawData].map((char) => char.charCodeAt(0)));
+  };
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/service-worker.js?v=7", { scope: "/" }).catch(() => {});
+      requestPushNotificationPermission();
+    });
+  }
 })();
