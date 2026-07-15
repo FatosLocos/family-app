@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.contrib import messages
+from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils import timezone
@@ -26,14 +27,15 @@ def accept_invite(request, code):
     if not request.user.is_authenticated:
         request.session["pending_invite_code"] = invite.code
         return redirect("identity:signup")
-    membership, created = Membership.objects.get_or_create(household=invite.household, user=request.user, defaults={"role": invite.role})
-    if created:
-        invite.accepted_by = request.user
-        invite.save(update_fields=["accepted_by"])
-        request.session["active_household_id"] = invite.household_id
-        messages.success(request, f"Je bent toegevoegd aan {invite.household.name}.")
-    else:
-        messages.info(request, "Je bent al lid van dit huishouden.")
+    with transaction.atomic():
+        membership, created = Membership.objects.get_or_create(household=invite.household, user=request.user, defaults={"role": invite.role})
+        if created:
+            invite.accepted_by = request.user
+            invite.save(update_fields=["accepted_by"])
+            request.session["active_household_id"] = invite.household_id
+            messages.success(request, f"Je bent toegevoegd aan {invite.household.name}.")
+        else:
+            messages.info(request, "Je bent al lid van dit huishouden.")
     return redirect("today")
 
 
@@ -42,14 +44,15 @@ def accept_invite(request, code):
 def create_invite(request):
     form = InviteForm(request.POST)
     if form.is_valid():
-        HouseholdInvite.objects.create(
-            household=request.household,
-            created_by=request.user,
-            role=form.cleaned_data["role"],
-            label=form.cleaned_data["label"],
-            expires_at=timezone.now() + timedelta(days=14),
-        )
-        messages.success(request, "Uitnodiging gemaakt. Deel de link vanuit het overzicht.")
+        with transaction.atomic():
+            HouseholdInvite.objects.create(
+                household=request.household,
+                created_by=request.user,
+                role=form.cleaned_data["role"],
+                label=form.cleaned_data["label"],
+                expires_at=timezone.now() + timedelta(days=14),
+            )
+            messages.success(request, "Uitnodiging gemaakt. Deel de link vanuit het overzicht.")
     return redirect(f"{reverse('family:index')}?tab=leden")
 
 
@@ -75,6 +78,7 @@ def remove_member(request, membership_id):
         messages.error(request, "De eigenaar kan niet worden verwijderd.")
     else:
         name = str(membership.user)
-        membership.delete()
-        messages.success(request, f"{name} is uit het huishouden verwijderd.")
+        with transaction.atomic():
+            membership.delete()
+            messages.success(request, f"{name} is uit het huishouden verwijderd.")
     return redirect(f"{reverse('family:index')}?tab=leden")

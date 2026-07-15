@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "axes",
     "identity",
     "households",
     "family",
@@ -49,6 +50,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "axes.middleware.AxesMiddleware",
     "households.middleware.ActiveHouseholdMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -90,11 +92,21 @@ if DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql":
     raise ImproperlyConfigured("DATABASE_URL moet naar een PostgreSQL-database verwijzen.")
 
 AUTH_USER_MODEL = "identity.User"
+AUTHENTICATION_BACKENDS = [
+    "axes.backends.AxesBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_DURATION = 3600
+AXES_LOCKOUT_TEMPLATE = "axes/lockout.html"
+AXES_USE_USER_AGENT = True
+AXES_LOCK_OUT_AT_FAILURE = True
 LANGUAGE_CODE = "nl"
 TIME_ZONE = "Europe/Amsterdam"
 USE_I18N = True
@@ -164,3 +176,77 @@ BUNQ_OAUTH_CLIENT_ID = os.environ.get("BUNQ_OAUTH_CLIENT_ID", "")
 BUNQ_OAUTH_CLIENT_SECRET = os.environ.get("BUNQ_OAUTH_CLIENT_SECRET", "")
 OUTLOOK_CALENDAR_CLIENT_ID = os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID", "")
 OUTLOOK_CALENDAR_CLIENT_SECRET = os.environ.get("OUTLOOK_CALENDAR_CLIENT_SECRET", "")
+
+SESSION_COOKIE_AGE = 1209600
+SESSION_SAVE_EVERY_REQUEST = False
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+        "simple": {
+            "format": "{levelname} {asctime} {name} {message}",
+            "style": "{",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "filters": {
+        "require_debug_false": {
+            "()": "django.utils.log.RequireDebugFalse",
+        },
+        "require_debug_true": {
+            "()": "django.utils.log.RequireDebugTrue",
+        },
+    },
+    "handlers": {
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+        },
+        "file": {
+            "level": "WARNING",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "django.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+        "security": {
+            "level": "WARNING",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "security.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["security"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "axes": {
+            "handlers": ["security"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "integrations": {
+            "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

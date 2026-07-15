@@ -96,12 +96,15 @@ def sync_active_connections():
 @shared_task
 def sync_home_connect_connections():
     """Keep appliance progress and maintenance signals useful without speeding up all integrations."""
+    debounce_window = timedelta(seconds=30)
     for household in Household.objects.all():
         with household_db_scope(household.pk):
             for connection in IntegrationConnection.objects.for_household(household).filter(
                 provider=IntegrationConnection.Provider.HOME_CONNECT,
                 status__in=["configured", "needs_sync"],
             ):
+                if connection.last_sync_at and timezone.now() - connection.last_sync_at < debounce_window:
+                    continue
                 sync_connection_task.delay(connection.id, household.id)
 
 

@@ -1118,6 +1118,7 @@
     registerSonosDialogTabs();
     registerForms();
     registerWishAutofill();
+    registerToastAutoDismiss();
     registerAgendaEvents();
     registerHomeControls();
     registerHueRangeControls();
@@ -1138,6 +1139,36 @@
       tickCastProgress();
     }, 250);
   });
-  document.body.addEventListener("htmx:afterSwap", refreshIcons);
+  const registerToastAutoDismiss = () => {
+    document.querySelectorAll(".toast").forEach((toast) => {
+      if (toast.dataset.dismissTimer) return;
+      toast.dataset.dismissTimer = "true";
+      window.setTimeout(() => toast.remove(), 5000);
+    });
+  };
+  document.body.addEventListener("htmx:afterSwap", () => {
+    refreshIcons();
+    registerForms();
+    registerWishAutofill();
+    registerHoverMenus();
+    registerToastAutoDismiss();
+  });
+  document.body.addEventListener("htmx:responseError", (e) => {
+    const status = e.detail?.xhr?.status;
+    const messages = {
+      404: "Gegevens niet gevonden. Controleer of het item nog bestaat.",
+      500: "Serverfout. Probeer het opnieuw.",
+      503: "Server is momenteel niet beschikbaar. Probeer later opnieuw.",
+    };
+    const message = messages[status] || "Aanvraag mislukt. Controleer je verbinding en probeer het opnieuw.";
+    const toast = document.createElement("div");
+    toast.className = "toast toast-error";
+    toast.innerHTML = `<i data-lucide="circle-alert"></i>${message}`;
+    document.querySelector(".toast-stack") || Object.assign(document.createElement("div"), { className: "toast-stack", "aria-live": "polite" }).appendChild(toast) && document.querySelector("main")?.parentElement?.insertBefore(document.querySelector(".toast-stack"), document.querySelector("main"));
+    const stack = document.querySelector(".toast-stack");
+    stack?.appendChild(toast);
+    window.setTimeout(() => toast.remove(), 5000);
+    refreshIcons();
+  });
   if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js?v=7", { scope: "/" }).catch(() => {}));
 })();
