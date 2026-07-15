@@ -195,7 +195,8 @@ def listen_forever(config: HomeAssistantConfig, stop_event: threading.Event | No
     while not stop_event.is_set():
         close_old_connections()
         try:
-            config.refresh_from_db()
+            with household_db_scope(config.household_id):
+                config.refresh_from_db()
             ws = _connect(config)
             load_initial_state(config, ws)
             command_id = 10_000
@@ -211,7 +212,8 @@ def listen_forever(config: HomeAssistantConfig, stop_event: threading.Event | No
                 if payload.get("type") == "event" and isinstance(payload.get("event"), dict):
                     apply_state_changed(config, payload["event"])
         except Exception as error:
-            config.last_error = str(error)[:300]
-            config.save(update_fields=["last_error", "updated_at"])
+            with household_db_scope(config.household_id):
+                config.last_error = str(error)[:300]
+                config.save(update_fields=["last_error", "updated_at"])
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
