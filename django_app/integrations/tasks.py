@@ -140,3 +140,15 @@ def poll_google_home_event_subscriptions():
                     connection.settings = settings
                     connection.save(update_fields=["settings", "updated_at"])
                     logger.warning("Google Home eventpoll mislukt voor connection %s: %s", connection.id, error)
+
+
+@shared_task
+def cleanup_stale_data():
+    """Clean up old sync runs, audit logs, and expired data."""
+    retention_days = 90
+    cutoff_date = timezone.now() - timedelta(days=retention_days)
+
+    deleted_sync_runs, _ = SyncRun.objects.filter(finished_at__lt=cutoff_date).delete()
+    deleted_audits, _ = IntegrationAudit.objects.filter(created_at__lt=cutoff_date).delete()
+
+    logger.info("Cleaned up %d sync runs and %d audit records", deleted_sync_runs, deleted_audits)
