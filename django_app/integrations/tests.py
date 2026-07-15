@@ -1698,7 +1698,7 @@ class SettingsAccessTests(TestCase):
         self.assertTrue({"user-read-playback-state", "user-modify-playback-state", "playlist-read-private"}.issubset(scopes))
         self.assertIn("state", query)
 
-    def test_smartcar_start_requests_read_scopes_and_only_opted_in_control_scope(self):
+    def test_smartcar_start_uses_the_dashboard_vehicle_access_configuration(self):
         save_app_config(self.household, "smartcar", "api-client", "smartcar-secret", {"connect_client_id": "connect-client", "country": "NL", "allow_remote_controls": True})
         self.client.force_login(self.owner)
 
@@ -1706,10 +1706,9 @@ class SettingsAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         query = parse_qs(urlparse(response["Location"]).query)
-        scopes = set(query["scope"][0].split())
         self.assertEqual(query["client_id"], ["connect-client"])
         self.assertEqual(query["country"], ["NL"])
-        self.assertTrue({"read_vehicle_info", "read_odometer", "read_location", "read_battery", "read_security", "control_security"}.issubset(scopes))
+        self.assertNotIn("scope", query)
 
     def test_smartcar_callback_persists_the_authorized_user_and_queues_a_sync(self):
         save_app_config(self.household, "smartcar", "api-client", "smartcar-secret", {"connect_client_id": "connect-client", "country": "NL"})

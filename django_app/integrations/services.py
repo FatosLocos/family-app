@@ -403,14 +403,10 @@ def start_smartcar_connection(request) -> str:
     )
     state = secrets.token_urlsafe(24)
     request.session["smartcar_oauth"] = {"state": state, "connection_id": connection.id}
-    scopes = ["read_vehicle_info", "read_odometer", "read_location", "read_battery", "read_security"]
-    if config.get("allow_remote_controls"):
-        scopes.append("control_security")
     params = {
         "response_type": "code",
         "client_id": connect_client_id,
         "redirect_uri": f"{public_origin(request)}/instellingen/smartcar/callback/",
-        "scope": " ".join(scopes),
         "state": state,
         "mode": "live",
     }
