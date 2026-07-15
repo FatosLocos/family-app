@@ -183,6 +183,7 @@ CELERY_BEAT_SCHEDULE = {
     "renew-sonos-cloud-event-subscriptions": {"task": "integrations.tasks.renew_sonos_event_subscriptions", "schedule": 3600.0},
     "poll-google-home-events": {"task": "integrations.tasks.poll_google_home_event_subscriptions", "schedule": 2.0},
     "sync-ics-subscriptions": {"task": "planning.tasks.sync_ics_subscriptions", "schedule": 900.0},
+    "sync-pending-calendar-events": {"task": "planning.tasks.sync_pending_events_to_remote", "schedule": 600.0},
     "replenish-recurring-shopping-items": {"task": "household.tasks.replenish_recurring_shopping_items", "schedule": 86400.0},
     "refresh-shopping-prices": {
         "task": "household.tasks.refresh_shopping_prices",
