@@ -1,7 +1,8 @@
+import time
 import unittest
 from unittest.mock import Mock, patch
 
-from family_app_probe.google_cast import GoogleCastAdapter
+from family_app_probe.google_cast import GoogleCastAdapter, _BACKOFF_BASE_SECONDS
 
 
 class GoogleCastAdapterTests(unittest.TestCase):
@@ -42,3 +43,33 @@ class GoogleCastAdapterTests(unittest.TestCase):
         cast.media_controller.pause.assert_called_once()
         with self.assertRaisesRegex(RuntimeError, "niet beschikbaar"):
             adapter.control("device-1", "play_uri", "https://example.test")
+
+    def test_failed_connection_is_disconnected_instead_of_leaking(self):
+        adapter = GoogleCastAdapter()
+        stale_cast = Mock()
+        stale_cast.wait.side_effect = TimeoutError("Kantoor never answered")
+        browser = Mock()
+        with patch("pychromecast.get_chromecasts", return_value=([stale_cast], browser)), \
+             patch("pychromecast.discovery.stop_discovery") as stop_discovery:
+            adapter._discover()
+        stale_cast.disconnect.assert_called_once_with(timeout=0)
+        stop_discovery.assert_called_once_with(browser)
+
+    def test_empty_discovery_backs_off_instead_of_rescanning_every_cycle(self):
+        adapter = GoogleCastAdapter()
+        before = time.monotonic()
+        with patch.object(adapter, "_discover", return_value={}) as discover:
+            adapter.inventory()
+            adapter.inventory()
+        discover.assert_called_once()
+        self.assertEqual(adapter._consecutive_empty_cycles, 1)
+        self.assertGreaterEqual(adapter._next_attempt - before, _BACKOFF_BASE_SECONDS - 1)
+
+    def test_backoff_resets_once_a_device_is_found_again(self):
+        adapter = GoogleCastAdapter()
+        adapter._consecutive_empty_cycles = 3
+        adapter._next_attempt = 0.0
+        with patch.object(adapter, "_discover", return_value={"device-1": self._cast()}):
+            adapter.inventory()
+        self.assertEqual(adapter._consecutive_empty_cycles, 0)
+        self.assertEqual(adapter._next_attempt, 0.0)

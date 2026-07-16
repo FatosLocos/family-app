@@ -4,10 +4,13 @@ import asyncio
 import argparse
 import getpass
 import json
+import logging
+import logging.handlers
 import re
 import socket
 import threading
 import time
+from pathlib import Path
 
 import requests
 import websocket
@@ -24,6 +27,22 @@ from family_app_probe.sonos import SonosAdapter
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+LOG_DIR = Path.home() / ".local" / "state" / "family-app-probe"
+LOG_FILE = LOG_DIR / "probe.log"
+
+
+def _configure_logging():
+    """Cap the probe's own log output instead of relying on the process
+    supervisor's raw stdout/stderr redirection, which has no size limit.
+    A stale/unreachable local device can make a library log a warning on
+    every retry forever; without rotation that has filled disks before."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
 
 
 def _safe_error(error: Exception) -> str:
@@ -154,7 +173,7 @@ def run(args):
         try:
             ws = websocket.create_connection(f"{config['websocket_url']}?token={config['token']}", timeout=20)
             ws.settimeout(1)
-            print("Verbonden met Family App.")
+            logging.info("Verbonden met Family App.")
             reconnect_delay = 2.0
             while True:
                 now = time.monotonic()
@@ -182,17 +201,17 @@ def run(args):
                     except Exception as error:
                         # Discovery is an optional enrichment. A temporary
                         # multicast/BLE failure must not drop device control.
-                        print(f"Discovery overgeslagen: {_safe_error(error)}")
+                        logging.warning("Discovery overgeslagen: %s", _safe_error(error))
                     last_discovery = now
                 try:
                     incoming = json.loads(ws.recv())
                 except websocket.WebSocketTimeoutException:
                     continue
                 except json.JSONDecodeError:
-                    print("Ongeldig bericht van Family App genegeerd.")
+                    logging.warning("Ongeldig bericht van Family App genegeerd.")
                     continue
                 if not isinstance(incoming, dict):
-                    print("Onverwacht bericht van Family App genegeerd.")
+                    logging.warning("Onverwacht bericht van Family App genegeerd.")
                     continue
                 if incoming.get("type") != "command":
                     continue
@@ -233,12 +252,13 @@ def run(args):
                 except Exception as error:
                     _send(ws, {"type": "command_result", "command_id": incoming.get("command_id", ""), "entity_id": entity.get("id", ""), "action": incoming.get("action", ""), "succeeded": False, "error": _safe_error(error)})
         except (OSError, requests.RequestException, websocket.WebSocketException) as error:
-            print(f"Verbinding opnieuw proberen over {reconnect_delay:.0f}s: {_safe_error(error)}")
+            logging.warning("Verbinding opnieuw proberen over %.0fs: %s", reconnect_delay, _safe_error(error))
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, 30.0)
 
 
 def main():
+    _configure_logging()
     parser = argparse.ArgumentParser(description="Family App Local Probe")
     subparsers = parser.add_subparsers(dest="command", required=True)
     pair_parser = subparsers.add_parser("pair")

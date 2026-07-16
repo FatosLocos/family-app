@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+import logging
 import time
+
+
+logger = logging.getLogger(__name__)
+
+# PyChromecast logs every failed connection attempt at ERROR level, including
+# routine mDNS flakiness. Our own adapter surfaces connectivity problems via
+# the heartbeat status sent to the app, so the library's per-retry chatter is
+# just noise here - and, unbounded, it is what filled a 70GB log file once
+# when a stale/unreachable cast device kept getting rediscovered every cycle.
+logging.getLogger("pychromecast").setLevel(logging.CRITICAL)
+
+# If discovery keeps finding nothing usable, back off instead of re-scanning
+# the network (and re-attempting to connect to the same unreachable device)
+# every single inventory cycle, forever.
+_BACKOFF_BASE_SECONDS = 30.0
+_BACKOFF_MAX_SECONDS = 600.0
 
 
 class GoogleCastAdapter:
@@ -10,6 +27,8 @@ class GoogleCastAdapter:
 
     def __init__(self):
         self._casts = {}
+        self._next_attempt = 0.0
+        self._consecutive_empty_cycles = 0
 
     def _discover(self):
         try:
@@ -24,13 +43,40 @@ class GoogleCastAdapter:
                     key = str(cast.cast_info.uuid or cast.cast_info.host)
                     self._casts[key] = cast
                 except Exception:
+                    # wait() already started the background connection thread;
+                    # without disconnecting it explicitly it keeps retrying on
+                    # its own, orphaned from this object, for the life of the
+                    # process. Tear it down before moving on.
+                    cast.disconnect(timeout=0)
                     continue
         finally:
             pychromecast.discovery.stop_discovery(browser)
         return self._casts
 
     def inventory(self):
+        now = time.monotonic()
+        if now < self._next_attempt:
+            return self._entities_from_casts(self._casts)
+
         casts = self._discover()
+        if casts:
+            if self._consecutive_empty_cycles:
+                logger.info("Google Cast-apparaat weer bereikbaar, hervat normale discovery-interval.")
+            self._consecutive_empty_cycles = 0
+            self._next_attempt = 0.0
+        else:
+            self._consecutive_empty_cycles += 1
+            delay = min(_BACKOFF_BASE_SECONDS * (2 ** min(self._consecutive_empty_cycles - 1, 5)), _BACKOFF_MAX_SECONDS)
+            self._next_attempt = now + delay
+            if self._consecutive_empty_cycles == 1:
+                logger.info(
+                    "Geen bereikbare Google Cast-apparaten gevonden; volgende poging over %.0fs (loopt op tot %.0fs).",
+                    delay,
+                    _BACKOFF_MAX_SECONDS,
+                )
+        return self._entities_from_casts(casts)
+
+    def _entities_from_casts(self, casts):
         entities = []
         for key, cast in casts.items():
             info = cast.cast_info
