@@ -23,10 +23,10 @@ class SharedShellSmokeTests(TestCase):
 
     def test_core_modules_use_the_shared_shell(self):
         pages = (
-            ("today", {}, "Vandaag"),
+            ("today", {}, "Start"),
             ("family:index", {}, "Gezin"),
-            ("household:index", {}, "Huishouden"),
-            ("planning:index", {}, "Planning"),
+            ("household:index", {}, "Taken"),
+            ("planning:index", {}, "Agenda"),
             ("finance:index", {}, "Geld"),
             ("home:index", {}, "Huis"),
             ("integrations:index", {}, "Instellingen"),
@@ -39,7 +39,7 @@ class SharedShellSmokeTests(TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, "Family App")
                 self.assertContains(response, "css/ux.css")
-                self.assertContains(response, 'class="mobile-dock"')
+                self.assertContains(response, 'class="arena-dock"')
                 self.assertContains(response, f'aria-label="{label}"')
 
     def test_current_module_is_exposed_as_the_active_navigation_item(self):
@@ -47,5 +47,14 @@ class SharedShellSmokeTests(TestCase):
 
         self.assertContains(
             response,
-            'href="/huishouden/" aria-label="Huishouden" title="Huishouden" class="is-active" aria-current="page"',
+            'href="/huishouden/?tab=taken" aria-label="Taken" title="Taken" class="is-active" aria-current="page"',
         )
+
+    def test_household_boodschappen_tab_activates_boodschappen_not_taken(self):
+        response = self.client.get(reverse("household:index"), {"tab": "voorraad"})
+
+        self.assertContains(
+            response,
+            'href="/huishouden/?tab=boodschappen" aria-label="Boodschappen" title="Boodschappen" class="is-active" aria-current="page"',
+        )
+        self.assertNotContains(response, 'aria-label="Taken" title="Taken" class="is-active"')

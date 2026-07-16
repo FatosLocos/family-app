@@ -5,6 +5,7 @@
 {% block content %}
 <section class="auth-shell">
   <div class="auth-brand">
+    <p class="wordmark auth-wordmark">Family App</p>
     <p class="eyebrow">{% if pending_invite %}Uitnodiging{% else %}Nieuwe start{% endif %}</p>
     <h1>{% if pending_invite %}Sluit aan bij {{ pending_invite.household.name }}.{% else %}Maak jullie nieuwe thuisbasis.{% endif %}</h1>
     <p>{% if pending_invite %}Maak je eigen account aan. Je rol wordt {{ pending_invite.get_role_display|lower }}.{% else %}Je maakt eerst een huishouden aan en nodigt daarna ouders en kinderen uit.{% endif %}</p>

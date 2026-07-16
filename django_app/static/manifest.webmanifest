@@ -5,8 +5,8 @@
   "lang": "nl-NL",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f5f7f8",
-  "theme_color": "#087e8b",
+  "background_color": "#EFF1EA",
+  "theme_color": "#B6E236",
   "icons": [
     {
       "src": "/static/icons/family-app.svg",

@@ -10,16 +10,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#087e8b">
+  <meta name="theme-color" content="#EFF1EA" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0D0F14" media="(prefers-color-scheme: dark)">
   {% if webpush_vapid_key %}<meta name="webpush-vapid-key" content="{{ webpush_vapid_key }}">{% endif %}
   <title>{% block title %}Family App{% endblock %}</title>
   <link rel="manifest" href="{% static 'manifest.webmanifest' %}">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=3">
+  <link rel="stylesheet" href="{% static 'css/arena.css' %}?v=1">
   <link rel="stylesheet" href="{% static 'css/auth.css' %}?v=1">
   <link rel="stylesheet" href="{% static 'css/ux.css' %}?v=6">
-  <link rel="stylesheet" href="{% static 'css/planning.css' %}">
+  <link rel="stylesheet" href="{% static 'css/planning.css' %}?v=1">
   <link rel="stylesheet" href="{% static 'css/family.css' %}?v=2">
-  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=7">
+  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=8">
   <link rel="stylesheet" href="{% static 'css/finance.css' %}">
   <link rel="stylesheet" href="{% static 'css/search.css' %}">
   <link rel="stylesheet" href="{% static 'css/integrations.css' %}?v=1">
@@ -33,38 +35,53 @@
   <a class="skip-link" href="#inhoud">Naar inhoud</a>
   <div class="network-status" data-network-status role="status" hidden><i data-lucide="wifi-off"></i><span>Geen verbinding. Controleer je netwerk en probeer het opnieuw.</span></div>
   {% if user.is_authenticated %}
+  {% with hh_tab=request.GET.tab|default:"taken" %}
   <header class="app-header">
     <a class="wordmark" href="{% url 'today' %}" aria-label="Family App, naar vandaag">Family App</a>
     <nav class="desktop-dock" aria-label="Hoofdnavigatie">
-      <a href="{% url 'today' %}" aria-label="Vandaag" title="Vandaag" {% if request.resolver_match.url_name == 'today' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="house"></i><span>Vandaag</span></a>
-      <a href="{% url 'family:index' %}" aria-label="Gezin" title="Gezin" {% if request.resolver_match.namespace == 'family' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="users-round"></i><span>Gezin</span></a>
-      <a href="{% url 'household:index' %}" aria-label="Huishouden" title="Huishouden" {% if request.resolver_match.namespace == 'household' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="list-checks"></i><span>Huishouden</span></a>
-      <a href="{% url 'planning:index' %}" aria-label="Planning" title="Planning" {% if request.resolver_match.namespace == 'planning' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="calendar-days"></i><span>Planning</span></a>
-      {% if active_membership.can_manage %}<a href="{% url 'finance:index' %}" aria-label="Geld" title="Geld" {% if request.resolver_match.namespace == 'finance' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="wallet-cards"></i><span>Geld</span></a>{% endif %}
+      <a href="{% url 'today' %}" aria-label="Start" title="Start" {% if request.resolver_match.url_name == 'today' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="house"></i><span>Start</span></a>
+      <a href="{% url 'household:index' %}?tab=taken" aria-label="Taken" title="Taken" {% if request.resolver_match.namespace == 'household' and hh_tab in 'taken,routines' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="clipboard-check"></i><span>Taken</span></a>
+      <a href="{% url 'planning:index' %}" aria-label="Agenda" title="Agenda" {% if request.resolver_match.namespace == 'planning' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="calendar-days"></i><span>Agenda</span></a>
+      <a href="{% url 'household:index' %}?tab=boodschappen" aria-label="Boodschappen" title="Boodschappen" {% if request.resolver_match.namespace == 'household' and hh_tab in 'boodschappen,terugkerend,prijzen,voorraad,inzicht,maaltijden' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="shopping-cart"></i><span>Boodschappen</span></a>
       <a href="{% url 'home:index' %}" aria-label="Huis" title="Huis" {% if request.resolver_match.namespace == 'home' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="lightbulb"></i><span>Huis</span></a>
-      <details class="nav-more" data-hover-menu><summary title="Meer" aria-label="Meer"><i data-lucide="ellipsis"></i><span>Meer</span></summary><div class="speed-panel">{% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}</div></details>
+      {% if active_membership.can_manage %}<a href="{% url 'finance:index' %}" aria-label="Geld" title="Geld" {% if request.resolver_match.namespace == 'finance' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="wallet-cards"></i><span>Geld</span></a>{% endif %}
+      <details class="nav-more" data-hover-menu><summary title="Meer" aria-label="Meer"><i data-lucide="ellipsis"></i><span>Meer</span></summary><div class="speed-panel">
+        <a href="{% url 'family:index' %}" aria-label="Gezin"{% if request.resolver_match.namespace == 'family' %} class="is-active"{% endif %}><i data-lucide="users-round"></i>Gezin</a>
+        {% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"{% if request.resolver_match.namespace == 'integrations' %} class="is-active"{% endif %}><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}
+      </div></details>
     </nav>
     <div class="header-tools">
       <button class="icon-button" type="button" data-theme-toggle aria-label="Thema wisselen" title="Thema wisselen" aria-pressed="false"><i data-lucide="sun-moon"></i></button>
       <button class="icon-button" type="button" data-command-open aria-label="Zoeken en snel toevoegen"><i data-lucide="search"></i></button>
       <a class="icon-button notification-button {% if unread_notification_count %}has-unread{% endif %}" href="{% url 'notifications:index' %}" aria-label="Meldingen{% if unread_notification_count %}, {{ unread_notification_count }} ongelezen{% endif %}" title="Meldingen"><i data-lucide="bell"></i>{% if unread_notification_count %}<span>{{ unread_notification_count|floatformat:0 }}</span>{% endif %}</a>
-      <details class="account-menu" data-hover-menu><summary class="avatar" title="Account" aria-label="Accountmenu">{{ user.display_name|default:user.email|slice:":1"|upper }}</summary><div class="speed-panel account-panel"><span>{{ user.display_name|default:user.email }}</span>{% if active_household %}<small>{{ active_household.name }}</small>{% endif %}<a href="{% url 'identity:logout' %}"><i data-lucide="log-out"></i>Uitloggen</a></div></details>
+      <details class="account-menu" data-hover-menu><summary class="avatar" title="Account" aria-label="Accountmenu">{{ user.display_name|default:user.email|slice:":1"|upper }}</summary><div class="speed-panel account-panel">
+        <span>{{ user.display_name|default:user.email }}</span>{% if active_household %}<small>{{ active_household.name }}</small>{% endif %}
+        <a class="account-panel-mobile-only" href="{% url 'family:index' %}"><i data-lucide="users-round"></i>Gezin</a>
+        <a class="account-panel-mobile-only" href="{% url 'home:index' %}"><i data-lucide="lightbulb"></i>Huis</a>
+        {% if active_membership.can_manage %}<a class="account-panel-mobile-only" href="{% url 'finance:index' %}"><i data-lucide="wallet-cards"></i>Geld</a>{% endif %}
+        {% if active_membership.can_manage %}<a class="account-panel-mobile-only" href="{% url 'integrations:index' %}"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}
+        <a href="{% url 'identity:logout' %}"><i data-lucide="log-out"></i>Uitloggen</a>
+      </div></details>
     </div>
   </header>
+  {% endwith %}
   {% endif %}
   <main id="inhoud" class="app-main {% if not user.is_authenticated %}auth-main{% endif %}">
     {% if messages %}<div class="toast-stack" aria-live="polite">{% for message in messages %}<div class="toast toast-{{ message.tags|default:'info' }}"><i data-lucide="{% if message.tags == 'error' %}circle-alert{% else %}circle-check{% endif %}"></i>{{ message }}</div>{% endfor %}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
   {% if user.is_authenticated %}
-  <nav class="mobile-dock" aria-label="Hoofdnavigatie">
-    <a href="{% url 'today' %}" title="Vandaag" {% if request.resolver_match.url_name == 'today' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="house"></i><span>Vandaag</span></a>
-    <a href="{% url 'household:index' %}" title="Huishouden" {% if request.resolver_match.namespace == 'household' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="list-checks"></i><span>Doen</span></a>
-    <a href="{% url 'planning:index' %}" title="Planning" {% if request.resolver_match.namespace == 'planning' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="calendar-days"></i><span>Plan</span></a>
-    {% if active_membership.can_manage %}<a href="{% url 'finance:index' %}" title="Geld" {% if request.resolver_match.namespace == 'finance' %}class="is-active" aria-current="page"{% endif %}><i data-lucide="wallet-cards"></i><span>Geld</span></a>{% endif %}
-    <details><summary title="Meer"><i data-lucide="menu"></i><span>Meer</span></summary><div class="speed-panel mobile-more"><a href="{% url 'family:index' %}" aria-label="Gezin"><i data-lucide="users-round"></i>Gezin</a><a href="{% url 'home:index' %}" aria-label="Huis"><i data-lucide="lightbulb"></i>Huis</a><a href="{% url 'notifications:index' %}" aria-label="Meldingen"><i data-lucide="bell"></i>Meldingen{% if unread_notification_count %}<small>{{ unread_notification_count }}</small>{% endif %}</a>{% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}</div></details>
+  {% with hh_tab=request.GET.tab|default:"taken" %}
+  <nav class="arena-dock" aria-label="Hoofdnavigatie">
+    <a class="arena-dock__item{% if request.resolver_match.url_name == 'today' %} is-active{% endif %}" href="{% url 'today' %}" title="Start" {% if request.resolver_match.url_name == 'today' %}aria-current="page"{% endif %}><i data-lucide="house"></i><span>Start</span></a>
+    <a class="arena-dock__item{% if request.resolver_match.namespace == 'household' and hh_tab in 'taken,routines' %} is-active{% endif %}" href="{% url 'household:index' %}?tab=taken" title="Taken" {% if request.resolver_match.namespace == 'household' and hh_tab in 'taken,routines' %}aria-current="page"{% endif %}><i data-lucide="clipboard-check"></i><span>Taken</span></a>
+    <button class="arena-dock__fab" type="button" data-open-dialog="quick-add-dialog" aria-label="Snel toevoegen" title="Snel toevoegen"><i data-lucide="plus"></i></button>
+    <a class="arena-dock__item{% if request.resolver_match.namespace == 'planning' %} is-active{% endif %}" href="{% url 'planning:index' %}" title="Agenda" {% if request.resolver_match.namespace == 'planning' %}aria-current="page"{% endif %}><i data-lucide="calendar-days"></i><span>Agenda</span></a>
+    <a class="arena-dock__item{% if request.resolver_match.namespace == 'household' and hh_tab in 'boodschappen,terugkerend,prijzen,voorraad,inzicht,maaltijden' %} is-active{% endif %}" href="{% url 'household:index' %}?tab=boodschappen" title="Boodschappen" {% if request.resolver_match.namespace == 'household' and hh_tab in 'boodschappen,terugkerend,prijzen,voorraad,inzicht,maaltijden' %}aria-current="page"{% endif %}><i data-lucide="shopping-cart"></i><span>Bood.</span></a>
   </nav>
+  {% endwith %}
   <dialog id="command-palette" class="command-palette"><form method="dialog"><div class="dialog-title"><strong>Snel zoeken</strong><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Waar zoek je naar?<input autofocus type="search" name="q" placeholder="Taken, agenda, boodschappen…" hx-get="{% url 'search' %}" hx-trigger="keyup changed delay:220ms" hx-target="#command-results" hx-swap="innerHTML"></label><div id="command-results" class="command-results"><a href="{% url 'household:index' %}"><i data-lucide="plus"></i>Taak of boodschap toevoegen</a><a href="{% url 'planning:index' %}"><i data-lucide="calendar-plus"></i>Afspraak plannen</a><a href="{% url 'family:index' %}"><i data-lucide="contact-round"></i>Contact of wens beheren</a><a href="{% url 'search' %}"><i data-lucide="search"></i>Uitgebreid zoeken</a></div></form></dialog>
+  <dialog id="quick-add-dialog" class="modal"><form method="dialog"><div class="dialog-title"><h2>Snel toevoegen</h2><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><div class="quick-actions"><a href="{% url 'household:index' %}"><i data-lucide="list-plus"></i>Taak of boodschap</a><a href="{% url 'planning:index' %}"><i data-lucide="calendar-plus"></i>Afspraak</a><a href="{% url 'family:index' %}"><i data-lucide="gift"></i>Wens</a></div></form></dialog>
   {% endif %}
 </body>
 </html>

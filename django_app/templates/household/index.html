@@ -1,21 +1,26 @@
 {% extends 'base.html' %}
 {% block title %}Huishouden · Family App{% endblock %}
 {% block content %}
-{% include 'components/module_header.html' with title='Huishouden' description='Taken, boodschappen en routines die samen lopen.' action_id='household-add-dialog' action_label='Toevoegen' %}
-
-<nav class="module-tabs" aria-label="Huishouden onderdelen">
-  <a href="?tab=taken" class="{% if tab == 'taken' %}active{% endif %}">Taken</a>
-  <a href="?tab=boodschappen" class="{% if tab == 'boodschappen' %}active{% endif %}">Boodschappen</a>
-  <a href="?tab=terugkerend" class="{% if tab == 'terugkerend' %}active{% endif %}">Terugkerend{% if recurring_items %}<span class="tab-count">{{ recurring_items|length }}</span>{% endif %}</a>
-  <a href="?tab=prijzen" class="{% if tab == 'prijzen' %}active{% endif %}">Prijzen</a>
-  <a href="?tab=voorraad" class="{% if tab == 'voorraad' %}active{% endif %}">Voorraad{% if low_pantry_count %}<span class="tab-count">{{ low_pantry_count }}</span>{% endif %}</a>
-  <a href="?tab=inzicht" class="{% if tab == 'inzicht' %}active{% endif %}">Inzicht</a>
-  <a href="?tab=maaltijden" class="{% if tab == 'maaltijden' %}active{% endif %}">Maaltijden</a>
-  <a href="?tab=routines" class="{% if tab == 'routines' %}active{% endif %}">Routines</a>
-</nav>
+{% if tab in 'taken,routines' %}
+  {% include 'components/module_header.html' with title='Taken' description='Wat moet er gebeuren, en wie doet het.' action_id='household-add-dialog' action_label='Toevoegen' %}
+  <nav class="module-tabs" aria-label="Taken onderdelen">
+    <a href="?tab=taken" class="{% if tab == 'taken' %}active{% endif %}">Taken</a>
+    <a href="?tab=routines" class="{% if tab == 'routines' %}active{% endif %}">Routines</a>
+  </nav>
+{% else %}
+  {% include 'components/module_header.html' with title='Boodschappen' description='De lijst, voorraad en prijzen op een rij.' action_id='household-add-dialog' action_label='Toevoegen' %}
+  <nav class="module-tabs" aria-label="Boodschappen onderdelen">
+    <a href="?tab=boodschappen" class="{% if tab == 'boodschappen' %}active{% endif %}">Boodschappen</a>
+    <a href="?tab=terugkerend" class="{% if tab == 'terugkerend' %}active{% endif %}">Terugkerend{% if recurring_items %}<span class="tab-count">{{ recurring_items|length }}</span>{% endif %}</a>
+    <a href="?tab=prijzen" class="{% if tab == 'prijzen' %}active{% endif %}">Prijzen</a>
+    <a href="?tab=voorraad" class="{% if tab == 'voorraad' %}active{% endif %}">Voorraad{% if low_pantry_count %}<span class="tab-count">{{ low_pantry_count }}</span>{% endif %}</a>
+    <a href="?tab=inzicht" class="{% if tab == 'inzicht' %}active{% endif %}">Inzicht</a>
+    <a href="?tab=maaltijden" class="{% if tab == 'maaltijden' %}active{% endif %}">Maaltijden</a>
+  </nav>
+{% endif %}
 
 {% if tab == 'taken' %}
-  <section class="content-panel list-panel">
+  <section class="arena-card list-panel">
     <div class="panel-heading">
       <div>
         <h2>Open en afgerond</h2>
@@ -51,7 +56,7 @@
   {% endfor %}
 
 {% elif tab == 'boodschappen' %}
-  <section class="content-panel list-panel">
+  <section class="arena-card list-panel">
     <div class="panel-heading"><div><h2>Gedeelde lijst</h2><nav class="filter-pills" aria-label="Boodschappen filteren"><a href="?tab=boodschappen&amp;shopping_filter=open" class="{% if shopping_filter == 'open' %}active{% endif %}">Open</a><a href="?tab=boodschappen&amp;shopping_filter=afgerond" class="{% if shopping_filter == 'afgerond' %}active{% endif %}">Afgerond</a><a href="?tab=boodschappen&amp;shopping_filter=alles" class="{% if shopping_filter == 'alles' %}active{% endif %}">Alles</a></nav></div><span class="status-pill">{{ shopping_items|length }} producten</span></div>
     <ul class="task-list">{% for item in shopping_items %}{% include 'household/partials/shopping_row.html' %}{% empty %}<li class="empty-copy">De boodschappenlijst is leeg.</li>{% endfor %}</ul>
   </section>
@@ -71,7 +76,7 @@
   {% endfor %}
 
 {% elif tab == 'terugkerend' %}
-  <section class="content-panel list-panel recurring-shopping-panel">
+  <section class="arena-card list-panel recurring-shopping-panel">
     <div class="panel-heading"><div><h2>Terugkerende boodschappen</h2><small>Producten worden na het ingestelde ritme opnieuw op de gedeelde lijst gezet.</small></div><span class="status-pill">{{ recurring_items|length }} producten</span></div>
     <ul class="clean-list recurring-shopping-list">
       {% for item in recurring_items %}
@@ -99,7 +104,7 @@
   {% endfor %}
 
 {% elif tab == 'prijzen' %}
-  <section class="content-panel price-panel">
+  <section class="arena-card price-panel">
     <div class="panel-heading"><div><h2>Prijsvergelijking</h2><small>Basisprijzen via Checkjebon. Aanbiedingen van PrijsProfeet staan er apart bij en tellen niet mee in de mandjetotalen.{% if latest_price_at %} Bijgewerkt {{ latest_price_at|date:'d M H:i' }}.{% endif %}</small>{% if price_provider_statuses %}<div class="price-provider-statuses" aria-label="Status prijsbronnen">{% for provider_status in price_provider_statuses %}<span class="price-provider-status {% if provider_status.status == 'failed' %}is-failed{% endif %}" title="Gecontroleerd {{ provider_status.checked_at|date:'d M H:i' }}"><i data-lucide="{% if provider_status.status == 'failed' %}circle-alert{% else %}circle-check{% endif %}"></i><strong>{{ provider_status.get_provider_display }}</strong><small>{{ provider_status.detail|default:provider_status.get_status_display }}</small></span>{% endfor %}</div>{% endif %}</div><div class="panel-actions"><form method="post" action="{% url 'household:refresh_prices' %}">{% csrf_token %}<button class="icon-button" title="Prijzen nu verversen" aria-label="Prijzen nu verversen"><i data-lucide="refresh-cw"></i></button></form><span class="status-pill">{{ price_items|length }} producten</span></div></div>
     <div class="price-matrix" aria-label="Prijsvergelijking per product en supermarkt">
       <div class="price-matrix-inner">
@@ -132,7 +137,7 @@
   </section>
 
 {% elif tab == 'voorraad' %}
-  <section class="content-panel list-panel pantry-panel">
+  <section class="arena-card list-panel pantry-panel">
     <div class="panel-heading"><div><h2>Voorraad</h2><small>Houd bij wat er thuis is en vul laagstaande producten aan.</small></div>{% if low_pantry_count %}<span class="status-pill pantry-low-pill">{{ low_pantry_count }} laag</span>{% endif %}</div>
     <ul class="clean-list pantry-list">
       {% for item in pantry_items %}
@@ -146,13 +151,13 @@
 
 {% elif tab == 'inzicht' %}
   <div class="insight-stack">
-    <section class="content-panel insight-panel"><div class="panel-heading"><div><h2>Boodschappatronen</h2><small>Lijstgedrag, daadwerkelijk gekochte producten en prijsbewegingen van de afgelopen 90 dagen.</small></div></div><div class="insight-columns"><div><h3>Vaak gekocht</h3><ul class="insight-list">{% for product in frequent_products %}<li><strong>{{ product.name }}</strong><span>{{ product.times_bought }}x</span><small>Laatst {{ product.last_bought|date:'d M' }}</small></li>{% empty %}<li class="empty-copy">Nog niet genoeg afgevinkte producten voor een patroon.</li>{% endfor %}</ul></div><div><h3>Gekocht via bonnen</h3><ul class="insight-list">{% for product in receipt_products %}<li><strong>{{ product.name }}</strong><span>{{ product.times_bought }}x</span><small>Laatst {{ product.last_bought|date:'d M' }} · € {{ product.total_spend|floatformat:2 }}</small></li>{% empty %}<li class="empty-copy">Upload een bon om werkelijke aankopen te herkennen.</li>{% endfor %}</ul></div><div><h3>Prijsbewegingen</h3><ul class="insight-list">{% for trend in price_trends %}<li><strong>{{ trend.item_name }}</strong><span class="price-trend-{{ trend.direction }}">{% if trend.direction == 'up' %}+{% endif %}€ {{ trend.delta }}</span><small>{{ trend.retailer_label }} · € {{ trend.first_price }} naar € {{ trend.current_price }}</small></li>{% empty %}<li class="empty-copy">Prijswijzigingen verschijnen na meerdere prijscontroles.</li>{% endfor %}</ul></div></div></section>
-    <section class="content-panel list-panel"><div class="panel-heading"><div><h2>Bonnen</h2><small>Vergelijk bonnen met de werkelijke bankafschrijving.</small></div><button class="primary-icon-action" type="button" data-open-dialog="receipt-dialog"><i data-lucide="scan-line"></i></button></div><ul class="clean-list">{% for receipt in receipts %}<li><i data-lucide="receipt"></i><div><strong>{{ receipt.retailer|default:'Winkelbon' }}{% if receipt.total_amount %} · € {{ receipt.total_amount }}{% endif %}</strong><small>{{ receipt.purchased_on|date:'d M Y' }} · {{ receipt.get_ocr_status_display }}</small>{% if receipt.recognized_line_items %}<details class="receipt-lines"><summary><i data-lucide="shopping-basket"></i>{{ receipt.recognized_line_items|length }} product{% if receipt.recognized_line_items|length != 1 %}en{% endif %} herkend</summary><ul>{% for item in receipt.recognized_line_items %}<li><span>{% if item.quantity %}{{ item.quantity|floatformat:'-2' }}x {% endif %}{{ item.name }}{% if item.shopping_item %}<small>gekoppeld aan {{ item.shopping_item.name }}</small>{% endif %}</span><strong>€ {{ item.total_price }}</strong>{% if item.comparison_expected is not None %}<small class="receipt-price-comparison {% if item.comparison_delta > 0 %}is-higher{% elif item.comparison_delta < 0 %}is-lower{% endif %}">Vergelijkprijs € {{ item.comparison_expected|floatformat:2 }}{% if item.comparison_delta %} · {% if item.comparison_delta > 0 %}+{% endif %}€ {{ item.comparison_delta|floatformat:2 }}{% endif %}</small>{% endif %}</li>{% endfor %}</ul></details>{% endif %}{% if receipt.transaction %}<small class="receipt-match"><i data-lucide="link-2"></i>{{ receipt.transaction.counterparty|default:receipt.transaction.description }} · bank € {{ receipt.bank_amount }}{% if receipt.amount_difference %} · verschil € {{ receipt.amount_difference }}{% endif %}</small>{% else %}<small class="receipt-match is-unmatched"><i data-lucide="scan-search"></i>Nog geen passende bankafschrijving</small>{% endif %}</div></li>{% empty %}<li class="empty-copy">Nog geen bonnen opgeslagen.</li>{% endfor %}</ul></section>
+    <section class="arena-card insight-panel"><div class="panel-heading"><div><h2>Boodschappatronen</h2><small>Lijstgedrag, daadwerkelijk gekochte producten en prijsbewegingen van de afgelopen 90 dagen.</small></div></div><div class="insight-columns"><div><h3>Vaak gekocht</h3><ul class="insight-list">{% for product in frequent_products %}<li><strong>{{ product.name }}</strong><span>{{ product.times_bought }}x</span><small>Laatst {{ product.last_bought|date:'d M' }}</small></li>{% empty %}<li class="empty-copy">Nog niet genoeg afgevinkte producten voor een patroon.</li>{% endfor %}</ul></div><div><h3>Gekocht via bonnen</h3><ul class="insight-list">{% for product in receipt_products %}<li><strong>{{ product.name }}</strong><span>{{ product.times_bought }}x</span><small>Laatst {{ product.last_bought|date:'d M' }} · € {{ product.total_spend|floatformat:2 }}</small></li>{% empty %}<li class="empty-copy">Upload een bon om werkelijke aankopen te herkennen.</li>{% endfor %}</ul></div><div><h3>Prijsbewegingen</h3><ul class="insight-list">{% for trend in price_trends %}<li><strong>{{ trend.item_name }}</strong><span class="price-trend-{{ trend.direction }}">{% if trend.direction == 'up' %}+{% endif %}€ {{ trend.delta }}</span><small>{{ trend.retailer_label }} · € {{ trend.first_price }} naar € {{ trend.current_price }}</small></li>{% empty %}<li class="empty-copy">Prijswijzigingen verschijnen na meerdere prijscontroles.</li>{% endfor %}</ul></div></div></section>
+    <section class="arena-card list-panel"><div class="panel-heading"><div><h2>Bonnen</h2><small>Vergelijk bonnen met de werkelijke bankafschrijving.</small></div><button class="primary-icon-action" type="button" data-open-dialog="receipt-dialog"><i data-lucide="scan-line"></i></button></div><ul class="clean-list">{% for receipt in receipts %}<li><i data-lucide="receipt"></i><div><strong>{{ receipt.retailer|default:'Winkelbon' }}{% if receipt.total_amount %} · € {{ receipt.total_amount }}{% endif %}</strong><small>{{ receipt.purchased_on|date:'d M Y' }} · {{ receipt.get_ocr_status_display }}</small>{% if receipt.recognized_line_items %}<details class="receipt-lines"><summary><i data-lucide="shopping-basket"></i>{{ receipt.recognized_line_items|length }} product{% if receipt.recognized_line_items|length != 1 %}en{% endif %} herkend</summary><ul>{% for item in receipt.recognized_line_items %}<li><span>{% if item.quantity %}{{ item.quantity|floatformat:'-2' }}x {% endif %}{{ item.name }}{% if item.shopping_item %}<small>gekoppeld aan {{ item.shopping_item.name }}</small>{% endif %}</span><strong>€ {{ item.total_price }}</strong>{% if item.comparison_expected is not None %}<small class="receipt-price-comparison {% if item.comparison_delta > 0 %}is-higher{% elif item.comparison_delta < 0 %}is-lower{% endif %}">Vergelijkprijs € {{ item.comparison_expected|floatformat:2 }}{% if item.comparison_delta %} · {% if item.comparison_delta > 0 %}+{% endif %}€ {{ item.comparison_delta|floatformat:2 }}{% endif %}</small>{% endif %}</li>{% endfor %}</ul></details>{% endif %}{% if receipt.transaction %}<small class="receipt-match"><i data-lucide="link-2"></i>{{ receipt.transaction.counterparty|default:receipt.transaction.description }} · bank € {{ receipt.bank_amount }}{% if receipt.amount_difference %} · verschil € {{ receipt.amount_difference }}{% endif %}</small>{% else %}<small class="receipt-match is-unmatched"><i data-lucide="scan-search"></i>Nog geen passende bankafschrijving</small>{% endif %}</div></li>{% empty %}<li class="empty-copy">Nog geen bonnen opgeslagen.</li>{% endfor %}</ul></section>
   </div>
   <dialog id="receipt-dialog" class="modal"><form method="post" enctype="multipart/form-data" action="{% url 'household:add_receipt' %}">{% csrf_token %}<div class="dialog-title"><h2>Bon toevoegen</h2><button class="icon-button" type="button" data-close-dialog><i data-lucide="x"></i></button></div>{{ receipt_form.as_p }}<button class="button button-primary">Opslaan</button></form></dialog>
 
 {% elif tab == 'maaltijden' %}
-  <section class="content-panel list-panel">
+  <section class="arena-card list-panel">
     <div class="panel-heading"><h2>Komende maaltijden</h2></div>
     <ul class="clean-list">
       {% for meal in meals %}
@@ -176,7 +181,7 @@
   {% endfor %}
 
 {% else %}
-  <section class="content-panel list-panel">
+  <section class="arena-card list-panel">
     <div class="panel-heading"><h2>Actieve routines</h2></div>
     <ul class="clean-list">
       {% for routine in routines %}

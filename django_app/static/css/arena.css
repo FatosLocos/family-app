@@ -1,0 +1,93 @@
+/* Arena component layer — new classes only, additive to app.css.
+   Existing components (.avatar, .icon-button, .button, .modal, …) stay in
+   app.css and keep working via the token aliases defined there. */
+
+/* ── Card ── */
+.arena-card{background:var(--surface);border-radius:var(--radius-xl);box-shadow:var(--hairline);color:var(--text);padding:16px}
+.arena-card--interactive{cursor:pointer;transition:transform .12s var(--ease)}
+.arena-card--interactive:active{transform:scale(.99)}
+
+/* ── StatTile ── */
+.arena-stat-tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-2xl);box-shadow:var(--shadow-card);padding:20px 22px}
+.arena-stat-tile__label{font-family:var(--font-body);font-size:12px;font-weight:600;color:var(--text-2);margin-top:4px}
+.arena-stat-tile__figure{font-family:var(--font-display);font-weight:800;font-size:38px;line-height:1;letter-spacing:-.6px;color:var(--text);display:flex;align-items:baseline;gap:1px}
+.arena-stat-tile__figure .unit{font-size:22px;font-weight:800}
+.arena-stat-tile.is-hero{padding:20px 22px}
+.arena-stat-tile.is-hero .arena-stat-tile__label{font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-top:0}
+.arena-stat-tile.is-hero .arena-stat-tile__figure{font-weight:900;font-size:50px;letter-spacing:-1.5px;color:var(--accent-text);margin:8px 0 12px}
+.arena-stat-tile.is-hero .arena-stat-tile__figure .unit{font-size:24px}
+.arena-stat-tile__track{height:9px;border-radius:5px;background:var(--track);overflow:hidden}
+.arena-stat-tile__fill{height:100%;border-radius:5px;background:var(--accent);transition:width .55s var(--ease)}
+
+/* ── Chip ── */
+.arena-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:var(--radius-pill);font-family:var(--font-body);font-size:12px;font-weight:700;background:var(--accent-soft);color:var(--accent-text)}
+.arena-chip svg{width:13px;height:13px}
+.arena-chip--muted{background:var(--surface-2);color:var(--text-2)}
+a.arena-chip,button.arena-chip{cursor:pointer;border:0}
+
+/* ── Badge ── */
+.arena-badge{display:inline-block;padding:2px 8px;border-radius:20px;font-family:var(--font-body);font-size:11px;font-weight:700;line-height:1.5;background:var(--track);color:var(--text-2)}
+.arena-badge--accent{background:var(--accent-soft);color:var(--accent-text)}
+.arena-badge--green{background:var(--green-soft);color:var(--green)}
+.arena-badge--red{background:var(--red-soft);color:var(--red)}
+.arena-badge--amber{background:var(--amber-soft);color:var(--amber)}
+
+/* ── Switch (checkbox-driven, no JS required) ── */
+.arena-switch{display:inline-flex;align-items:center;gap:10px;cursor:pointer}
+.arena-switch input{position:absolute;opacity:0;width:1px;height:1px}
+.arena-switch__track{width:44px;height:26px;flex-shrink:0;border-radius:var(--radius-pill);background:var(--track);padding:3px;display:inline-flex;align-items:center;transition:background-color .2s var(--ease)}
+.arena-switch__knob{width:20px;height:20px;border-radius:50%;background:var(--surface);box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s var(--ease),background-color .2s}
+.arena-switch input:checked+.arena-switch__track{background:var(--accent)}
+.arena-switch input:checked+.arena-switch__track .arena-switch__knob{transform:translateX(18px);background:var(--accent-ink)}
+.arena-switch input:disabled+.arena-switch__track{opacity:.5;cursor:not-allowed}
+.arena-switch input:focus-visible+.arena-switch__track{outline:2px solid var(--accent);outline-offset:2px}
+.arena-switch__label{font-family:var(--font-body);font-size:14px;font-weight:600;color:var(--text)}
+
+/* ── ProgressBar ── */
+.arena-progress{height:9px;border-radius:5px;background:var(--track);overflow:hidden}
+.arena-progress__fill{height:100%;border-radius:5px;background:var(--accent);transition:width .55s var(--ease)}
+
+/* ── SegmentedControl ── */
+.arena-segmented{display:inline-flex;padding:3px;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-pill)}
+.arena-segmented a,.arena-segmented button{border:0;cursor:pointer;padding:7px 16px;border-radius:var(--radius-pill);font-family:var(--font-body);font-size:13px;font-weight:700;background:transparent;color:var(--text-2);transition:background-color .18s,color .18s}
+.arena-segmented a.is-active,.arena-segmented button.is-active{background:var(--accent);color:var(--accent-ink)}
+
+/* ── CategoryTile ── */
+.arena-category-tile{width:40px;height:40px;flex-shrink:0;border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:800;font-size:19px;letter-spacing:-.5px;background:var(--accent-soft);color:var(--accent-text)}
+.arena-category-tile--sm{width:32px;height:32px;font-size:15px}
+.arena-category-tile--lg{width:48px;height:48px;font-size:23px}
+.arena-category-tile svg{width:20px;height:20px}
+
+/* ── ListRow ── */
+.arena-list-row{display:flex;align-items:center;gap:11px;padding:11px 12px;border-top:1px solid var(--border)}
+.arena-list-row:first-child{border-top:0}
+a.arena-list-row,.arena-list-row[role="button"]{cursor:pointer}
+.arena-list-row__leading{flex-shrink:0;display:flex}
+.arena-list-row__body{flex:1;min-width:0}
+.arena-list-row__title{font-size:14.5px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arena-list-row__subtitle{font-size:12px;color:var(--text-2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arena-list-row__trailing{flex-shrink:0;display:flex;align-items:center;gap:8px}
+.arena-list-row__chevron{color:var(--text-3);display:inline-flex;flex-shrink:0}
+.arena-list-row__chevron svg{width:18px;height:18px}
+
+/* ── App shell / sidebar nav (desktop) ── */
+.app-shell{display:flex;min-height:100vh}
+.app-sidebar{flex:0 0 232px;display:flex;flex-direction:column;gap:2px;padding:20px 12px;border-right:1px solid var(--border);background:var(--surface-2)}
+.arena-nav-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:var(--radius-md);color:var(--text-2);font-family:var(--font-body);font-size:13.5px;font-weight:600}
+.arena-nav-item svg{width:19px;height:19px;flex-shrink:0}
+.arena-nav-item:hover{background:var(--surface);color:var(--text)}
+.arena-nav-item.is-active{background:var(--accent-soft);color:var(--accent-text)}
+
+/* ── Bottom dock + FAB (mobile only, reuses the app's 760px breakpoint) ── */
+.arena-dock{display:none}
+@media(max-width:760px){.arena-dock{position:fixed;z-index:30;left:0;right:0;bottom:0;display:grid;grid-template-columns:1fr 1fr auto 1fr 1fr;align-items:end;gap:2px;padding:6px 6px max(6px, env(safe-area-inset-bottom));border-top:1px solid var(--border);background:color-mix(in srgb,var(--surface) 95%,transparent);backdrop-filter:blur(16px)}}
+
+/* Account-menu overflow items (Gezin/Huis/Geld/Instellingen) — desktop already has
+   direct nav for these, so only surface them here on mobile where the dock is FAB-only. */
+.account-panel-mobile-only{display:none}
+@media(max-width:760px){.account-panel-mobile-only{display:flex}}
+.arena-dock__item{display:grid;place-items:center;gap:2px;height:52px;padding:4px;color:var(--text-2);font-family:var(--font-body);font-size:10px;font-weight:700;border-radius:var(--radius-md)}
+.arena-dock__item svg{width:20px;height:20px}
+.arena-dock__item.is-active{color:var(--accent-text)}
+.arena-dock__fab{position:relative;top:-18px;width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);box-shadow:var(--shadow-fab);border:none;cursor:pointer}
+.arena-dock__fab svg{width:26px;height:26px}
