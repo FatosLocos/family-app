@@ -16,6 +16,17 @@ class HouseholdRecord(models.Model):
         abstract = True
 
 
+class TaskList(HouseholdRecord):
+    name = models.CharField(max_length=120)
+
+    class Meta:
+        ordering = ("created_at", "id")
+        constraints = [models.UniqueConstraint(fields=("household", "name"), name="unique_task_list_name")]
+
+    def __str__(self):
+        return self.name
+
+
 class Task(HouseholdRecord):
     class Priority(models.IntegerChoices):
         LOW = 1, "Laag"
@@ -28,9 +39,11 @@ class Task(HouseholdRecord):
     due_at = models.DateTimeField(null=True, blank=True)
     priority = models.PositiveSmallIntegerField(choices=Priority.choices, default=Priority.NORMAL)
     completed_at = models.DateTimeField(null=True, blank=True)
+    list = models.ForeignKey(TaskList, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
+    position = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ("completed_at", "due_at", "-priority", "created_at")
+        ordering = ("position", "created_at")
 
 
 class ShoppingList(HouseholdRecord):

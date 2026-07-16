@@ -20,6 +20,7 @@
   <div class="agenda-grid agenda-grid-{{ view }}" role="grid" aria-label="{{ view|capfirst }}agenda">
     {% for day in planner_days %}
       <section class="agenda-day {% if day.is_today %}is-today{% endif %}" role="gridcell">
+        {% if view == 'month' %}<a class="agenda-day-mobile-link" href="?view=day&date={{ day.date|date:'Y-m-d' }}" aria-label="Bekijk {{ day.date|date:'j F' }}">{% if day.events %}<span class="agenda-day-dot" aria-hidden="true"></span>{% endif %}</a>{% endif %}
         <header><span>{{ day.date|date:'D' }}</span><strong>{{ day.date|date:'j' }}</strong></header>
         <div class="agenda-day-events">
           {% for event in day.events %}

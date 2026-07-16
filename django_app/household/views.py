@@ -1,10 +1,14 @@
+from collections import defaultdict
+
 from django.contrib import messages
+from django.db import transaction
 from django.db.models import Count, Max
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from datetime import timedelta
 from decimal import Decimal
+import json
 import re
 
 from django.utils import timezone
@@ -12,7 +16,7 @@ from django.views.decorators.http import require_POST
 
 from households.decorators import household_required
 from household.forms import MealIngredientForm, MealPlanForm, PantryItemForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
-from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task
+from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
 from notifications.models import Notification
@@ -77,13 +81,20 @@ def index(request):
     shopping_filter = request.GET.get("shopping_filter", "open")
     household = request.household
     default_list, _ = ShoppingList.objects.get_or_create(household=household, name="Boodschappen", defaults={"is_default": True})
-    tasks = Task.objects.for_household(household).select_related("assigned_to")
+    tasks = Task.objects.for_household(household).select_related("assigned_to", "list")
     if task_filter == "vandaag":
         tasks = tasks.filter(completed_at__isnull=True, due_at__date=timezone.localdate())
     elif task_filter == "afgerond":
         tasks = tasks.filter(completed_at__isnull=False)
     elif task_filter != "alles":
         tasks = tasks.filter(completed_at__isnull=True)
+    task_lists = list(TaskList.objects.for_household(household))
+    tasks = list(tasks[:300])
+    tasks_by_list = defaultdict(list)
+    for task in tasks:
+        tasks_by_list[task.list_id].append(task)
+    task_groups = [{"list": task_list, "tasks": tasks_by_list.get(task_list.id, [])} for task_list in task_lists]
+    task_groups.append({"list": None, "tasks": tasks_by_list.get(None, [])})
     members = request.user.__class__.objects.filter(memberships__household=household).distinct()
     task_form = TaskForm()
     task_form.fields["assigned_to"].queryset = members
@@ -240,7 +251,9 @@ def index(request):
     context = {
         "tab": tab, "task_filter": task_filter, "shopping_filter": shopping_filter, "today": timezone.localdate(),
         "task_form": task_form, "shopping_form": ShoppingItemForm(initial={"recurring": tab == "terugkerend"}), "meal_form": MealPlanForm(), "pantry_form": PantryItemForm(), "routine_form": routine_form,
-        "tasks": tasks[:50],
+        "tasks": tasks,
+        "task_lists": task_lists,
+        "task_groups": task_groups,
         "shopping_items": shopping_items[:50],
         "recurring_items": recurring_items,
         "price_items": price_items,
@@ -309,6 +322,95 @@ def toggle_task(request, task_id):
     if request.GET.get("next") == "today":
         return redirect("today")
     return redirect("household:index")
+
+
+@household_required
+@require_POST
+def add_task_list(request):
+    name = request.POST.get("name", "").strip()
+    if name:
+        TaskList.objects.get_or_create(household=request.household, name=name)
+        messages.success(request, "Lijstje toegevoegd.")
+    else:
+        messages.error(request, "Geef het lijstje een naam.")
+    return _household_tab_redirect("taken")
+
+
+@household_required
+@require_POST
+def delete_task_list(request, list_id):
+    task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
+    with transaction.atomic():
+        base_position = Task.objects.for_household(request.household).filter(list__isnull=True).aggregate(Max("position"))["position__max"]
+        next_position = (base_position + 1) if base_position is not None else 0
+        for offset, task in enumerate(Task.objects.for_household(request.household).filter(list=task_list).order_by("position", "created_at")):
+            task.list = None
+            task.position = next_position + offset
+            task.save(update_fields=["list", "position", "updated_at"])
+        task_list.delete()
+    messages.success(request, "Lijstje verwijderd. De taken staan nu onder Zonder lijst.")
+    return _household_tab_redirect("taken")
+
+
+@household_required
+@require_POST
+def reorder_tasks(request):
+    """Persist a drag-and-drop move: task_id into target_list_id, at its new spot in ordered_task_ids.
+
+    ordered_task_ids only contains the tasks currently VISIBLE under the active
+    filter pill (open/vandaag/alles/afgerond), so positions are merged into the
+    full underlying sequence rather than overwritten wholesale — otherwise a
+    hidden task (e.g. already completed while "Open" is active) would collide
+    with a visible one sharing the same position slot.
+    """
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    task_id = payload.get("task_id")
+    target_list_id = payload.get("target_list_id")
+    ordered_task_ids = payload.get("ordered_task_ids")
+    if not isinstance(task_id, int) or not isinstance(ordered_task_ids, list) or not ordered_task_ids:
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    if len(set(ordered_task_ids)) != len(ordered_task_ids):
+        return JsonResponse({"error": "Dubbele taak in volgorde."}, status=400)
+
+    household = request.household
+    task = get_object_or_404(Task.objects.for_household(household), pk=task_id)
+    target_list = None
+    if target_list_id is not None:
+        target_list = get_object_or_404(TaskList.objects.for_household(household), pk=target_list_id)
+
+    valid_ids = set(Task.objects.for_household(household).filter(pk__in=ordered_task_ids).values_list("id", flat=True))
+    if task_id not in valid_ids or set(ordered_task_ids) - valid_ids:
+        return JsonResponse({"error": "Onbekende taak."}, status=400)
+
+    def _renumber(list_obj, incoming_order):
+        current = list(Task.objects.for_household(household).filter(list=list_obj).order_by("position", "created_at"))
+        incoming_queue = list(incoming_order)
+        merged_ids = []
+        for existing_task in current:
+            if existing_task.id in incoming_order:
+                merged_ids.append(incoming_queue.pop(0))
+            else:
+                merged_ids.append(existing_task.id)
+        by_id = {t.id: t for t in current}
+        for index, tid in enumerate(merged_ids):
+            existing_task = by_id.get(tid)
+            if existing_task is not None and existing_task.position != index:
+                existing_task.position = index
+                existing_task.save(update_fields=["position", "updated_at"])
+
+    with transaction.atomic():
+        source_list_id = task.list_id
+        target_list_pk = target_list.id if target_list else None
+        task.list = target_list
+        task.save(update_fields=["list", "updated_at"])
+        _renumber(target_list, ordered_task_ids)
+        if source_list_id != target_list_pk:
+            source_list = TaskList.objects.filter(household=household, pk=source_list_id).first() if source_list_id else None
+            _renumber(source_list, [])
+    return JsonResponse({"status": "ok"})
 
 
 @household_required

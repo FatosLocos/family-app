@@ -15,21 +15,21 @@
   {% if webpush_vapid_key %}<meta name="webpush-vapid-key" content="{{ webpush_vapid_key }}">{% endif %}
   <title>{% block title %}Family App{% endblock %}</title>
   <link rel="manifest" href="{% static 'manifest.webmanifest' %}">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=4">
-  <link rel="stylesheet" href="{% static 'css/arena.css' %}?v=1">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=5">
+  <link rel="stylesheet" href="{% static 'css/arena.css' %}?v=2">
   <link rel="stylesheet" href="{% static 'css/auth.css' %}?v=1">
   <link rel="stylesheet" href="{% static 'css/ux.css' %}?v=6">
-  <link rel="stylesheet" href="{% static 'css/planning.css' %}?v=1">
-  <link rel="stylesheet" href="{% static 'css/family.css' %}?v=2">
-  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=8">
+  <link rel="stylesheet" href="{% static 'css/planning.css' %}?v=2">
+  <link rel="stylesheet" href="{% static 'css/family.css' %}?v=3">
+  <link rel="stylesheet" href="{% static 'css/household.css' %}?v=11">
   <link rel="stylesheet" href="{% static 'css/finance.css' %}">
   <link rel="stylesheet" href="{% static 'css/search.css' %}">
-  <link rel="stylesheet" href="{% static 'css/integrations.css' %}?v=1">
+  <link rel="stylesheet" href="{% static 'css/integrations.css' %}?v=3">
   <link rel="stylesheet" href="{% static 'css/home.css' %}?v=61">
   <link rel="stylesheet" href="{% static 'css/notifications.css' %}?v=1">
   <script src="{% static 'js/htmx.min.js' %}" defer></script>
   <script src="{% static 'js/lucide.min.js' %}" defer></script>
-  <script src="{% static 'js/app.js' %}?v=34" defer></script>
+  <script src="{% static 'js/app.js' %}?v=35" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#inhoud">Naar inhoud</a>
@@ -51,15 +51,17 @@
       </div></details>
     </nav>
     <div class="header-tools">
+      <details class="nav-more mobile-more" data-hover-menu><summary class="icon-button" title="Meer" aria-label="Meer"><i data-lucide="ellipsis"></i></summary><div class="speed-panel">
+        <a href="{% url 'family:index' %}" aria-label="Gezin"{% if request.resolver_match.namespace == 'family' %} class="is-active"{% endif %}><i data-lucide="users-round"></i>Gezin</a>
+        <a href="{% url 'home:index' %}" aria-label="Huis"{% if request.resolver_match.namespace == 'home' %} class="is-active"{% endif %}><i data-lucide="lightbulb"></i>Huis</a>
+        {% if active_membership.can_manage %}<a href="{% url 'finance:index' %}" aria-label="Geld"{% if request.resolver_match.namespace == 'finance' %} class="is-active"{% endif %}><i data-lucide="wallet-cards"></i>Geld</a>{% endif %}
+        {% if active_membership.can_manage %}<a href="{% url 'integrations:index' %}" aria-label="Instellingen"{% if request.resolver_match.namespace == 'integrations' %} class="is-active"{% endif %}><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}
+      </div></details>
       <button class="icon-button" type="button" data-theme-toggle aria-label="Thema wisselen" title="Thema wisselen" aria-pressed="false"><i data-lucide="sun-moon"></i></button>
       <button class="icon-button" type="button" data-command-open aria-label="Zoeken en snel toevoegen"><i data-lucide="search"></i></button>
       <a class="icon-button notification-button {% if unread_notification_count %}has-unread{% endif %}" href="{% url 'notifications:index' %}" aria-label="Meldingen{% if unread_notification_count %}, {{ unread_notification_count }} ongelezen{% endif %}" title="Meldingen"><i data-lucide="bell"></i>{% if unread_notification_count %}<span>{{ unread_notification_count|floatformat:0 }}</span>{% endif %}</a>
       <details class="account-menu" data-hover-menu><summary class="avatar" title="Account" aria-label="Accountmenu">{{ user.display_name|default:user.email|slice:":1"|upper }}</summary><div class="speed-panel account-panel">
         <span>{{ user.display_name|default:user.email }}</span>{% if active_household %}<small>{{ active_household.name }}</small>{% endif %}
-        <a class="account-panel-mobile-only" href="{% url 'family:index' %}"><i data-lucide="users-round"></i>Gezin</a>
-        <a class="account-panel-mobile-only" href="{% url 'home:index' %}"><i data-lucide="lightbulb"></i>Huis</a>
-        {% if active_membership.can_manage %}<a class="account-panel-mobile-only" href="{% url 'finance:index' %}"><i data-lucide="wallet-cards"></i>Geld</a>{% endif %}
-        {% if active_membership.can_manage %}<a class="account-panel-mobile-only" href="{% url 'integrations:index' %}"><i data-lucide="settings-2"></i>Instellingen</a>{% endif %}
         <a href="{% url 'identity:logout' %}"><i data-lucide="log-out"></i>Uitloggen</a>
       </div></details>
     </div>

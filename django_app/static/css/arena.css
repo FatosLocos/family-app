@@ -82,10 +82,10 @@ a.arena-list-row,.arena-list-row[role="button"]{cursor:pointer}
 .arena-dock{display:none}
 @media(max-width:760px){.arena-dock{position:fixed;z-index:30;left:0;right:0;bottom:0;display:grid;grid-template-columns:1fr 1fr auto 1fr 1fr;align-items:end;gap:2px;padding:6px 6px max(6px, env(safe-area-inset-bottom));border-top:1px solid var(--border);background:color-mix(in srgb,var(--surface) 95%,transparent);backdrop-filter:blur(16px)}}
 
-/* Account-menu overflow items (Gezin/Huis/Geld/Instellingen) — desktop already has
-   direct nav for these, so only surface them here on mobile where the dock is FAB-only. */
-.account-panel-mobile-only{display:none}
-@media(max-width:760px){.account-panel-mobile-only{display:flex}}
+/* "Meer" overflow button (Gezin/Huis/Geld/Instellingen) in the mobile header —
+   desktop already reaches these via the sidebar pills + its own .nav-more. */
+.mobile-more{display:none}
+@media(max-width:760px){.mobile-more{display:block}}
 .arena-dock__item{display:grid;place-items:center;gap:2px;height:52px;padding:4px;color:var(--text-2);font-family:var(--font-body);font-size:10px;font-weight:700;border-radius:var(--radius-md)}
 .arena-dock__item svg{width:20px;height:20px}
 .arena-dock__item.is-active{color:var(--accent-text)}

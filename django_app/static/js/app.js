@@ -732,6 +732,118 @@
     return document.cookie.split("; ").find((value) => value.startsWith("csrftoken="))?.split("=")[1] || "";
   };
 
+  // Taken: lijstjes drag-and-drop. Built on Pointer Events (not native HTML5
+  // drag-and-drop) so the same code path works for mouse, touch and pen —
+  // native HTML5 DnD has no touch fallback at all.
+  const registerTaskDragDrop = () => {
+    if (document.body.dataset.taskDndWired) return;
+    document.body.dataset.taskDndWired = "true";
+
+    const AUTO_SCROLL_MARGIN = 70;
+    const AUTO_SCROLL_SPEED = 14;
+    let drag = null;
+
+    const zones = () => Array.from(document.querySelectorAll("[data-task-drop-zone]"));
+    const zoneRows = (zone, exclude) => Array.from(zone.querySelectorAll(":scope > [data-task-id]")).filter((el) => el !== exclude);
+    const clearDropTargets = () => zones().forEach((zone) => zone.classList.remove("is-drop-target"));
+
+    const ensureEmptyPlaceholder = (zone) => {
+      if (zoneRows(zone).length > 0) {
+        zone.querySelector(":scope > .task-list-empty")?.remove();
+      } else if (!zone.querySelector(":scope > .task-list-empty")) {
+        const placeholder = document.createElement("li");
+        placeholder.className = "empty-copy task-list-empty";
+        placeholder.textContent = "Sleep hier taken naartoe.";
+        zone.append(placeholder);
+      }
+    };
+
+    const zoneUnderPoint = (x, y) => {
+      const row = drag.row;
+      const previous = row.style.pointerEvents;
+      row.style.pointerEvents = "none";
+      const el = document.elementFromPoint(x, y);
+      row.style.pointerEvents = previous;
+      return el?.closest("[data-task-drop-zone]") || null;
+    };
+
+    const repositionRow = (clientX, clientY) => {
+      const zone = zoneUnderPoint(clientX, clientY);
+      if (!zone) return;
+      clearDropTargets();
+      zone.classList.add("is-drop-target");
+      zone.querySelector(":scope > .task-list-empty")?.remove();
+      const siblings = zoneRows(zone, drag.row);
+      let target = null;
+      for (const sibling of siblings) {
+        const rect = sibling.getBoundingClientRect();
+        if (clientY < rect.top + rect.height / 2) { target = sibling; break; }
+      }
+      const alreadyInPlace = drag.row.parentElement === zone && (target ? drag.row.nextElementSibling === target : !drag.row.nextElementSibling);
+      if (alreadyInPlace) return;
+      if (target) zone.insertBefore(drag.row, target);
+      else zone.append(drag.row);
+      drag.startY = clientY;
+      drag.row.style.transform = "translateY(0px)";
+    };
+
+    const autoScroll = (clientY) => {
+      if (clientY < AUTO_SCROLL_MARGIN) window.scrollBy(0, -AUTO_SCROLL_SPEED);
+      else if (clientY > window.innerHeight - AUTO_SCROLL_MARGIN) window.scrollBy(0, AUTO_SCROLL_SPEED);
+    };
+
+    const endDrag = () => {
+      if (!drag) return;
+      const { row, taskId, originZone, pointerId } = drag;
+      row.classList.remove("is-dragging");
+      row.style.transform = "";
+      row.style.pointerEvents = "";
+      row.style.willChange = "";
+      try { row.releasePointerCapture(pointerId); } catch { /* pointer already released */ }
+      clearDropTargets();
+      const zone = row.closest("[data-task-drop-zone]");
+      drag = null;
+      if (!zone) return;
+      ensureEmptyPlaceholder(zone);
+      if (zone !== originZone) ensureEmptyPlaceholder(originZone);
+      const orderedTaskIds = zoneRows(zone).map((el) => Number(el.dataset.taskId));
+      if (!orderedTaskIds.includes(Number(taskId))) return;
+      const reorderUrl = zone.closest("[data-reorder-url]")?.dataset.reorderUrl;
+      if (!reorderUrl) return;
+      const targetListId = zone.dataset.listId ? Number(zone.dataset.listId) : null;
+      fetch(reorderUrl, {
+        method: "POST",
+        headers: { "X-CSRFToken": csrfToken(), "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ task_id: Number(taskId), target_list_id: targetListId, ordered_task_ids: orderedTaskIds }),
+      }).then((response) => { if (!response.ok) window.location.reload(); }).catch(() => window.location.reload());
+    };
+
+    document.addEventListener("pointerdown", (e) => {
+      if (e.button > 0) return;
+      const handle = e.target.closest("[data-drag-handle]");
+      const row = handle?.closest("[data-task-id]");
+      const originZone = row?.closest("[data-task-drop-zone]");
+      if (!handle || !row || !originZone) return;
+      e.preventDefault();
+      drag = { row, taskId: row.dataset.taskId, originZone, startY: e.clientY, pointerId: e.pointerId };
+      row.classList.add("is-dragging");
+      row.style.willChange = "transform";
+      try { row.setPointerCapture(e.pointerId); } catch { /* touch may not support capture on this target */ }
+    });
+
+    document.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      e.preventDefault();
+      drag.row.style.transform = `translateY(${e.clientY - drag.startY}px)`;
+      repositionRow(e.clientX, e.clientY);
+      autoScroll(e.clientY);
+    });
+
+    document.addEventListener("pointerup", endDrag);
+    document.addEventListener("pointercancel", endDrag);
+  };
+
   const registerGoogleLiveStreams = () => {
     document.querySelectorAll("[data-open-google-live]").forEach((button) => {
       button.addEventListener("click", async () => {
@@ -1126,6 +1238,7 @@
     registerHueSyncRefresh();
     registerHomeRealtime();
     registerGoogleLiveStreams();
+    registerTaskDragDrop();
     document.querySelectorAll("[data-sonos-now-playing]").forEach((nowPlaying) => {
       nowPlaying.dataset.sonosProgressMeasuredAt = String(Date.now());
       renderSonosProgress(nowPlaying, nowPlaying.dataset.sonosPositionSeconds, nowPlaying.dataset.sonosDurationSeconds);
@@ -1152,6 +1265,7 @@
     registerWishAutofill();
     registerHoverMenus();
     registerToastAutoDismiss();
+    registerTaskDragDrop();
   });
   document.body.addEventListener("htmx:responseError", (e) => {
     const status = e.detail?.xhr?.status;

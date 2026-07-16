@@ -31,9 +31,21 @@
 .event-detail [data-event-detail-notes] { color:var(--text-2); white-space:pre-wrap; }
 
 @media (max-width:760px) {
-  .agenda-panel { overflow:auto; }
-  .agenda-grid-week,
-  .agenda-grid-month { min-width:650px; }
-  .agenda-day { min-height:128px; }
+  .agenda-panel { overflow:visible; }
   .agenda-grid-day .agenda-day { min-height:320px; }
+
+  /* Week: drop the horizontal-scrolling 7-col grid for a stacked day list. */
+  .agenda-grid-week { grid-template-columns:1fr; }
+  .agenda-grid-week .agenda-day { min-height:0; }
+  .agenda-grid-week .agenda-day-events { min-height:0; }
+
+  /* Month: compact tappable grid — day number + a dot if events, full detail lives one tap away. */
+  .agenda-grid-month { grid-template-columns:repeat(7, minmax(0, 1fr)); gap:4px; min-width:0; }
+  .agenda-grid-month .agenda-day { position:relative; min-height:auto; aspect-ratio:1; padding:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; }
+  .agenda-grid-month .agenda-day header { display:block; margin:0; }
+  .agenda-grid-month .agenda-day header span { display:none; }
+  .agenda-grid-month .agenda-day-events { display:none; }
+  .agenda-day-mobile-link { position:absolute; inset:0; }
+  .agenda-day-dot { position:absolute; bottom:6px; left:50%; transform:translateX(-50%); width:5px; height:5px; border-radius:50%; background:var(--accent-text); }
+  .agenda-day.is-today .agenda-day-dot { background:var(--accent-ink); }
 }
