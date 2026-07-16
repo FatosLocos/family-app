@@ -97,9 +97,9 @@ button, a[role="button"], input[type="button"], input[type="submit"], input[type
 .muted { color: var(--muted); } /* Ensure muted text has sufficient contrast */
 .field-help { color: var(--muted); font-size: 12px; margin-top: 4px; display: block; }
 
-/* Ensure links have sufficient contrast and underline for clarity */
-a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
-a:hover { text-decoration-thickness: 2px; }
+/* Links: no underline at rest, only on hover/focus for affordance */
+a { text-decoration: none; text-underline-offset: 2px; }
+a:hover, a:focus-visible { text-decoration: underline; text-decoration-thickness: 1px; }
 
 /* Form labels - ensure they meet WCAG AA */
 label { color: var(--text); font-weight: 600; }
@@ -111,4 +111,4 @@ label { color: var(--text); font-weight: 600; }
 
 /* Form hints and secondary text */
 .form-hint { color: var(--muted); font-size: 14px; margin-top: 12px; }
-.form-hint a { color: var(--accent); text-decoration: underline; }
+.form-hint a { color: var(--accent); }
