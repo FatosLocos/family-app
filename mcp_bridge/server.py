@@ -75,7 +75,7 @@ def vandaag(ctx: Context) -> dict:
 
 
 @mcp.tool()
-def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None, toegewezen_aan: str | None = None) -> dict:
+def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None, toegewezen_aan: str | None = None, bron: str | None = None, bron_url: str | None = None) -> dict:
     """Add a new task to the household's task list.
 
     Args:
@@ -90,6 +90,14 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
             assignment the app understands, not just text in the title or notes. Use
             gezinsleden() to see valid names first if unsure; an ambiguous or unknown
             name returns a clear error instead of silently guessing.
+        bron: Where this task came from, e.g. "Notulen jeugdcommissie 12 juli 2026" or
+            "WhatsApp-gesprek met Denise". Shown as a badge on the task so the household
+            always knows where it originated. ALWAYS fill this in whenever the task was
+            derived from a document, conversation, or meeting rather than said directly —
+            it's the whole point of letting an agent create tasks unsupervised.
+        bron_url: Optional link to that source (e.g. a Dropbox shared link), shown as a
+            clickable link on the badge. Omit if there's no link, e.g. for a spoken
+            conversation.
     """
     payload = {"title": title}
     if due_at:
@@ -102,6 +110,10 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         payload["lijst"] = lijst
     if toegewezen_aan:
         payload["toegewezen_aan"] = toegewezen_aan
+    if bron:
+        payload["bron"] = bron
+    if bron_url:
+        payload["bron_url"] = bron_url
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/taken/", json=payload))
 

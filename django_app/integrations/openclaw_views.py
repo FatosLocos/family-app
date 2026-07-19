@@ -3,6 +3,8 @@ import json
 from datetime import datetime, time
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from django.db.models import Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -107,6 +109,8 @@ def api_add_task(request):
     payload.setdefault("priority", Task.Priority.NORMAL)
     list_name = str(payload.get("lijst") or "").strip()
     assignee_name = str(payload.get("toegewezen_aan") or "").strip()
+    source_label = str(payload.get("bron") or "").strip()[:300]
+    source_url = str(payload.get("bron_url") or "").strip()[:500]
     form = TaskForm(payload)
     form.fields["assigned_to"].queryset = User.objects.filter(memberships__household=request.household).distinct()
     if not form.is_valid():
@@ -118,6 +122,11 @@ def api_add_task(request):
         except ValueError as error:
             log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(error), user=request.openclaw_user)
             return JsonResponse({"error": str(error)}, status=400)
+    if source_url:
+        try:
+            URLValidator()(source_url)
+        except ValidationError:
+            return JsonResponse({"error": f"'{source_url}' is geen geldige URL."}, status=400)
     task = form.save(commit=False)
     task.household = request.household
     task.created_by_agent = True
@@ -126,6 +135,8 @@ def api_add_task(request):
         task.list = task_list
     if assignee_name:
         task.assigned_to = assignee
+    task.source_label = source_label
+    task.source_url = source_url
     task.save()
     log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd" + (f" aan lijstje '{list_name}'" if list_name else ""), user=request.openclaw_user)
     return JsonResponse({
@@ -133,6 +144,8 @@ def api_add_task(request):
         "title": task.title,
         "lijst": task.list.name if task.list else None,
         "toegewezen_aan": str(task.assigned_to) if task.assigned_to else None,
+        "bron": task.source_label or None,
+        "bron_url": task.source_url or None,
     }, status=201)
 
 
@@ -225,6 +238,8 @@ def api_all_tasks(request):
                 "assigned_to": str(task.assigned_to) if task.assigned_to else None,
                 "lijst": task.list.name if task.list else None,
                 "created_by_agent": task.created_by_agent,
+                "bron": task.source_label or None,
+                "bron_url": task.source_url or None,
             }
             for task in tasks
         ],

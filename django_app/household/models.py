@@ -43,6 +43,8 @@ class Task(HouseholdRecord):
     list = models.ForeignKey(TaskList, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
     position = models.PositiveIntegerField(default=0)
     created_by_agent = models.BooleanField(default=False)
+    source_label = models.CharField(max_length=300, blank=True)
+    source_url = models.URLField(max_length=500, blank=True)
 
     class Meta:
         ordering = ("position", "created_at")
