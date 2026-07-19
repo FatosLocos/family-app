@@ -8,8 +8,9 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from config.services import build_today_summary
-from household.forms import TaskForm
-from household.models import Task
+from household.forms import ShoppingItemForm, TaskForm
+from household.models import ShoppingItem, ShoppingList, Task
+from household.tasks import refresh_household_shopping_prices
 from households.decorators import parent_required
 from identity.models import User
 from integrations.models import OpenClawToken
@@ -92,3 +93,35 @@ def api_complete_task(request, task_id):
     Notification.objects.for_household(request.household).filter(dedupe_key=f"task-overdue:{task.id}", read_at__isnull=True).update(read_at=timezone.now())
     log_openclaw_action(request.household, "taak_afronden", f"Taak '{task.title}' afgerond", user=request.openclaw_user)
     return JsonResponse({"id": task.id, "completed_at": task.completed_at.isoformat()})
+
+
+@require_openclaw_token
+@require_GET
+def api_shopping_list(request):
+    items = ShoppingItem.objects.for_household(request.household).filter(completed_at__isnull=True).order_by("created_at")
+    log_openclaw_action(request.household, "boodschappen", "Boodschappenlijst opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "items": [{"id": item.id, "name": item.name, "quantity": item.quantity, "category": item.category} for item in items],
+    })
+
+
+@require_openclaw_token
+@require_POST
+def api_add_shopping_item(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    payload.setdefault("recurrence_days", 7)
+    form = ShoppingItemForm(payload)
+    if not form.is_valid():
+        log_openclaw_action(request.household, "boodschap_toevoegen", "Boodschap toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
+        return JsonResponse({"error": "Ongeldige velden.", "details": form.errors}, status=400)
+    shopping_list, _ = ShoppingList.objects.get_or_create(household=request.household, name="Boodschappen", defaults={"is_default": True})
+    item = form.save(commit=False)
+    item.household = request.household
+    item.list = shopping_list
+    item.save()
+    refresh_household_shopping_prices.delay(request.household.id)
+    log_openclaw_action(request.household, "boodschap_toevoegen", f"Boodschap '{item.name}' toegevoegd", user=request.openclaw_user)
+    return JsonResponse({"id": item.id, "name": item.name}, status=201)

@@ -1,6 +1,6 @@
 """MCP bridge for OpenClaw <-> FamilyApp.
 
-Thin translation layer: exposes 3 MCP tools that each call one of the
+Thin translation layer: exposes MCP tools that each call one of the
 existing bearer-token REST endpoints under /instellingen/api/openclaw/
 (see django_app/integrations/openclaw_views.py). No FamilyApp/Django code
 runs in this process — it only forwards HTTP calls, so the REST API
@@ -89,6 +89,35 @@ def taak_afronden(ctx: Context, task_id: int) -> dict:
     """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list)."""
     with _client(ctx) as client:
         response = client.post(f"/instellingen/api/openclaw/taken/{task_id}/afronden/")
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
+def boodschappen(ctx: Context) -> dict:
+    """Get the household's full open shopping list (not capped, unlike vandaag()'s preview)."""
+    with _client(ctx) as client:
+        response = client.get("/instellingen/api/openclaw/boodschappen/")
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
+def boodschap_toevoegen(ctx: Context, name: str, quantity: str | None = None, category: str | None = None) -> dict:
+    """Add an item to the household's shopping list.
+
+    Args:
+        name: What to buy (required), e.g. "melk".
+        quantity: Optional free-text amount, e.g. "2 pakken".
+        category: Optional free-text category, e.g. "zuivel".
+    """
+    payload = {"name": name}
+    if quantity:
+        payload["quantity"] = quantity
+    if category:
+        payload["category"] = category
+    with _client(ctx) as client:
+        response = client.post("/instellingen/api/openclaw/boodschappen/toevoegen/", json=payload)
         response.raise_for_status()
         return response.json()
 
