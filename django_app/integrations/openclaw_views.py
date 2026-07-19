@@ -3,7 +3,7 @@ import json
 from datetime import datetime, time
 
 from django.contrib import messages
-from django.db.models import Count, Sum
+from django.db.models import Count, Max, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
@@ -126,6 +126,50 @@ def api_add_task_list(request):
     task_list, created = TaskList.objects.get_or_create(household=request.household, name=name)
     log_openclaw_action(request.household, "taak_lijst_aanmaken", f"Lijstje '{task_list.name}' " + ("aangemaakt" if created else "bestond al"), user=request.openclaw_user)
     return JsonResponse({"id": task_list.id, "name": task_list.name, "created": created}, status=201 if created else 200)
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_move_task(request, task_id):
+    """Re-file an existing task under a (possibly new) list, without touching completion state."""
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        payload = {}
+    list_name = str(payload.get("lijst") or "").strip()
+    task_list = None
+    if list_name:
+        task_list, _ = TaskList.objects.get_or_create(household=request.household, name=list_name)
+    base_position = Task.objects.for_household(request.household).filter(list=task_list).aggregate(Max("position"))["position__max"]
+    task.list = task_list
+    task.position = (base_position + 1) if base_position is not None else 0
+    task.save(update_fields=["list", "position", "updated_at"])
+    log_openclaw_action(request.household, "taak_verplaatsen", f"Taak '{task.title}' verplaatst naar " + (f"lijstje '{task_list.name}'" if task_list else "Zonder lijst"), user=request.openclaw_user)
+    return JsonResponse({"id": task.id, "title": task.title, "lijst": task_list.name if task_list else None})
+
+
+@require_openclaw_token("vandaag:read")
+@require_GET
+def api_all_tasks(request):
+    """Every open task (not capped to a handful like api_today's preview), with list membership."""
+    tasks = Task.objects.for_household(request.household).filter(completed_at__isnull=True).select_related("list", "assigned_to").order_by("list_id", "position", "created_at")
+    log_openclaw_action(request.household, "taken", "Volledige takenlijst opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "tasks": [
+            {
+                "id": task.id,
+                "title": task.title,
+                "notes": task.notes,
+                "due_at": task.due_at.isoformat() if task.due_at else None,
+                "priority": task.priority,
+                "assigned_to": str(task.assigned_to) if task.assigned_to else None,
+                "lijst": task.list.name if task.list else None,
+                "created_by_agent": task.created_by_agent,
+            }
+            for task in tasks
+        ],
+    })
 
 
 @require_openclaw_token("taken:write")

@@ -124,8 +124,33 @@ def taak_lijst_aanmaken(ctx: Context, naam: str) -> dict:
 
 
 @mcp.tool()
+def taak_verplaatsen(ctx: Context, task_id: int, lijst: str | None = None) -> dict:
+    """Move an EXISTING task into a (possibly new) list, without affecting whether it's
+    done — use this to organize tasks you already know about, instead of taak_afronden
+    + taak_toevoegen, which would wrongly mark the original as completed.
+
+    Args:
+        task_id: The task's numeric id (from taken() or vandaag()).
+        lijst: The target list's name — created automatically if it doesn't exist yet.
+            Omit or pass an empty string to move the task back out of any list.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/verplaatsen/", json={"lijst": lijst or ""}))
+
+
+@mcp.tool()
+def taken(ctx: Context) -> dict:
+    """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
+    preview. Each task includes its list ("lijst", null if unsorted), notes, due date,
+    priority, and whether OpenClaw created it. Use this before organizing tasks into
+    lists with taak_verplaatsen, so nothing gets missed."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/taken/alle/"))
+
+
+@mcp.tool()
 def taak_afronden(ctx: Context, task_id: int, reden: str | None = None) -> dict:
-    """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list).
+    """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list or taken()).
 
     Args:
         task_id: The task's numeric id.
