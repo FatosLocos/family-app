@@ -40,8 +40,8 @@
     {% if local_discoveries %}<details class="hue-group-members"><summary>Recent lokaal ontdekt ({{ local_discoveries|length }})</summary><ul class="clean-list">{% for device in local_discoveries %}<li><i data-lucide="scan-search"></i><div><strong>{{ device.name }}</strong><small>{{ device.kind }} · {{ device.method }}{% if device.probe %} · {{ device.probe.name }}{% endif %}</small>{% if device.details.suggested_integration %}<small>Geschikte koppeling: {{ device.details.suggested_integration }}</small>{% endif %}</div></li>{% endfor %}</ul></details>{% endif %}
   </section>
   <section class="content-panel settings-span-2 settings-form">
-    <div class="panel-heading"><h2>OpenClaw</h2></div>
-    <p>Geeft de OpenClaw-chatagent (WhatsApp/Telegram/etc.) leestoegang tot vandaag en de mogelijkheid om taken toe te voegen of af te ronden. Stel het token in OpenClaw in als <code>Authorization: Bearer &lt;token&gt;</code>-header.</p>
+    <div class="panel-heading"><h2>OpenClaw</h2><button class="icon-button" type="button" data-open-dialog="openclaw-help-dialog" title="Handleiding OpenClaw-koppeling" aria-label="Handleiding OpenClaw-koppeling"><i data-lucide="circle-help"></i></button></div>
+    <p>Geeft de OpenClaw-chatagent (WhatsApp/Telegram/etc.) leestoegang tot vandaag en de mogelijkheid om taken toe te voegen of af te ronden. Volg de handleiding (vraagteken hierboven) om de MCP-koppeling volledig in te richten.</p>
     <form method="post" action="{% url 'integrations:create_openclaw_token' %}">{% csrf_token %}<button class="button button-primary" type="submit"><i data-lucide="bot"></i>{% if openclaw_tokens %}Token vervangen{% else %}Token aanmaken{% endif %}</button></form>
     {% if openclaw_token %}<div class="form-hint"><strong>Token</strong><code>{{ openclaw_token }}</code><small>Bewaar dit nu — het wordt niet nogmaals getoond.</small></div>{% endif %}
     <ul class="connection-list">{% for token in openclaw_tokens %}<li><i data-lucide="bot"></i><div><strong>{{ token.label }}</strong><small>{% if token.last_used_at %}Laatst gebruikt {{ token.last_used_at|date:'d M H:i' }}{% else %}Nog niet gebruikt{% endif %} · aangemaakt {{ token.created_at|date:'d M H:i' }}</small></div><form method="post" action="{% url 'integrations:revoke_openclaw_token' token.id %}">{% csrf_token %}<button class="icon-button destructive" title="Token intrekken" aria-label="{{ token.label }} intrekken"><i data-lucide="unlink"></i></button></form></li>{% empty %}<li class="empty-copy">Nog geen OpenClaw-token aangemaakt.</li>{% endfor %}</ul>
@@ -139,6 +139,22 @@
         <li><strong>Toegang stoppen.</strong><span>Gebruik het ontkoppel-icoon naast de probe. Het token wordt dan onmiddellijk ongeldig.</span></li>
       </ol>
       <p class="probe-guide-note"><i data-lucide="shield-check"></i> De probe opent zelf een beveiligde verbinding naar de app. Er zijn geen inkomende poorten op de router nodig.</p>
+    </div>
+  </dialog>
+  <dialog id="openclaw-help-dialog" class="modal probe-guide-modal" aria-labelledby="openclaw-help-dialog-title">
+    <div class="modal-sections">
+      <div class="dialog-title"><h2 id="openclaw-help-dialog-title">OpenClaw koppelen (MCP)</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+      <p>OpenClaw praat met FamilyApp via een kleine "MCP-bridge" die op dezelfde server draait als FamilyApp zelf en de bestaande, beveiligde OpenClaw-API aanroept. Voer deze stappen uit op de VPS.</p>
+      <ol class="probe-guide">
+        <li><strong>Maak een token.</strong><span>Kies hierboven <em>Token aanmaken</em>. Het token wordt één keer getoond — bewaar het direct.</span></li>
+        <li><strong>Installeer de MCP-bridge (eenmalig).</strong><span>De broncode staat al in de FamilyApp-repo onder <code>mcp_bridge/</code>.</span><code>cd /opt/family-app &amp;&amp; sudo python3 -m venv .venv-mcp-bridge &amp;&amp; sudo .venv-mcp-bridge/bin/pip install -r mcp_bridge/requirements.txt</code></li>
+        <li><strong>Maak een systemd-service.</strong><span>Zet dit in <code>/etc/systemd/system/family-app-mcp-bridge.service</code>, met het token uit stap 1:</span><code>[Unit]<br>Description=FamilyApp MCP bridge<br>After=network.target<br><br>[Service]<br>User=deploy<br>Environment=FAMILY_APP_TOKEN=&lt;token uit stap 1&gt;<br>Environment=FAMILY_APP_BASE_URL=http://127.0.0.1:8088<br>ExecStart=/opt/family-app/.venv-mcp-bridge/bin/python /opt/family-app/mcp_bridge/server.py<br>Restart=on-failure<br><br>[Install]<br>WantedBy=multi-user.target</code></li>
+        <li><strong>Start de service.</strong><code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl enable --now family-app-mcp-bridge</code><span>Controleer met <code>sudo systemctl status family-app-mcp-bridge</code> — moet <em>active (running)</em> tonen.</span></li>
+        <li><strong>Registreer de MCP-server bij OpenClaw.</strong><code>openclaw mcp add family-app-taken --url http://127.0.0.1:8899/mcp --transport streamable-http<br>openclaw mcp probe family-app-taken<br>openclaw mcp reload</code><span>De probe-uitvoer moet de tools <code>vandaag</code>, <code>taak_toevoegen</code> en <code>taak_afronden</code> tonen.</span></li>
+        <li><strong>Testen.</strong><span>Stuur OpenClaw een bericht zoals "wat staat er vandaag op de agenda" of "voeg melk toe aan de taken".</span></li>
+        <li><strong>Bij een nieuw of ingetrokken token.</strong><span>Werk de <code>FAMILY_APP_TOKEN</code>-regel in de systemd-unit bij en herstart:</span><code>sudo systemctl restart family-app-mcp-bridge</code></li>
+      </ol>
+      <p class="probe-guide-note"><i data-lucide="shield-check"></i> De MCP-bridge is alleen bereikbaar op <code>127.0.0.1</code> van de VPS zelf — nooit publiek toegankelijk.</p>
     </div>
   </dialog>
   <dialog id="hue-help-dialog" class="modal"><div class="modal-sections"><div class="dialog-title"><h2>Philips Hue koppelen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><ol><li>Open het <a href="https://developers.meethue.com/" target="_blank" rel="noreferrer">Hue Developer Portal</a>, kies rechtsboven <strong>Remote Hue API appids</strong> en daarna <strong>Add new Remote Hue API app</strong>.</li><li>Registreer als redirect-URL: <code>{{ hue_redirect_url }}</code>.</li><li>Vul de client ID, client secret en eventueel application ID van die app in en kies <strong>Opslaan</strong>.</li><li>Kies <strong>Koppel Philips Hue</strong>, rond de Hue-aanmelding af, druk op de fysieke Bridge-knop en kies <strong>Voltooien</strong>.</li></ol></div></dialog>
