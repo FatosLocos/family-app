@@ -30,6 +30,7 @@ class IntegrationConnection(models.Model):
         SMARTCAR = "smartcar", "Smartcar"
         HOME_CONNECT = "home_connect", "Home Connect"
         DROPBOX = "dropbox", "Dropbox"
+        IMAP = "imap", "IMAP e-mail"
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)

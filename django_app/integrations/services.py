@@ -150,6 +150,30 @@ def finish_outlook_connection(request, code: str, state: str) -> IntegrationConn
     return connection
 
 
+def save_imap_connection(request, cleaned_data: dict) -> IntegrationConnection:
+    """Persist this user's IMAP/SMTP credentials. Caller must verify the login works
+    (providers.test_imap_login) before calling this — there is no separate OAuth step to
+    catch a bad password later, so the check has to happen up front.
+    """
+    host = cleaned_data["host"].strip()
+    username = cleaned_data["username"].strip()
+    connection, _ = IntegrationConnection.objects.get_or_create(household=request.household, user=request.user, provider="imap", defaults={"display_name": "IMAP e-mail"})
+    connection.external_account = username
+    connection.secret_encrypted = encrypt(cleaned_data["password"])
+    connection.settings = {
+        "host": host,
+        "port": cleaned_data["port"],
+        "use_ssl": cleaned_data["use_ssl"],
+        "smtp_host": cleaned_data.get("smtp_host", "").strip() or host,
+        "smtp_port": cleaned_data["smtp_port"],
+        "smtp_use_tls": cleaned_data["smtp_use_tls"],
+    }
+    connection.status = "configured"
+    connection.last_error = ""
+    connection.save()
+    return connection
+
+
 def start_bunq_connection(request) -> str:
     client_id, _, config = get_app_config(request.household, "bunq")
     if not client_id:

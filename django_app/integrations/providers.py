@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import base64
+import email
+import imaplib
 import json
 import os
+import smtplib
 import time
 import uuid
+from email.header import decode_header
+from email.message import EmailMessage
+from email.utils import getaddresses, parseaddr
 from datetime import timedelta
 from decimal import Decimal
 
@@ -2569,3 +2575,173 @@ def dropbox_download_file_raw(connection: IntegrationConnection, path: str) -> d
         "size": size,
         "content_base64": base64.b64encode(download_response.content).decode("ascii"),
     }
+
+
+def _decode_mime_header(value: str) -> str:
+    if not value:
+        return ""
+    decoded = ""
+    for text, charset in decode_header(value):
+        decoded += text.decode(charset or "utf-8", errors="replace") if isinstance(text, bytes) else text
+    return decoded
+
+
+def _imap_client(connection: IntegrationConnection) -> imaplib.IMAP4:
+    settings = connection.settings
+    host = settings.get("host", "")
+    port = int(settings.get("port", 993))
+    password = decrypt(connection.secret_encrypted)
+    try:
+        client = imaplib.IMAP4_SSL(host, port) if settings.get("use_ssl", True) else imaplib.IMAP4(host, port)
+        client.login(connection.external_account, password)
+    except (imaplib.IMAP4.error, OSError) as error:
+        raise ProviderError(f"IMAP-verbinding mislukt: {error}") from error
+    return client
+
+
+def test_imap_login(host: str, port: int, use_ssl: bool, username: str, password: str) -> None:
+    """Verify IMAP credentials work without persisting anything. Raises ProviderError on failure."""
+    try:
+        client = imaplib.IMAP4_SSL(host, port, timeout=15) if use_ssl else imaplib.IMAP4(host, port, timeout=15)
+        client.login(username, password)
+        client.logout()
+    except (imaplib.IMAP4.error, OSError) as error:
+        raise ProviderError(f"Inloggen bij de IMAP-server is mislukt: {error}") from error
+
+
+def _extract_plain_text(message) -> str:
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+                try:
+                    return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+                except (LookupError, ValueError):
+                    continue
+        return ""
+    if message.get_content_type() == "text/plain":
+        try:
+            return message.get_payload(decode=True).decode(message.get_content_charset() or "utf-8", errors="replace")
+        except (LookupError, ValueError):
+            return ""
+    return ""
+
+
+def imap_mail_overview(connection: IntegrationConnection, folder: str = "INBOX", unread_only: bool = False, top: int = 20) -> list[dict]:
+    """List recent messages in an IMAP folder, newest first (headers only — no body preview;
+    use imap_mail_read for full content). Uses IMAP UIDs (stable across sessions), not
+    sequence numbers, so returned ids stay valid for later imap_mail_read/imap_mail_reply calls.
+    """
+    client = _imap_client(connection)
+    try:
+        status, _ = client.select(folder, readonly=True)
+        if status != "OK":
+            raise ProviderError(f"Map '{folder}' bestaat niet of is niet bereikbaar.")
+        status, data = client.uid("search", None, "UNSEEN" if unread_only else "ALL")
+        if status != "OK":
+            raise ProviderError("IMAP-zoekopdracht mislukt.")
+        uids = data[0].split()
+        uids = uids[-top:] if top else uids
+        uids.reverse()
+        messages = []
+        for uid in uids:
+            status, msg_data = client.uid("fetch", uid, "(FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+                continue
+            flags_raw = imaplib.ParseFlags(msg_data[0][0]) if isinstance(msg_data[0][0], bytes) else ()
+            headers = email.message_from_bytes(msg_data[0][1])
+            sender_name, sender_email = parseaddr(_decode_mime_header(headers.get("From", "")))
+            messages.append({
+                "id": f"{folder}:{uid.decode()}",
+                "subject": _decode_mime_header(headers.get("Subject", "")),
+                "from": sender_email,
+                "from_name": sender_name,
+                "received_at": headers.get("Date", ""),
+                "is_read": b"\\Seen" in flags_raw,
+            })
+        return messages
+    finally:
+        client.logout()
+
+
+def imap_mail_read(connection: IntegrationConnection, message_id: str) -> dict:
+    """Read the full text content of one IMAP message, given its id (from imap_mail_overview)."""
+    try:
+        folder, uid = message_id.split(":", 1)
+    except ValueError as error:
+        raise ProviderError("Ongeldig bericht-id.") from error
+    client = _imap_client(connection)
+    try:
+        status, _ = client.select(folder, readonly=True)
+        if status != "OK":
+            raise ProviderError(f"Map '{folder}' bestaat niet of is niet bereikbaar.")
+        status, msg_data = client.uid("fetch", uid.encode(), "(BODY.PEEK[])")
+        if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+            raise ProviderError("Bericht niet gevonden.")
+        message = email.message_from_bytes(msg_data[0][1])
+        sender_name, sender_email = parseaddr(_decode_mime_header(message.get("From", "")))
+        return {
+            "id": message_id,
+            "subject": _decode_mime_header(message.get("Subject", "")),
+            "from": sender_email,
+            "from_name": sender_name,
+            "to": [addr for _, addr in getaddresses(message.get_all("To", []) or [])],
+            "cc": [addr for _, addr in getaddresses(message.get_all("Cc", []) or [])],
+            "received_at": message.get("Date", ""),
+            "body": _extract_plain_text(message),
+            "message_id_header": message.get("Message-ID", ""),
+        }
+    finally:
+        client.logout()
+
+
+def _imap_smtp_send(connection: IntegrationConnection, message: EmailMessage) -> None:
+    settings = connection.settings
+    host = settings.get("smtp_host") or settings.get("host", "")
+    port = int(settings.get("smtp_port", 587))
+    password = decrypt(connection.secret_encrypted)
+    try:
+        server = smtplib.SMTP_SSL(host, port, timeout=20) if port == 465 else smtplib.SMTP(host, port, timeout=20)
+        try:
+            if port != 465 and settings.get("smtp_use_tls", True):
+                server.starttls()
+            server.login(connection.external_account, password)
+            server.send_message(message)
+        finally:
+            server.quit()
+    except (smtplib.SMTPException, OSError) as error:
+        raise ProviderError(f"E-mail versturen via SMTP is mislukt: {error}") from error
+
+
+def imap_mail_send(connection: IntegrationConnection, to: list[str], subject: str, body: str, cc: list[str] | None = None) -> None:
+    """Send a new email from this IMAP/SMTP account."""
+    message = EmailMessage()
+    message["From"] = connection.external_account
+    message["To"] = ", ".join(to)
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    message["Subject"] = subject
+    message.set_content(body)
+    _imap_smtp_send(connection, message)
+
+
+def imap_mail_reply(connection: IntegrationConnection, message_id: str, comment: str, reply_all: bool = False) -> None:
+    """Reply to an existing IMAP message, given its id (from imap_mail_overview/imap_mail_read)."""
+    original = imap_mail_read(connection, message_id)
+    to = [original["from"]] if original["from"] else []
+    cc = []
+    if reply_all:
+        cc = [addr for addr in (original.get("to", []) + original.get("cc", [])) if addr and addr.lower() != (connection.external_account or "").lower()]
+    if not to:
+        raise ProviderError("Kon geen afzender vinden om op te antwoorden.")
+    message = EmailMessage()
+    message["From"] = connection.external_account
+    message["To"] = ", ".join(to)
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    subject = original.get("subject", "")
+    message["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    if original.get("message_id_header"):
+        message["In-Reply-To"] = original["message_id_header"]
+        message["References"] = original["message_id_header"]
+    message.set_content(comment)
+    _imap_smtp_send(connection, message)

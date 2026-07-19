@@ -525,59 +525,79 @@ def dropbox_bestand_ruw_lezen(ctx: Context, path: str) -> dict:
 
 
 @mcp.tool()
-def e_mail_overzicht(ctx: Context, folder: str | None = None, unread_only: bool = False) -> dict:
-    """List recent Outlook messages in a mail folder, newest first (subject/sender/preview
-    only — use e_mail_lezen for the full body). Requires this household member to have
-    linked their own Outlook account in Instellingen.
+def e_mail_overzicht(ctx: Context, folder: str | None = None, unread_only: bool = False, account: str | None = None) -> dict:
+    """List recent messages in a mail folder, newest first (subject/sender/preview only —
+    use e_mail_lezen for the full body). Requires this household member to have linked a
+    mail account (Outlook and/or IMAP) in Instellingen.
 
     Args:
         folder: Mail folder to list, e.g. "inbox" (default), "sentitems", "drafts".
         unread_only: Only return unread messages (default False).
+        account: Which linked account to use, "outlook" or "imap". Only required if this
+            household member has linked both — omit it if they only have one.
     """
     params = {}
     if folder:
         params["folder"] = folder
     if unread_only:
         params["unread_only"] = "true"
+    if account:
+        params["account"] = account
     with _client(ctx) as client:
-        return _checked(client.get("/instellingen/api/openclaw/outlook/mail/", params=params))
+        return _checked(client.get("/instellingen/api/openclaw/mail/", params=params))
 
 
 @mcp.tool()
-def e_mail_lezen(ctx: Context, message_id: str) -> dict:
-    """Read the full text content of one Outlook message, given its id (from e_mail_overzicht)."""
+def e_mail_lezen(ctx: Context, message_id: str, account: str | None = None) -> dict:
+    """Read the full text content of one message, given its id (from e_mail_overzicht).
+
+    Args:
+        message_id: The message's id.
+        account: Which linked account to use, "outlook" or "imap". Only required if this
+            household member has linked both — omit it if they only have one.
+    """
+    params = {"account": account} if account else {}
     with _client(ctx) as client:
-        return _checked(client.get(f"/instellingen/api/openclaw/outlook/mail/{message_id}/"))
+        return _checked(client.get(f"/instellingen/api/openclaw/mail/{message_id}/", params=params))
 
 
 @mcp.tool()
-def e_mail_versturen(ctx: Context, to: list[str], subject: str, body: str, cc: list[str] | None = None) -> dict:
-    """Send a new email from this household member's own Outlook account.
+def e_mail_versturen(ctx: Context, to: list[str], subject: str, body: str, cc: list[str] | None = None, account: str | None = None) -> dict:
+    """Send a new email from this household member's own mail account.
 
     Args:
         to: Recipient email addresses.
         subject: Email subject.
         body: Plain-text email body.
         cc: Optional cc email addresses.
+        account: Which linked account to send from, "outlook" or "imap". Only required if
+            this household member has linked both — omit it if they only have one.
     """
     payload = {"to": to, "subject": subject, "body": body}
     if cc:
         payload["cc"] = cc
+    if account:
+        payload["account"] = account
     with _client(ctx) as client:
-        return _checked(client.post("/instellingen/api/openclaw/outlook/mail/versturen/", json=payload))
+        return _checked(client.post("/instellingen/api/openclaw/mail/versturen/", json=payload))
 
 
 @mcp.tool()
-def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: bool = False) -> dict:
-    """Reply to an existing Outlook message, given its id (from e_mail_overzicht/e_mail_lezen).
+def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: bool = False, account: str | None = None) -> dict:
+    """Reply to an existing message, given its id (from e_mail_overzicht/e_mail_lezen).
 
     Args:
         message_id: The message's id.
         comment: The reply text.
         reply_all: Reply to all recipients instead of just the sender (default False).
+        account: Which linked account to use, "outlook" or "imap". Only required if this
+            household member has linked both — omit it if they only have one.
     """
+    payload = {"comment": comment, "reply_all": reply_all}
+    if account:
+        payload["account"] = account
     with _client(ctx) as client:
-        return _checked(client.post(f"/instellingen/api/openclaw/outlook/mail/{message_id}/beantwoorden/", json={"comment": comment, "reply_all": reply_all}))
+        return _checked(client.post(f"/instellingen/api/openclaw/mail/{message_id}/beantwoorden/", json=payload))
 
 
 @mcp.tool()

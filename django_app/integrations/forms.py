@@ -58,6 +58,17 @@ class GoogleHomeConfigForm(forms.Form):
     pubsub_service_account_json = forms.CharField(label="Serviceaccount JSON", required=False, widget=forms.Textarea(attrs={"rows": 4}), help_text="Alleen nodig voor live events. Wordt versleuteld opgeslagen en daarna niet opnieuw getoond.")
 
 
+class ImapConfigForm(forms.Form):
+    host = forms.CharField(label="IMAP-server", max_length=240, help_text="Bijvoorbeeld imap.gmail.com.")
+    port = forms.IntegerField(label="IMAP-poort", initial=993)
+    use_ssl = forms.BooleanField(label="SSL gebruiken (aanbevolen)", required=False, initial=True)
+    username = forms.CharField(label="Gebruikersnaam", max_length=240, help_text="Meestal je e-mailadres.")
+    password = forms.CharField(label="Wachtwoord", widget=forms.PasswordInput(render_value=False), help_text="Bij Gmail en veel andere providers is dit een app-wachtwoord, niet je gewone wachtwoord.")
+    smtp_host = forms.CharField(label="SMTP-server (versturen)", max_length=240, required=False, help_text="Leeg laten om dezelfde server als hierboven te gebruiken.")
+    smtp_port = forms.IntegerField(label="SMTP-poort", initial=587)
+    smtp_use_tls = forms.BooleanField(label="STARTTLS gebruiken (aanbevolen)", required=False, initial=True)
+
+
 class LgThinQConfigForm(forms.Form):
     client_id = forms.CharField(label="LG Smart Solution client ID", max_length=240)
     client_secret = forms.CharField(label="LG Smart Solution client secret", required=False, widget=forms.PasswordInput(render_value=False))

@@ -26,7 +26,7 @@ class TokenError(Exception):
 # Every scope the MCP tools currently understand. New tokens get all of
 # these until the scope-picker UI ships; after that, a token only gets what
 # was explicitly checked when it was created.
-ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write", "agenda:read", "agenda:write", "geld:read", "meldingen:read", "meldingen:write", "dropbox:read", "dropbox:content", "outlook_mail:read", "outlook_mail:write", "outlook_todo:read", "outlook_todo:write"]
+ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write", "agenda:read", "agenda:write", "geld:read", "meldingen:read", "meldingen:write", "dropbox:read", "dropbox:content", "outlook_mail:read", "outlook_mail:write", "outlook_todo:read", "outlook_todo:write", "imap_mail:read", "imap_mail:write"]
 SCOPE_LABELS = {
     "vandaag:read": "Dagoverzicht lezen",
     "taken:write": "Taken aanmaken en afronden",
@@ -45,6 +45,8 @@ SCOPE_LABELS = {
     "outlook_mail:write": "E-mail versturen en beantwoorden namens jou",
     "outlook_todo:read": "Microsoft To Do lezen",
     "outlook_todo:write": "Microsoft To Do-taken aanmaken en bijwerken",
+    "imap_mail:read": "IMAP-e-mail lezen",
+    "imap_mail:write": "IMAP-e-mail versturen en beantwoorden namens jou",
 }
 
 # Categories a user can opt into for proactive push. Each key is the
@@ -103,6 +105,18 @@ def authenticate_token(bearer_value: str) -> OpenClawToken:
         raise TokenError("Token is niet geautoriseerd.")
 
 
+def _authenticate_bearer_request(request):
+    """Shared step 1 for both decorators below: resolve the bearer token or an error response."""
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return None, JsonResponse({"error": "Ontbrekende of ongeldige Authorization-header."}, status=401)
+    try:
+        token = authenticate_token(header.removeprefix("Bearer ").strip())
+    except TokenError as error:
+        return None, JsonResponse({"error": str(error)}, status=401)
+    return token, None
+
+
 def require_openclaw_token(scope: str):
     """Authenticate via `Authorization: Bearer <token>` and require it to carry `scope`.
 
@@ -116,18 +130,15 @@ def require_openclaw_token(scope: str):
         @csrf_exempt
         @functools.wraps(view_func)
         def wrapped(request, *args, **kwargs):
-            header = request.headers.get("Authorization", "")
-            if not header.startswith("Bearer "):
-                return JsonResponse({"error": "Ontbrekende of ongeldige Authorization-header."}, status=401)
-            try:
-                token = authenticate_token(header.removeprefix("Bearer ").strip())
-            except TokenError as error:
-                return JsonResponse({"error": str(error)}, status=401)
+            token, error_response = _authenticate_bearer_request(request)
+            if error_response:
+                return error_response
             with household_db_scope(token.household_id):
                 request.household = token.household
                 request.openclaw_user = token.user
+                request.openclaw_token_scopes = token.scopes or []
                 OpenClawToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
-                if scope not in (token.scopes or []):
+                if scope not in request.openclaw_token_scopes:
                     log_openclaw_action(
                         token.household,
                         "toegang_geweigerd",
@@ -136,6 +147,43 @@ def require_openclaw_token(scope: str):
                         user=token.user,
                     )
                     return JsonResponse({"error": f"Dit token heeft geen toestemming voor '{scope}'."}, status=403)
+                return view_func(request, *args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+def require_openclaw_token_any(scopes: list[str]):
+    """Like require_openclaw_token, but passes if the token carries ANY of `scopes`.
+
+    For endpoints that serve more than one provider (e.g. mail via Outlook or IMAP) where
+    the specific scope actually needed depends on which account the request resolves to at
+    runtime — the view must do its own precise check once it knows the account, via
+    `request.openclaw_token_scopes`.
+    """
+
+    def decorator(view_func):
+        @csrf_exempt
+        @functools.wraps(view_func)
+        def wrapped(request, *args, **kwargs):
+            token, error_response = _authenticate_bearer_request(request)
+            if error_response:
+                return error_response
+            with household_db_scope(token.household_id):
+                request.household = token.household
+                request.openclaw_user = token.user
+                request.openclaw_token_scopes = token.scopes or []
+                OpenClawToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+                if not any(scope in request.openclaw_token_scopes for scope in scopes):
+                    log_openclaw_action(
+                        token.household,
+                        "toegang_geweigerd",
+                        f"Actie geweigerd: token '{token.label}' mist elk van {scopes}",
+                        status="error",
+                        user=token.user,
+                    )
+                    return JsonResponse({"error": f"Dit token heeft geen van deze rechten: {', '.join(scopes)}."}, status=403)
                 return view_func(request, *args, **kwargs)
 
         return wrapped

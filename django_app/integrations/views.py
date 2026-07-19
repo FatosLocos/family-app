@@ -18,15 +18,15 @@ from django.views.decorators.http import require_GET, require_POST
 from households.decorators import household_required, owner_required, parent_required
 from households.forms import HouseholdSettingsForm
 from identity.forms import ProfileForm
-from integrations.forms import BunqConfigForm, DropboxConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
+from integrations.forms import BunqConfigForm, DropboxConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, ImapConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
 from integrations.audit import log_integration_event
 from integrations.data_export import household_export
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawActionLog, OpenClawNotificationPreference, OpenClawToken, SyncRun
 from integrations.local_probe import ProbeError, _discovery_identity, create_pairing, expire_stale_probes, pair_probe, revoke_probe, send_probe_system_command
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, SCOPE_LABELS
 from planning.models import CalendarSource
-from integrations.providers import ProviderError, arm_hue_bridge_link, finish_hue_bridge_link
-from integrations.services import finish_bunq_connection, finish_dropbox_connection, finish_google_home_connection, finish_home_connect_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_smartcar_connection, finish_sonos_connection, finish_spotify_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_google_home_config as save_google_home_integration_config, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_dropbox_connection, start_google_home_connection, start_home_connect_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_smartcar_connection, start_sonos_connection, start_spotify_connection
+from integrations.providers import ProviderError, arm_hue_bridge_link, finish_hue_bridge_link, test_imap_login
+from integrations.services import finish_bunq_connection, finish_dropbox_connection, finish_google_home_connection, finish_home_connect_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_smartcar_connection, finish_sonos_connection, finish_spotify_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_google_home_config as save_google_home_integration_config, save_imap_connection, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_dropbox_connection, start_google_home_connection, start_home_connect_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_smartcar_connection, start_sonos_connection, start_spotify_connection
 from integrations.sonos_events import SonosEventError, process_sonos_event
 from integrations.tasks import sync_connection_task
 
@@ -91,6 +91,7 @@ def index(request):
         "recent_audits": IntegrationAudit.objects.for_household(request.household).select_related("user")[:8],
         "outlook_form": OutlookConfigForm(initial={"client_id": outlook_client_id, "tenant_id": outlook_settings.get("tenant_id", "consumers")}),
         "outlook_redirect_url": f"{public_origin(request)}/instellingen/outlook/callback/",
+        "imap_form": ImapConfigForm(),
         "bunq_form": BunqConfigForm(initial={"client_id": bunq_client_id, "environment": bunq_settings.get("environment", "production")}),
         "hue_form": HueConfigForm(initial={"client_id": hue_client_id, "app_id": hue_settings.get("app_id", ""), "device_name": hue_settings.get("device_name", "Family App")}),
         "hue_redirect_url": f"{public_origin(request)}/instellingen/hue/callback/",
@@ -238,6 +239,23 @@ def save_outlook_config(request):
     if form.is_valid():
         save_app_config(request.household, "outlook", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {"tenant_id": form.cleaned_data["tenant_id"]})
         messages.success(request, "Outlook-configuratie veilig opgeslagen.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
+def save_imap_config(request):
+    form = ImapConfigForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Controleer de ingevulde IMAP-gegevens.")
+        return redirect("integrations:index")
+    try:
+        test_imap_login(form.cleaned_data["host"], form.cleaned_data["port"], form.cleaned_data["use_ssl"], form.cleaned_data["username"], form.cleaned_data["password"])
+    except ProviderError as error:
+        messages.error(request, f"IMAP-koppeling mislukt: {error}")
+        return redirect("integrations:index")
+    save_imap_connection(request, form.cleaned_data)
+    messages.success(request, "IMAP-account gekoppeld.")
     return redirect("integrations:index")
 
 

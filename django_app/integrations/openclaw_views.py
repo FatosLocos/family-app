@@ -22,7 +22,7 @@ from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
 from integrations.models import IntegrationConnection, OpenClawNotificationPreference, OpenClawToken
-from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
+from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, require_openclaw_token_any, revoke_token
 from integrations.providers import (
     ProviderError,
     dropbox_download_file_raw,
@@ -30,6 +30,10 @@ from integrations.providers import (
     dropbox_overview,
     dropbox_read_file_text,
     dropbox_search,
+    imap_mail_overview,
+    imap_mail_read,
+    imap_mail_reply,
+    imap_mail_send,
     outlook_mail_overview,
     outlook_mail_read,
     outlook_mail_reply,
@@ -794,81 +798,140 @@ def _no_outlook_connection_response():
     return JsonResponse({"error": "Je hebt geen Outlook-account gekoppeld in Instellingen."}, status=400)
 
 
-@require_openclaw_token("outlook_mail:read")
-@require_GET
-def api_outlook_mail_overview(request):
-    connection = _outlook_connection(request)
+def _imap_connection(request):
+    return IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.IMAP, user=request.openclaw_user).first()
+
+
+class _MailAccountError(Exception):
+    pass
+
+
+def _resolve_mail_account(request, account_param, *, write: bool):
+    """Resolve which mail account (outlook/imap) a request should use and confirm the token
+    carries the scope for it. Auto-picks the household member's only linked account when
+    `account_param` is omitted and unambiguous.
+    """
+    outlook_conn = _outlook_connection(request)
+    imap_conn = _imap_connection(request)
+
+    account = account_param
+    if not account:
+        if outlook_conn and imap_conn:
+            raise _MailAccountError("Je hebt zowel Outlook als IMAP gekoppeld — geef 'account' op ('outlook' of 'imap').")
+        if outlook_conn:
+            account = "outlook"
+        elif imap_conn:
+            account = "imap"
+        else:
+            raise _MailAccountError("Je hebt geen e-mailaccount gekoppeld in Instellingen.")
+
+    if account == "outlook":
+        connection, scope = outlook_conn, ("outlook_mail:write" if write else "outlook_mail:read")
+    elif account == "imap":
+        connection, scope = imap_conn, ("imap_mail:write" if write else "imap_mail:read")
+    else:
+        raise _MailAccountError(f"Onbekend account-type '{account}' — gebruik 'outlook' of 'imap'.")
+
     if not connection:
-        return _no_outlook_connection_response()
-    folder = request.GET.get("folder") or "inbox"
+        raise _MailAccountError(f"Je hebt geen {account}-account gekoppeld in Instellingen.")
+    if scope not in request.openclaw_token_scopes:
+        raise _MailAccountError(f"Dit token heeft geen toestemming voor '{scope}'.")
+    return account, connection
+
+
+@require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
+@require_GET
+def api_mail_overview(request):
+    try:
+        account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    folder = request.GET.get("folder") or ("inbox" if account == "outlook" else "INBOX")
     unread_only = request.GET.get("unread_only") == "true"
+    action = "outlook_mail" if account == "outlook" else "imap_mail"
     try:
-        messages = outlook_mail_overview(connection, folder=folder, unread_only=unread_only)
+        if account == "outlook":
+            messages = outlook_mail_overview(connection, folder=folder, unread_only=unread_only)
+        else:
+            messages = imap_mail_overview(connection, folder=folder, unread_only=unread_only)
     except ProviderError as error:
-        log_openclaw_action(request.household, "outlook_mail", "E-mailoverzicht opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        log_openclaw_action(request.household, action, "E-mailoverzicht opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
-    log_openclaw_action(request.household, "outlook_mail", "E-mailoverzicht opgevraagd", user=request.openclaw_user)
-    return JsonResponse({"messages": messages})
+    log_openclaw_action(request.household, action, "E-mailoverzicht opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"account": account, "messages": messages})
 
 
-@require_openclaw_token("outlook_mail:read")
+@require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
 @require_GET
-def api_outlook_mail_read(request, message_id):
-    connection = _outlook_connection(request)
-    if not connection:
-        return _no_outlook_connection_response()
+def api_mail_read(request, message_id):
     try:
-        message = outlook_mail_read(connection, message_id)
-    except ProviderError as error:
-        log_openclaw_action(request.household, "outlook_mail", "E-mail lezen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
+    except _MailAccountError as error:
         return JsonResponse({"error": str(error)}, status=400)
-    log_openclaw_action(request.household, "outlook_mail", f"E-mail '{message.get('subject')}' gelezen", user=request.openclaw_user)
+    action = "outlook_mail" if account == "outlook" else "imap_mail"
+    try:
+        message = outlook_mail_read(connection, message_id) if account == "outlook" else imap_mail_read(connection, message_id)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, "E-mail lezen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"E-mail '{message.get('subject')}' gelezen", user=request.openclaw_user)
+    message["account"] = account
     return JsonResponse(message)
 
 
-@require_openclaw_token("outlook_mail:write")
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
 @require_POST
-def api_outlook_mail_send(request):
-    connection = _outlook_connection(request)
-    if not connection:
-        return _no_outlook_connection_response()
+def api_mail_send(request):
     try:
         payload = json.loads(request.body)
     except (TypeError, ValueError):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
     to = payload.get("to") or []
     subject = str(payload.get("subject") or "").strip()
     body = str(payload.get("body") or "")
     if not isinstance(to, list) or not to or not subject:
         return JsonResponse({"error": "Velden 'to' (lijst) en 'subject' zijn verplicht."}, status=400)
+    action = "outlook_mail_versturen" if account == "outlook" else "imap_mail_versturen"
     try:
-        outlook_mail_send(connection, to, subject, body, cc=payload.get("cc"))
+        if account == "outlook":
+            outlook_mail_send(connection, to, subject, body, cc=payload.get("cc"))
+        else:
+            imap_mail_send(connection, to, subject, body, cc=payload.get("cc"))
     except ProviderError as error:
-        log_openclaw_action(request.household, "outlook_mail_versturen", f"E-mail '{subject}' versturen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        log_openclaw_action(request.household, action, f"E-mail '{subject}' versturen mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
-    log_openclaw_action(request.household, "outlook_mail_versturen", f"E-mail '{subject}' verstuurd naar {', '.join(to)}", user=request.openclaw_user)
-    return JsonResponse({"sent": True}, status=201)
+    log_openclaw_action(request.household, action, f"E-mail '{subject}' verstuurd naar {', '.join(to)}", user=request.openclaw_user)
+    return JsonResponse({"sent": True, "account": account}, status=201)
 
 
-@require_openclaw_token("outlook_mail:write")
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
 @require_POST
-def api_outlook_mail_reply(request, message_id):
-    connection = _outlook_connection(request)
-    if not connection:
-        return _no_outlook_connection_response()
+def api_mail_reply(request, message_id):
     try:
         payload = json.loads(request.body)
     except (TypeError, ValueError):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
     comment = str(payload.get("comment") or "")
     reply_all = bool(payload.get("reply_all"))
+    action = "outlook_mail_beantwoorden" if account == "outlook" else "imap_mail_beantwoorden"
     try:
-        outlook_mail_reply(connection, message_id, comment, reply_all=reply_all)
+        if account == "outlook":
+            outlook_mail_reply(connection, message_id, comment, reply_all=reply_all)
+        else:
+            imap_mail_reply(connection, message_id, comment, reply_all=reply_all)
     except ProviderError as error:
-        log_openclaw_action(request.household, "outlook_mail_beantwoorden", "E-mail beantwoorden mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        log_openclaw_action(request.household, action, "E-mail beantwoorden mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
-    log_openclaw_action(request.household, "outlook_mail_beantwoorden", "E-mail beantwoord", user=request.openclaw_user)
-    return JsonResponse({"sent": True})
+    log_openclaw_action(request.household, action, "E-mail beantwoord", user=request.openclaw_user)
+    return JsonResponse({"sent": True, "account": account})
 
 
 @require_openclaw_token("outlook_todo:read")
