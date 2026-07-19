@@ -75,7 +75,7 @@ def vandaag(ctx: Context) -> dict:
 
 
 @mcp.tool()
-def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None, toegewezen_aan: str | None = None, bron: str | None = None, bron_url: str | None = None) -> dict:
+def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, list_name: str | None = None, assigned_to: str | None = None, source_label: str | None = None, source_url: str | None = None) -> dict:
     """Add a new task to the household's task list.
 
     Args:
@@ -83,19 +83,20 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         due_at: Optional ISO 8601 deadline, e.g. "2026-07-20T18:00:00".
         priority: Optional priority: 1 (low), 2 (normal, default), 3 (high).
         notes: Optional free-text notes.
-        lijst: Optional name of a task list to file this under, e.g. "Boodschappen" or
+        list_name: Optional name of a task list to file this under, e.g. "Boodschappen" or
             "Klussen". Created automatically if it doesn't exist yet — see taak_lijsten()
             for the existing ones. Omit to leave the task unsorted ("Zonder lijst").
-        toegewezen_aan: Optional household member to assign this to, by name — a real
+        assigned_to: Optional household member to assign this to, by name — a real
             assignment the app understands, not just text in the title or notes. Use
             gezinsleden() to see valid names first if unsure; an ambiguous or unknown
             name returns a clear error instead of silently guessing.
-        bron: Where this task came from, e.g. "Notulen jeugdcommissie 12 juli 2026" or
-            "WhatsApp-gesprek met Denise". Shown as a badge on the task so the household
+        source_label: Where this task came from, e.g. "Notulen jeugdcommissie 12 juli 2026"
+            or "WhatsApp-gesprek met Denise". Shown as a badge on the task so the household
             always knows where it originated. ALWAYS fill this in whenever the task was
             derived from a document, conversation, or meeting rather than said directly —
-            it's the whole point of letting an agent create tasks unsupervised.
-        bron_url: Optional link to that source (e.g. a Dropbox shared link), shown as a
+            it's the whole point of letting an agent create tasks unsupervised. Didn't know
+            the source at creation time? Set it later with taak_bijwerken.
+        source_url: Optional link to that source (e.g. a Dropbox shared link), shown as a
             clickable link on the badge. Omit if there's no link, e.g. for a spoken
             conversation.
     """
@@ -106,14 +107,14 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         payload["priority"] = priority
     if notes:
         payload["notes"] = notes
-    if lijst:
-        payload["lijst"] = lijst
-    if toegewezen_aan:
-        payload["toegewezen_aan"] = toegewezen_aan
-    if bron:
-        payload["bron"] = bron
-    if bron_url:
-        payload["bron_url"] = bron_url
+    if list_name:
+        payload["list_name"] = list_name
+    if assigned_to:
+        payload["assigned_to"] = assigned_to
+    if source_label:
+        payload["source_label"] = source_label
+    if source_url:
+        payload["source_url"] = source_url
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/taken/", json=payload))
 
@@ -121,70 +122,84 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
 @mcp.tool()
 def gezinsleden(ctx: Context) -> dict:
     """List the household's members by their exact name, each with a numeric id. Use this
-    before assigning a task with taak_toevoegen's `toegewezen_aan` or taak_toewijzen, so
+    before assigning a task with taak_toevoegen's or taak_bijwerken's `assigned_to`, so
     the name you pass matches exactly."""
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/gezinsleden/"))
 
 
 @mcp.tool()
-def taak_toewijzen(ctx: Context, task_id: int, toegewezen_aan: str | None = None) -> dict:
-    """Assign (or unassign) an EXISTING task to a household member by name — a real
-    assignment the app understands and shows on the task, not just text in the title.
+def taak_bijwerken(ctx: Context, task_id: int, title: str | None = None, notes: str | None = None, due_at: str | None = None, priority: int | None = None, list_name: str | None = None, assigned_to: str | None = None, source_label: str | None = None, source_url: str | None = None) -> dict:
+    """Update one or more fields on an EXISTING task — the one tool for changing anything
+    about a task except its completion state (use taak_afronden for that). Only the
+    arguments you actually pass are changed; everything else is left as-is. This is also
+    how you set a source on a task that didn't get one at creation time.
 
     Args:
         task_id: The task's numeric id (from taken() or vandaag()).
-        toegewezen_aan: The member's name (see gezinsleden()). Omit or pass an empty
-            string to unassign.
+        title: New title, if renaming.
+        notes: New free-text notes. Pass "" to clear.
+        due_at: New ISO 8601 deadline. Pass "" to clear.
+        priority: New priority: 1 (low), 2 (normal), 3 (high).
+        list_name: Move to this list by name — created automatically if it doesn't exist
+            yet. Pass "" to move the task back out of any list ("Zonder lijst").
+        assigned_to: Assign to this household member by name (see gezinsleden()). Pass ""
+            to unassign.
+        source_label: Where this task came from — set this whenever you learn the origin
+            of a task that doesn't have one yet, e.g. after finding the source document
+            later. Pass "" to clear.
+        source_url: Optional link to that source. Pass "" to clear.
     """
+    payload = {}
+    if title is not None:
+        payload["title"] = title
+    if notes is not None:
+        payload["notes"] = notes
+    if due_at is not None:
+        payload["due_at"] = due_at
+    if priority is not None:
+        payload["priority"] = priority
+    if list_name is not None:
+        payload["list_name"] = list_name
+    if assigned_to is not None:
+        payload["assigned_to"] = assigned_to
+    if source_label is not None:
+        payload["source_label"] = source_label
+    if source_url is not None:
+        payload["source_url"] = source_url
     with _client(ctx) as client:
-        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/toewijzen/", json={"toegewezen_aan": toegewezen_aan or ""}))
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/bijwerken/", json=payload))
 
 
 @mcp.tool()
 def taak_lijsten(ctx: Context) -> dict:
     """List the household's task lists ("lijstjes"), each with how many open tasks it has.
-    Use this to see what lists already exist before deciding whether taak_toevoegen's
-    `lijst` argument should reuse one or create a new one."""
+    Use this to see what lists already exist before deciding whether taak_toevoegen's or
+    taak_bijwerken's `list_name` argument should reuse one or create a new one."""
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/taken/lijstjes/"))
 
 
 @mcp.tool()
-def taak_lijst_aanmaken(ctx: Context, naam: str) -> dict:
+def taak_lijst_aanmaken(ctx: Context, name: str) -> dict:
     """Create a new, empty task list ("lijstje"). If a list with this name already exists,
     returns that one instead of creating a duplicate — safe to call speculatively.
-    Usually unnecessary: taak_toevoegen's `lijst` argument creates the list automatically
-    if needed, so only call this to make an empty list with no task yet.
+    Usually unnecessary: taak_toevoegen's/taak_bijwerken's `list_name` argument creates the
+    list automatically if needed, so only call this to make an empty list with no task yet.
 
     Args:
-        naam: The list's name, e.g. "Klussen" or "Verjaardag Emma".
+        name: The list's name, e.g. "Klussen" or "Verjaardag Emma".
     """
     with _client(ctx) as client:
-        return _checked(client.post("/instellingen/api/openclaw/taken/lijstjes/toevoegen/", json={"naam": naam}))
-
-
-@mcp.tool()
-def taak_verplaatsen(ctx: Context, task_id: int, lijst: str | None = None) -> dict:
-    """Move an EXISTING task into a (possibly new) list, without affecting whether it's
-    done — use this to organize tasks you already know about, instead of taak_afronden
-    + taak_toevoegen, which would wrongly mark the original as completed.
-
-    Args:
-        task_id: The task's numeric id (from taken() or vandaag()).
-        lijst: The target list's name — created automatically if it doesn't exist yet.
-            Omit or pass an empty string to move the task back out of any list.
-    """
-    with _client(ctx) as client:
-        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/verplaatsen/", json={"lijst": lijst or ""}))
+        return _checked(client.post("/instellingen/api/openclaw/taken/lijstjes/toevoegen/", json={"name": name}))
 
 
 @mcp.tool()
 def taken(ctx: Context) -> dict:
     """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
-    preview. Each task includes its list ("lijst", null if unsorted), notes, due date,
-    priority, and whether OpenClaw created it. Use this before organizing tasks into
-    lists with taak_verplaatsen, so nothing gets missed."""
+    preview. Each task includes its list ("list", null if unsorted), notes, due date,
+    priority, source, and whether OpenClaw created it. Use this before organizing tasks
+    with taak_bijwerken, so nothing gets missed."""
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/taken/alle/"))
 

@@ -107,12 +107,13 @@ def api_add_task(request):
     except (TypeError, ValueError):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
     payload.setdefault("priority", Task.Priority.NORMAL)
-    list_name = str(payload.get("lijst") or "").strip()
-    assignee_name = str(payload.get("toegewezen_aan") or "").strip()
-    source_label = str(payload.get("bron") or "").strip()[:300]
-    source_url = str(payload.get("bron_url") or "").strip()[:500]
-    form = TaskForm(payload)
-    form.fields["assigned_to"].queryset = User.objects.filter(memberships__household=request.household).distinct()
+    list_name = str(payload.get("list_name") or "").strip()
+    assignee_name = str(payload.get("assigned_to") or "").strip()
+    source_label = str(payload.get("source_label") or "").strip()[:300]
+    source_url = str(payload.get("source_url") or "").strip()[:500]
+    # assigned_to is also a TaskForm field expecting a user PK — this endpoint accepts a
+    # free-text name instead and resolves it separately, so exclude it from form binding.
+    form = TaskForm({key: value for key, value in payload.items() if key != "assigned_to"})
     if not form.is_valid():
         log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
         return JsonResponse({"error": "Ongeldige taakvelden.", "details": form.errors}, status=400)
@@ -142,10 +143,10 @@ def api_add_task(request):
     return JsonResponse({
         "id": task.id,
         "title": task.title,
-        "lijst": task.list.name if task.list else None,
-        "toegewezen_aan": str(task.assigned_to) if task.assigned_to else None,
-        "bron": task.source_label or None,
-        "bron_url": task.source_url or None,
+        "list": task.list.name if task.list else None,
+        "assigned_to": str(task.assigned_to) if task.assigned_to else None,
+        "source_label": task.source_label or None,
+        "source_url": task.source_url or None,
     }, status=201)
 
 
@@ -170,9 +171,9 @@ def api_add_task_list(request):
         payload = json.loads(request.body)
     except (TypeError, ValueError):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
-    name = str(payload.get("naam") or "").strip()
+    name = str(payload.get("name") or "").strip()
     if not name:
-        return JsonResponse({"error": "Veld 'naam' is verplicht."}, status=400)
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
     task_list, created = TaskList.objects.get_or_create(household=request.household, name=name)
     log_openclaw_action(request.household, "taak_lijst_aanmaken", f"Lijstje '{task_list.name}' " + ("aangemaakt" if created else "bestond al"), user=request.openclaw_user)
     return JsonResponse({"id": task_list.id, "name": task_list.name, "created": created}, status=201 if created else 200)
@@ -180,45 +181,106 @@ def api_add_task_list(request):
 
 @require_openclaw_token("taken:write")
 @require_POST
-def api_move_task(request, task_id):
-    """Re-file an existing task under a (possibly new) list, without touching completion state."""
+def api_update_task(request, task_id):
+    """Partial update of any field on an existing task, except completion state (see api_complete_task).
+
+    Only keys present in the JSON payload are changed — omit a key to leave that field
+    untouched. Send an empty string for list_name/assigned_to/source_label/source_url to
+    clear that field.
+    """
     task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
     try:
         payload = json.loads(request.body) if request.body else {}
     except (TypeError, ValueError):
-        payload = {}
-    list_name = str(payload.get("lijst") or "").strip()
-    task_list = None
-    if list_name:
-        task_list, _ = TaskList.objects.get_or_create(household=request.household, name=list_name)
-    base_position = Task.objects.for_household(request.household).filter(list=task_list).aggregate(Max("position"))["position__max"]
-    task.list = task_list
-    task.position = (base_position + 1) if base_position is not None else 0
-    task.save(update_fields=["list", "position", "updated_at"])
-    log_openclaw_action(request.household, "taak_verplaatsen", f"Taak '{task.title}' verplaatst naar " + (f"lijstje '{task_list.name}'" if task_list else "Zonder lijst"), user=request.openclaw_user)
-    return JsonResponse({"id": task.id, "title": task.title, "lijst": task_list.name if task_list else None})
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
 
+    update_fields = ["updated_at"]
 
-@require_openclaw_token("taken:write")
-@require_POST
-def api_assign_task(request, task_id):
-    """Assign (or unassign) an existing task to a household member — a real assignment, not just text."""
-    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
-    try:
-        payload = json.loads(request.body) if request.body else {}
-    except (TypeError, ValueError):
-        payload = {}
-    name = str(payload.get("toegewezen_aan") or "").strip()
-    if name:
+    if "title" in payload:
+        title = str(payload["title"] or "").strip()[:240]
+        if not title:
+            return JsonResponse({"error": "Titel mag niet leeg zijn."}, status=400)
+        task.title = title
+        update_fields.append("title")
+
+    if "notes" in payload:
+        task.notes = str(payload["notes"] or "")
+        update_fields.append("notes")
+
+    if "due_at" in payload:
+        due_at_raw = payload["due_at"]
+        if due_at_raw:
+            parsed = parse_datetime(str(due_at_raw))
+            if parsed is None:
+                return JsonResponse({"error": f"'{due_at_raw}' is geen geldige datum/tijd."}, status=400)
+            if timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed)
+            task.due_at = parsed
+        else:
+            task.due_at = None
+        update_fields.append("due_at")
+
+    if "priority" in payload:
         try:
-            task.assigned_to = _resolve_household_member(request.household, name)
-        except ValueError as error:
-            return JsonResponse({"error": str(error)}, status=400)
-    else:
-        task.assigned_to = None
-    task.save(update_fields=["assigned_to", "updated_at"])
-    log_openclaw_action(request.household, "taak_toewijzen", f"Taak '{task.title}' toegewezen aan " + (str(task.assigned_to) if task.assigned_to else "niemand"), user=request.openclaw_user)
-    return JsonResponse({"id": task.id, "title": task.title, "toegewezen_aan": str(task.assigned_to) if task.assigned_to else None})
+            priority = int(payload["priority"])
+        except (TypeError, ValueError):
+            priority = None
+        if priority not in Task.Priority.values:
+            return JsonResponse({"error": "Prioriteit moet 1 (laag), 2 (normaal) of 3 (hoog) zijn."}, status=400)
+        task.priority = priority
+        update_fields.append("priority")
+
+    if "list_name" in payload:
+        list_name = str(payload["list_name"] or "").strip()
+        task_list = None
+        if list_name:
+            task_list, _ = TaskList.objects.get_or_create(household=request.household, name=list_name)
+        base_position = Task.objects.for_household(request.household).filter(list=task_list).aggregate(Max("position"))["position__max"]
+        task.list = task_list
+        task.position = (base_position + 1) if base_position is not None else 0
+        update_fields += ["list", "position"]
+
+    if "assigned_to" in payload:
+        assignee_name = str(payload["assigned_to"] or "").strip()
+        if assignee_name:
+            try:
+                task.assigned_to = _resolve_household_member(request.household, assignee_name)
+            except ValueError as error:
+                return JsonResponse({"error": str(error)}, status=400)
+        else:
+            task.assigned_to = None
+        update_fields.append("assigned_to")
+
+    if "source_label" in payload:
+        task.source_label = str(payload["source_label"] or "").strip()[:300]
+        update_fields.append("source_label")
+
+    if "source_url" in payload:
+        source_url = str(payload["source_url"] or "").strip()[:500]
+        if source_url:
+            try:
+                URLValidator()(source_url)
+            except ValidationError:
+                return JsonResponse({"error": f"'{source_url}' is geen geldige URL."}, status=400)
+        task.source_url = source_url
+        update_fields.append("source_url")
+
+    if len(update_fields) == 1:
+        return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
+
+    task.save(update_fields=update_fields)
+    log_openclaw_action(request.household, "taak_bijwerken", f"Taak '{task.title}' bijgewerkt", user=request.openclaw_user)
+    return JsonResponse({
+        "id": task.id,
+        "title": task.title,
+        "notes": task.notes,
+        "due_at": task.due_at.isoformat() if task.due_at else None,
+        "priority": task.priority,
+        "list": task.list.name if task.list else None,
+        "assigned_to": str(task.assigned_to) if task.assigned_to else None,
+        "source_label": task.source_label or None,
+        "source_url": task.source_url or None,
+    })
 
 
 @require_openclaw_token("vandaag:read")
@@ -236,10 +298,10 @@ def api_all_tasks(request):
                 "due_at": task.due_at.isoformat() if task.due_at else None,
                 "priority": task.priority,
                 "assigned_to": str(task.assigned_to) if task.assigned_to else None,
-                "lijst": task.list.name if task.list else None,
+                "list": task.list.name if task.list else None,
                 "created_by_agent": task.created_by_agent,
-                "bron": task.source_label or None,
-                "bron_url": task.source_url or None,
+                "source_label": task.source_label or None,
+                "source_url": task.source_url or None,
             }
             for task in tasks
         ],
