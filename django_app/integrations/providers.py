@@ -2128,6 +2128,136 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
     return {"calendars": synced_calendars, "events": total}
 
 
+def _outlook_headers(connection: IntegrationConnection) -> dict:
+    return {
+        "Authorization": f"Bearer {_outlook_token(connection)}",
+        "Prefer": 'outlook.body-content-type="text"',
+        "Content-Type": "application/json",
+    }
+
+
+def _outlook_mail_summary(message: dict) -> dict:
+    sender = (message.get("from") or {}).get("emailAddress", {})
+    return {
+        "id": message.get("id"),
+        "subject": message.get("subject") or "",
+        "from": sender.get("address", ""),
+        "from_name": sender.get("name", ""),
+        "received_at": message.get("receivedDateTime"),
+        "is_read": bool(message.get("isRead")),
+        "preview": message.get("bodyPreview", ""),
+    }
+
+
+def outlook_mail_overview(connection: IntegrationConnection, folder: str = "inbox", unread_only: bool = False, top: int = 20) -> list[dict]:
+    """List recent messages in a mail folder (default inbox), newest first."""
+    headers = _outlook_headers(connection)
+    params = {"$select": "id,subject,from,receivedDateTime,isRead,bodyPreview", "$top": min(top, 50), "$orderby": "receivedDateTime desc"}
+    if unread_only:
+        params["$filter"] = "isRead eq false"
+    response = _request_with_retry("GET", f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages", headers=headers, params=params, timeout=20)
+    payload = _safe_response_json(response, "Outlook")
+    return [_outlook_mail_summary(message) for message in payload.get("value", [])]
+
+
+def outlook_mail_read(connection: IntegrationConnection, message_id: str) -> dict:
+    """Read the full text content of one message, given its id (from outlook_mail_overview)."""
+    headers = _outlook_headers(connection)
+    params = {"$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body"}
+    response = _request_with_retry("GET", f"https://graph.microsoft.com/v1.0/me/messages/{message_id}", headers=headers, params=params, timeout=20)
+    message = _safe_response_json(response, "Outlook")
+    summary = _outlook_mail_summary(message)
+    summary["to"] = [recipient.get("emailAddress", {}).get("address", "") for recipient in message.get("toRecipients", [])]
+    summary["cc"] = [recipient.get("emailAddress", {}).get("address", "") for recipient in message.get("ccRecipients", [])]
+    summary["body"] = (message.get("body") or {}).get("content", "")
+    return summary
+
+
+def outlook_mail_send(connection: IntegrationConnection, to: list[str], subject: str, body: str, cc: list[str] | None = None) -> None:
+    """Send a new email."""
+    headers = _outlook_headers(connection)
+    message = {
+        "subject": subject,
+        "body": {"contentType": "Text", "content": body},
+        "toRecipients": [{"emailAddress": {"address": address}} for address in to],
+    }
+    if cc:
+        message["cc"] = [{"emailAddress": {"address": address}} for address in cc]
+    response = _request_with_retry("POST", "https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json={"message": message}, timeout=20)
+    _safe_response_json(response, "Outlook")
+
+
+def outlook_mail_reply(connection: IntegrationConnection, message_id: str, comment: str, reply_all: bool = False) -> None:
+    """Reply to an existing message, given its id (from outlook_mail_overview/outlook_mail_read)."""
+    headers = _outlook_headers(connection)
+    action = "replyAll" if reply_all else "reply"
+    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/{action}", headers=headers, json={"comment": comment}, timeout=20)
+    _safe_response_json(response, "Outlook")
+
+
+def _outlook_todo_task_summary(task: dict, list_id: str) -> dict:
+    due = (task.get("dueDateTime") or {}).get("dateTime")
+    return {
+        "id": task.get("id"),
+        "list_id": list_id,
+        "title": task.get("title") or "",
+        "status": task.get("status", "notStarted"),
+        "due_at": due,
+        "notes": (task.get("body") or {}).get("content", ""),
+    }
+
+
+def outlook_todo_lists(connection: IntegrationConnection) -> list[dict]:
+    """List the household member's Microsoft To Do lists."""
+    headers = _outlook_headers(connection)
+    response = _request_with_retry("GET", "https://graph.microsoft.com/v1.0/me/todo/lists", headers=headers, params={"$select": "id,displayName"}, timeout=20)
+    payload = _safe_response_json(response, "Outlook")
+    return [{"id": entry.get("id"), "name": entry.get("displayName", "")} for entry in payload.get("value", [])]
+
+
+def outlook_todo_tasks(connection: IntegrationConnection, list_id: str, include_completed: bool = False) -> list[dict]:
+    """List tasks in a Microsoft To Do list, given its id (from outlook_todo_lists)."""
+    headers = _outlook_headers(connection)
+    params = {"$select": "id,title,status,dueDateTime,body"}
+    if not include_completed:
+        params["$filter"] = "status ne 'completed'"
+    response = _request_with_retry("GET", f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_id}/tasks", headers=headers, params=params, timeout=20)
+    payload = _safe_response_json(response, "Outlook")
+    return [_outlook_todo_task_summary(task, list_id) for task in payload.get("value", [])]
+
+
+def outlook_todo_task_create(connection: IntegrationConnection, list_id: str, title: str, due_date: str | None = None, notes: str | None = None) -> dict:
+    """Create a new task in a Microsoft To Do list, given its id (from outlook_todo_lists)."""
+    headers = _outlook_headers(connection)
+    body = {"title": title}
+    if due_date:
+        body["dueDateTime"] = {"dateTime": due_date, "timeZone": "Europe/Amsterdam"}
+    if notes:
+        body["body"] = {"content": notes, "contentType": "text"}
+    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_id}/tasks", headers=headers, json=body, timeout=20)
+    task = _safe_response_json(response, "Outlook")
+    return _outlook_todo_task_summary(task, list_id)
+
+
+def outlook_todo_task_update(connection: IntegrationConnection, list_id: str, task_id: str, title: str | None = None, due_date: str | None = None, notes: str | None = None, status: str | None = None) -> dict:
+    """Partial update of an existing To Do task, given the list and task id."""
+    headers = _outlook_headers(connection)
+    body: dict = {}
+    if title is not None:
+        body["title"] = title
+    if due_date is not None:
+        body["dueDateTime"] = {"dateTime": due_date, "timeZone": "Europe/Amsterdam"} if due_date else None
+    if notes is not None:
+        body["body"] = {"content": notes, "contentType": "text"}
+    if status is not None:
+        body["status"] = status
+    if not body:
+        raise ProviderError("Geef minstens één veld op om te wijzigen.")
+    response = _request_with_retry("PATCH", f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_id}/tasks/{task_id}", headers=headers, json=body, timeout=20)
+    task = _safe_response_json(response, "Outlook")
+    return _outlook_todo_task_summary(task, list_id)
+
+
 def _bunq_request(url: str, method: str, token: str, private_key, body: dict | None = None):
     raw = json.dumps(body) if body else ""
     signature = private_key.sign(raw.encode(), padding.PKCS1v15(), hashes.SHA256())

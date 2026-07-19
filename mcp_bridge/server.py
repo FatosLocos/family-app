@@ -524,5 +524,126 @@ def dropbox_bestand_ruw_lezen(ctx: Context, path: str) -> dict:
     return result
 
 
+@mcp.tool()
+def e_mail_overzicht(ctx: Context, folder: str | None = None, unread_only: bool = False) -> dict:
+    """List recent Outlook messages in a mail folder, newest first (subject/sender/preview
+    only — use e_mail_lezen for the full body). Requires this household member to have
+    linked their own Outlook account in Instellingen.
+
+    Args:
+        folder: Mail folder to list, e.g. "inbox" (default), "sentitems", "drafts".
+        unread_only: Only return unread messages (default False).
+    """
+    params = {}
+    if folder:
+        params["folder"] = folder
+    if unread_only:
+        params["unread_only"] = "true"
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/outlook/mail/", params=params))
+
+
+@mcp.tool()
+def e_mail_lezen(ctx: Context, message_id: str) -> dict:
+    """Read the full text content of one Outlook message, given its id (from e_mail_overzicht)."""
+    with _client(ctx) as client:
+        return _checked(client.get(f"/instellingen/api/openclaw/outlook/mail/{message_id}/"))
+
+
+@mcp.tool()
+def e_mail_versturen(ctx: Context, to: list[str], subject: str, body: str, cc: list[str] | None = None) -> dict:
+    """Send a new email from this household member's own Outlook account.
+
+    Args:
+        to: Recipient email addresses.
+        subject: Email subject.
+        body: Plain-text email body.
+        cc: Optional cc email addresses.
+    """
+    payload = {"to": to, "subject": subject, "body": body}
+    if cc:
+        payload["cc"] = cc
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/outlook/mail/versturen/", json=payload))
+
+
+@mcp.tool()
+def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: bool = False) -> dict:
+    """Reply to an existing Outlook message, given its id (from e_mail_overzicht/e_mail_lezen).
+
+    Args:
+        message_id: The message's id.
+        comment: The reply text.
+        reply_all: Reply to all recipients instead of just the sender (default False).
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/outlook/mail/{message_id}/beantwoorden/", json={"comment": comment, "reply_all": reply_all}))
+
+
+@mcp.tool()
+def to_do_lijsten(ctx: Context) -> dict:
+    """List this household member's Microsoft To Do lists."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/outlook/todo/lijsten/"))
+
+
+@mcp.tool()
+def to_do_taken(ctx: Context, list_id: str, include_completed: bool = False) -> dict:
+    """List tasks in a Microsoft To Do list, given its id (from to_do_lijsten).
+
+    Args:
+        list_id: The list's id.
+        include_completed: Include already-completed tasks (default False, open tasks only).
+    """
+    params = {"include_completed": "true"} if include_completed else {}
+    with _client(ctx) as client:
+        return _checked(client.get(f"/instellingen/api/openclaw/outlook/todo/{list_id}/", params=params))
+
+
+@mcp.tool()
+def to_do_toevoegen(ctx: Context, list_id: str, title: str, due_date: str | None = None, notes: str | None = None) -> dict:
+    """Add a new task to a Microsoft To Do list, given its id (from to_do_lijsten).
+
+    Args:
+        list_id: The list's id.
+        title: What the task is.
+        due_date: Optional ISO 8601 due date/time.
+        notes: Optional free-text notes.
+    """
+    payload = {"title": title}
+    if due_date:
+        payload["due_date"] = due_date
+    if notes:
+        payload["notes"] = notes
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/outlook/todo/{list_id}/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def to_do_bijwerken(ctx: Context, list_id: str, task_id: str, title: str | None = None, due_date: str | None = None, notes: str | None = None, status: str | None = None) -> dict:
+    """Update one or more fields on an existing To Do task, including marking it done. Only
+    the arguments you pass are changed.
+
+    Args:
+        list_id: The list's id (from to_do_lijsten).
+        task_id: The task's id (from to_do_taken).
+        title: New title.
+        due_date: New ISO 8601 due date/time.
+        notes: New free-text notes.
+        status: New status — use "completed" to mark done, "notStarted" to reopen.
+    """
+    payload = {}
+    if title is not None:
+        payload["title"] = title
+    if due_date is not None:
+        payload["due_date"] = due_date
+    if notes is not None:
+        payload["notes"] = notes
+    if status is not None:
+        payload["status"] = status
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/outlook/todo/{list_id}/{task_id}/bijwerken/", json=payload))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

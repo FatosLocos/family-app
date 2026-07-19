@@ -23,7 +23,22 @@ from households.decorators import household_required, parent_required
 from identity.models import User
 from integrations.models import IntegrationConnection, OpenClawNotificationPreference, OpenClawToken
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
-from integrations.providers import ProviderError, dropbox_download_file_raw, dropbox_list_folder_contents, dropbox_overview, dropbox_read_file_text, dropbox_search
+from integrations.providers import (
+    ProviderError,
+    dropbox_download_file_raw,
+    dropbox_list_folder_contents,
+    dropbox_overview,
+    dropbox_read_file_text,
+    dropbox_search,
+    outlook_mail_overview,
+    outlook_mail_read,
+    outlook_mail_reply,
+    outlook_mail_send,
+    outlook_todo_lists,
+    outlook_todo_task_create,
+    outlook_todo_task_update,
+    outlook_todo_tasks,
+)
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
 from planning.models import CalendarEvent, CalendarSource
@@ -768,3 +783,169 @@ def api_dropbox_download_raw(request):
         return JsonResponse({"error": str(error)}, status=400)
     log_openclaw_action(request.household, "dropbox", f"Bestand '{path}' ruw gedownload", user=request.openclaw_user)
     return JsonResponse(result)
+
+
+def _outlook_connection(request):
+    """Outlook is per-user (each family member links their own account), unlike Dropbox."""
+    return IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.OUTLOOK, user=request.openclaw_user).first()
+
+
+def _no_outlook_connection_response():
+    return JsonResponse({"error": "Je hebt geen Outlook-account gekoppeld in Instellingen."}, status=400)
+
+
+@require_openclaw_token("outlook_mail:read")
+@require_GET
+def api_outlook_mail_overview(request):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    folder = request.GET.get("folder") or "inbox"
+    unread_only = request.GET.get("unread_only") == "true"
+    try:
+        messages = outlook_mail_overview(connection, folder=folder, unread_only=unread_only)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_mail", "E-mailoverzicht opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_mail", "E-mailoverzicht opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"messages": messages})
+
+
+@require_openclaw_token("outlook_mail:read")
+@require_GET
+def api_outlook_mail_read(request, message_id):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        message = outlook_mail_read(connection, message_id)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_mail", "E-mail lezen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_mail", f"E-mail '{message.get('subject')}' gelezen", user=request.openclaw_user)
+    return JsonResponse(message)
+
+
+@require_openclaw_token("outlook_mail:write")
+@require_POST
+def api_outlook_mail_send(request):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    to = payload.get("to") or []
+    subject = str(payload.get("subject") or "").strip()
+    body = str(payload.get("body") or "")
+    if not isinstance(to, list) or not to or not subject:
+        return JsonResponse({"error": "Velden 'to' (lijst) en 'subject' zijn verplicht."}, status=400)
+    try:
+        outlook_mail_send(connection, to, subject, body, cc=payload.get("cc"))
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_mail_versturen", f"E-mail '{subject}' versturen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_mail_versturen", f"E-mail '{subject}' verstuurd naar {', '.join(to)}", user=request.openclaw_user)
+    return JsonResponse({"sent": True}, status=201)
+
+
+@require_openclaw_token("outlook_mail:write")
+@require_POST
+def api_outlook_mail_reply(request, message_id):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    comment = str(payload.get("comment") or "")
+    reply_all = bool(payload.get("reply_all"))
+    try:
+        outlook_mail_reply(connection, message_id, comment, reply_all=reply_all)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_mail_beantwoorden", "E-mail beantwoorden mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_mail_beantwoorden", "E-mail beantwoord", user=request.openclaw_user)
+    return JsonResponse({"sent": True})
+
+
+@require_openclaw_token("outlook_todo:read")
+@require_GET
+def api_outlook_todo_lists(request):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        lists = outlook_todo_lists(connection)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_todo", "To-do-lijsten opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_todo", "To-do-lijsten opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"lists": lists})
+
+
+@require_openclaw_token("outlook_todo:read")
+@require_GET
+def api_outlook_todo_tasks(request, list_id):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    include_completed = request.GET.get("include_completed") == "true"
+    try:
+        tasks = outlook_todo_tasks(connection, list_id, include_completed=include_completed)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_todo", "To-do-taken opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_todo", "To-do-taken opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"tasks": tasks})
+
+
+@require_openclaw_token("outlook_todo:write")
+@require_POST
+def api_outlook_todo_add(request, list_id):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        return JsonResponse({"error": "Veld 'title' is verplicht."}, status=400)
+    try:
+        task = outlook_todo_task_create(connection, list_id, title, due_date=payload.get("due_date"), notes=payload.get("notes"))
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_todo_toevoegen", f"To-do '{title}' toevoegen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_todo_toevoegen", f"To-do '{title}' toegevoegd", user=request.openclaw_user)
+    return JsonResponse(task, status=201)
+
+
+@require_openclaw_token("outlook_todo:write")
+@require_POST
+def api_outlook_todo_update(request, list_id, task_id):
+    connection = _outlook_connection(request)
+    if not connection:
+        return _no_outlook_connection_response()
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        task = outlook_todo_task_update(
+            connection,
+            list_id,
+            task_id,
+            title=payload.get("title"),
+            due_date=payload.get("due_date"),
+            notes=payload.get("notes"),
+            status=payload.get("status"),
+        )
+    except ProviderError as error:
+        log_openclaw_action(request.household, "outlook_todo_bijwerken", "To-do bijwerken mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "outlook_todo_bijwerken", f"To-do '{task.get('title')}' bijgewerkt", user=request.openclaw_user)
+    return JsonResponse(task)

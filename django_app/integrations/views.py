@@ -90,6 +90,7 @@ def index(request):
         "connections": IntegrationConnection.objects.for_household(request.household).order_by("provider"),
         "recent_audits": IntegrationAudit.objects.for_household(request.household).select_related("user")[:8],
         "outlook_form": OutlookConfigForm(initial={"client_id": outlook_client_id, "tenant_id": outlook_settings.get("tenant_id", "consumers")}),
+        "outlook_redirect_url": f"{public_origin(request)}/instellingen/outlook/callback/",
         "bunq_form": BunqConfigForm(initial={"client_id": bunq_client_id, "environment": bunq_settings.get("environment", "production")}),
         "hue_form": HueConfigForm(initial={"client_id": hue_client_id, "app_id": hue_settings.get("app_id", ""), "device_name": hue_settings.get("device_name", "Family App")}),
         "hue_redirect_url": f"{public_origin(request)}/instellingen/hue/callback/",
