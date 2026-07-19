@@ -162,10 +162,20 @@ def huis_bedienen(ctx: Context, entity_id: int, action: str, value: str | None =
 
 
 @mcp.tool()
-def agenda(ctx: Context) -> dict:
-    """Get upcoming calendar events for the next two weeks (broader than vandaag()'s today-only preview)."""
+def agenda(ctx: Context, start: str | None = None, end: str | None = None) -> dict:
+    """Get calendar events. Returns the ENTIRE calendar (past and future) unless narrowed.
+
+    Args:
+        start: Optional ISO date/datetime — only events ending on or after this. Omit for no lower bound.
+        end: Optional ISO date/datetime — only events starting before this. Omit for no upper bound.
+    """
+    params = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
     with _client(ctx) as client:
-        return _checked(client.get("/instellingen/api/openclaw/agenda/"))
+        return _checked(client.get("/instellingen/api/openclaw/agenda/", params=params))
 
 
 @mcp.tool()

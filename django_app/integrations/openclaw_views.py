@@ -1,12 +1,13 @@
 """Browser-side token management plus the bearer-token API surface for OpenClaw."""
 import json
-from datetime import timedelta
+from datetime import datetime, time
 
 from django.contrib import messages
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 
 from config.services import build_today_summary
@@ -177,12 +178,32 @@ def api_home_control(request, entity_id):
     return JsonResponse({"id": entity.id, "name": entity.name, "state": entity.state, **result})
 
 
+def _parse_agenda_bound(value):
+    """Accept either a date ("2026-08-01") or a full ISO datetime for start/end filters."""
+    if not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed is None:
+        parsed_date = parse_date(value)
+        if parsed_date is None:
+            return None
+        parsed = datetime.combine(parsed_date, time.min)
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
 @require_openclaw_token("agenda:read")
 @require_GET
 def api_agenda(request):
-    now = timezone.now()
-    window_end = now + timedelta(days=14)
-    events = CalendarEvent.objects.for_household(request.household).filter(starts_at__lt=window_end, ends_at__gte=now).order_by("starts_at")
+    """No date filter by default — the whole calendar is returned unless start/end narrow it."""
+    events = CalendarEvent.objects.for_household(request.household).order_by("starts_at")
+    start = _parse_agenda_bound(request.GET.get("start"))
+    end = _parse_agenda_bound(request.GET.get("end"))
+    if start:
+        events = events.filter(ends_at__gte=start)
+    if end:
+        events = events.filter(starts_at__lt=end)
     log_openclaw_action(request.household, "agenda", "Agenda opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "events": [
