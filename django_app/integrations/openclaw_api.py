@@ -23,18 +23,18 @@ class TokenError(Exception):
     pass
 
 
-def log_openclaw_action(household, action: str, summary: str, status: str = "success", detail: str = "") -> None:
+def log_openclaw_action(household, action: str, summary: str, status: str = "success", detail: str = "", user=None) -> None:
     """Record what OpenClaw did through FamilyApp, so it's visible in Instellingen."""
     with household_db_scope(household.id):
-        OpenClawActionLog.objects.create(household=household, action=action, summary=summary[:240], status=status, detail=detail)
+        OpenClawActionLog.objects.create(household=household, user=user, action=action, summary=summary[:240], status=status, detail=detail)
 
 
-def create_token(household, label: str = "OpenClaw") -> tuple[OpenClawToken, str]:
-    """Mint a new token, revoking any previously active one for this household."""
+def create_token(household, user, label: str | None = None) -> tuple[OpenClawToken, str]:
+    """Mint a new token for this user, revoking any previously active token of theirs."""
     with household_db_scope(household.id):
-        OpenClawToken.objects.for_household(household).filter(revoked_at__isnull=True).update(revoked_at=timezone.now())
+        OpenClawToken.objects.for_household(household).filter(user=user, revoked_at__isnull=True).update(revoked_at=timezone.now())
         raw_token = secrets.token_urlsafe(32)
-        token = OpenClawToken.objects.create(household=household, label=(label or "OpenClaw").strip()[:120], token_hash=make_password(raw_token))
+        token = OpenClawToken.objects.create(household=household, user=user, label=(label or str(user)).strip()[:120], token_hash=make_password(raw_token))
     return token, f"{household.id}.{raw_token}"
 
 
@@ -50,15 +50,15 @@ def authenticate_token(bearer_value: str) -> OpenClawToken:
     if not separator or not household_part.isdigit() or not raw_token:
         raise TokenError("Ongeldig token.")
     with household_db_scope(int(household_part)):
-        token = (
+        candidates = (
             OpenClawToken.objects.filter(household_id=int(household_part), revoked_at__isnull=True)
             .exclude(token_hash="")
-            .select_related("household")
-            .first()
+            .select_related("household", "user")
         )
-        if not token or not check_password(raw_token, token.token_hash):
-            raise TokenError("Token is niet geautoriseerd.")
-        return token
+        for token in candidates:
+            if check_password(raw_token, token.token_hash):
+                return token
+        raise TokenError("Token is niet geautoriseerd.")
 
 
 def require_openclaw_token(view_func):
@@ -80,6 +80,7 @@ def require_openclaw_token(view_func):
             return JsonResponse({"error": str(error)}, status=401)
         with household_db_scope(token.household_id):
             request.household = token.household
+            request.openclaw_user = token.user
             OpenClawToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
             return view_func(request, *args, **kwargs)
 

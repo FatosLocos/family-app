@@ -104,6 +104,7 @@ class OpenClawToken(models.Model):
     """A household-scoped bearer credential for the OpenClaw chat agent to call our API."""
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="openclaw_tokens")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="openclaw_tokens")
     label = models.CharField(max_length=120, default="OpenClaw")
     token_hash = models.CharField(max_length=255)
     last_used_at = models.DateTimeField(null=True, blank=True)
@@ -120,6 +121,7 @@ class OpenClawActionLog(models.Model):
     """Audit trail of what OpenClaw did through FamilyApp, for user-visible transparency."""
 
     household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="openclaw_action_logs")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="openclaw_action_logs")
     source = models.CharField(max_length=40, default="family-app")
     action = models.CharField(max_length=40)
     summary = models.CharField(max_length=240)

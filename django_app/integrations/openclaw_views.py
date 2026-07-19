@@ -20,7 +20,7 @@ from notifications.models import Notification
 @parent_required
 @require_POST
 def create_openclaw_token(request):
-    _, token = create_token(request.household)
+    _, token = create_token(request.household, request.user)
     request.session["openclaw_token"] = token
     messages.success(request, "Nieuw OpenClaw-token gemaakt. Bewaar het meteen — het wordt niet nogmaals getoond.")
     return redirect("integrations:index")
@@ -39,7 +39,7 @@ def revoke_openclaw_token(request, token_id):
 @require_GET
 def api_today(request):
     summary = build_today_summary(request.household)
-    log_openclaw_action(request.household, "vandaag", "Dagoverzicht opgevraagd")
+    log_openclaw_action(request.household, "vandaag", "Dagoverzicht opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "today": summary["today"].isoformat(),
         "tasks_open": [
@@ -74,12 +74,12 @@ def api_add_task(request):
     form = TaskForm(payload)
     form.fields["assigned_to"].queryset = User.objects.filter(memberships__household=request.household).distinct()
     if not form.is_valid():
-        log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(form.errors))
+        log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
         return JsonResponse({"error": "Ongeldige taakvelden.", "details": form.errors}, status=400)
     task = form.save(commit=False)
     task.household = request.household
     task.save()
-    log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd")
+    log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd", user=request.openclaw_user)
     return JsonResponse({"id": task.id, "title": task.title}, status=201)
 
 
@@ -90,5 +90,5 @@ def api_complete_task(request, task_id):
     task.completed_at = timezone.now()
     task.save(update_fields=["completed_at", "updated_at"])
     Notification.objects.for_household(request.household).filter(dedupe_key=f"task-overdue:{task.id}", read_at__isnull=True).update(read_at=timezone.now())
-    log_openclaw_action(request.household, "taak_afronden", f"Taak '{task.title}' afgerond")
+    log_openclaw_action(request.household, "taak_afronden", f"Taak '{task.title}' afgerond", user=request.openclaw_user)
     return JsonResponse({"id": task.id, "completed_at": task.completed_at.isoformat()})

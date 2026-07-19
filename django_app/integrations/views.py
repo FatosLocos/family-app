@@ -108,9 +108,10 @@ def index(request):
         "probe_pairing_code": request.session.pop("probe_pairing_code", ""),
         "probe_server_url": public_origin(request),
         "local_hue_bridge": local_hue_bridge,
-        "openclaw_tokens": OpenClawToken.objects.for_household(request.household).filter(revoked_at__isnull=True),
-        "openclaw_action_logs": OpenClawActionLog.objects.for_household(request.household)[:15],
+        "openclaw_tokens": OpenClawToken.objects.for_household(request.household).filter(revoked_at__isnull=True).select_related("user"),
+        "openclaw_action_logs": OpenClawActionLog.objects.for_household(request.household).select_related("user")[:15],
         "openclaw_token": request.session.pop("openclaw_token", ""),
+        "openclaw_has_own_token": OpenClawToken.objects.for_household(request.household).filter(user=request.user, revoked_at__isnull=True).exists(),
     })
 
 
