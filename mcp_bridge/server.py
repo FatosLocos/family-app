@@ -52,13 +52,26 @@ def _client(ctx: Context) -> httpx.Client:
     )
 
 
+def _checked(response: httpx.Response) -> dict:
+    """Raise with FamilyApp's own Dutch error message instead of httpx's generic status text.
+
+    `response.raise_for_status()` alone drops the JSON body — the agent would only
+    see "400 Bad Request" and have no way to explain or self-correct the mistake.
+    """
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("error") or response.text
+        except ValueError:
+            detail = response.text
+        raise RuntimeError(f"FamilyApp gaf een fout ({response.status_code}): {detail}")
+    return response.json()
+
+
 @mcp.tool()
 def vandaag(ctx: Context) -> dict:
     """Get today's open tasks, shopping list, and calendar events for this household."""
     with _client(ctx) as client:
-        response = client.get("/instellingen/api/openclaw/vandaag/")
-        response.raise_for_status()
-        return response.json()
+        return _checked(client.get("/instellingen/api/openclaw/vandaag/"))
 
 
 @mcp.tool()
@@ -79,27 +92,21 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
     if notes:
         payload["notes"] = notes
     with _client(ctx) as client:
-        response = client.post("/instellingen/api/openclaw/taken/", json=payload)
-        response.raise_for_status()
-        return response.json()
+        return _checked(client.post("/instellingen/api/openclaw/taken/", json=payload))
 
 
 @mcp.tool()
 def taak_afronden(ctx: Context, task_id: int) -> dict:
     """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list)."""
     with _client(ctx) as client:
-        response = client.post(f"/instellingen/api/openclaw/taken/{task_id}/afronden/")
-        response.raise_for_status()
-        return response.json()
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/afronden/"))
 
 
 @mcp.tool()
 def boodschappen(ctx: Context) -> dict:
     """Get the household's full open shopping list (not capped, unlike vandaag()'s preview)."""
     with _client(ctx) as client:
-        response = client.get("/instellingen/api/openclaw/boodschappen/")
-        response.raise_for_status()
-        return response.json()
+        return _checked(client.get("/instellingen/api/openclaw/boodschappen/"))
 
 
 @mcp.tool()
@@ -117,9 +124,41 @@ def boodschap_toevoegen(ctx: Context, name: str, quantity: str | None = None, ca
     if category:
         payload["category"] = category
     with _client(ctx) as client:
-        response = client.post("/instellingen/api/openclaw/boodschappen/toevoegen/", json=payload)
-        response.raise_for_status()
-        return response.json()
+        return _checked(client.post("/instellingen/api/openclaw/boodschappen/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def huis(ctx: Context) -> dict:
+    """List controllable and readable devices in the house: lights, switches, covers, thermostats, media players, cars, appliances."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/huis/"))
+
+
+@mcp.tool()
+def huis_bedienen(ctx: Context, entity_id: int, action: str, value: str | None = None) -> dict:
+    """Control a device in the house, given its numeric id (from huis()'s entities list).
+
+    Valid actions depend on the device's `domain` (from huis()):
+        light/switch: "on", "off"
+        scene: "activate"
+        script: "run"
+        cover: "open", "close", "stop"
+        climate: "on", "off", "set_temperature" (needs `value` = target °C)
+        media_player: "on", "off", "play_pause", "volume_up", "volume_down"
+    Other sources (Sonos, Spotify, Smartcar, Google Home, LG ThinQ, Home Connect) support
+    additional actions particular to that device — check the device's `attributes` from
+    huis() or simply try a natural action; an invalid one returns a clear Dutch error.
+
+    Args:
+        entity_id: The device's numeric id.
+        action: What to do, e.g. "on", "off", "play_pause", "set_temperature".
+        value: Optional value the action needs, e.g. a target temperature.
+    """
+    payload = {"action": action}
+    if value is not None:
+        payload["value"] = value
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/huis/{entity_id}/bedienen/", json=payload))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from config.services import build_today_summary
+from home.models import HomeEntity
+from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
 from household.models import ShoppingItem, ShoppingList, Task
 from household.tasks import refresh_household_shopping_prices
@@ -126,3 +128,45 @@ def api_add_shopping_item(request):
     refresh_household_shopping_prices.delay(request.household.id)
     log_openclaw_action(request.household, "boodschap_toevoegen", f"Boodschap '{item.name}' toegevoegd", user=request.openclaw_user)
     return JsonResponse({"id": item.id, "name": item.name}, status=201)
+
+
+@require_openclaw_token("huis:read")
+@require_GET
+def api_home_entities(request):
+    entities = HomeEntity.objects.for_household(request.household).filter(is_available=True).order_by("domain", "name")
+    log_openclaw_action(request.household, "huis_lezen", "Apparaten opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "entities": [
+            {
+                "id": entity.id,
+                "name": entity.name,
+                "domain": entity.domain,
+                "state": entity.state,
+                "source": entity.source,
+                "is_supported": entity.is_supported,
+                "attributes": entity.attributes if isinstance(entity.attributes, dict) else {},
+            }
+            for entity in entities
+        ],
+    })
+
+
+@require_openclaw_token("huis:write")
+@require_POST
+def api_home_control(request, entity_id):
+    entity = get_object_or_404(HomeEntity.objects.for_household(request.household), pk=entity_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    action = str(payload.get("action") or "").strip()
+    if not action:
+        return JsonResponse({"error": "Veld 'action' is verplicht."}, status=400)
+    try:
+        result = control_entity(request.household, entity, action, payload.get("value")) or {}
+    except HomeAssistantError as error:
+        log_openclaw_action(request.household, "huis_bedienen", f"Bediening '{action}' op '{entity.name}' mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    entity.refresh_from_db()
+    log_openclaw_action(request.household, "huis_bedienen", f"'{entity.name}': {action}", user=request.openclaw_user)
+    return JsonResponse({"id": entity.id, "name": entity.name, "state": entity.state, **result})
