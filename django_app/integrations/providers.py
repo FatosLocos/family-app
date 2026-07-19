@@ -2253,17 +2253,26 @@ def _dropbox_access_token(connection: IntegrationConnection) -> str:
 
 
 def list_recent_dropbox_files(connection: IntegrationConnection, limit: int = 20) -> list[dict]:
-    """List the household's most recently modified Dropbox files, for AI context — names and metadata only, never content."""
+    """List the household's most recently modified Dropbox files, for AI context — names and metadata only, never content.
+
+    Dropbox's list_folder does not sort by recency, so a single page can easily miss the
+    actual most-recently-modified files in a large account. Fetch a few pages (bounded, not
+    exhaustive) before sorting, to make "recent" reasonably accurate without unbounded calls.
+    """
     access_token = _dropbox_access_token(connection)
-    response = requests.post(
-        "https://api.dropboxapi.com/2/files/list_folder",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json={"path": "", "recursive": False, "include_deleted": False, "limit": 200},
-        timeout=20,
-    )
-    if not response.ok:
-        raise ProviderError("Dropbox kon de bestandenlijst niet ophalen.")
-    entries = response.json().get("entries", [])
+    entries = []
+    payload = {"path": "", "recursive": True, "include_deleted": False, "limit": 200}
+    url = "https://api.dropboxapi.com/2/files/list_folder"
+    for _ in range(5):
+        response = requests.post(url, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}, json=payload, timeout=20)
+        if not response.ok:
+            raise ProviderError("Dropbox kon de bestandenlijst niet ophalen.")
+        data = response.json()
+        entries.extend(data.get("entries", []))
+        if not data.get("has_more"):
+            break
+        url = "https://api.dropboxapi.com/2/files/list_folder/continue"
+        payload = {"cursor": data.get("cursor")}
     files = [entry for entry in entries if entry.get(".tag") == "file"]
     files.sort(key=lambda entry: entry.get("server_modified", ""), reverse=True)
     return [
