@@ -154,11 +154,16 @@ def save_imap_connection(request, cleaned_data: dict) -> IntegrationConnection:
     """Persist this user's IMAP/SMTP credentials. Caller must verify the login works
     (providers.test_imap_login) before calling this — there is no separate OAuth step to
     catch a bad password later, so the check has to happen up front.
+
+    Keyed on (household, user, provider, external_account) rather than just provider, so a
+    user can link several distinct IMAP accounts side by side — resubmitting the same
+    address updates that connection, a different address creates a new one.
     """
     host = cleaned_data["host"].strip()
     username = cleaned_data["username"].strip()
-    connection, _ = IntegrationConnection.objects.get_or_create(household=request.household, user=request.user, provider="imap", defaults={"display_name": "IMAP e-mail"})
-    connection.external_account = username
+    label = cleaned_data.get("label", "").strip() or username
+    connection, _ = IntegrationConnection.objects.get_or_create(household=request.household, user=request.user, provider="imap", external_account=username, defaults={"display_name": label})
+    connection.display_name = label
     connection.secret_encrypted = encrypt(cleaned_data["password"])
     connection.settings = {
         "host": host,

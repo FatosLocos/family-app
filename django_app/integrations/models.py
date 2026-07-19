@@ -47,7 +47,18 @@ class IntegrationConnection(models.Model):
     objects = HouseholdManager()
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=("household", "user", "provider"), name="unique_household_user_provider_connection")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("household", "user", "provider"),
+                condition=~models.Q(provider="imap"),
+                name="unique_household_user_provider_connection",
+            ),
+            models.UniqueConstraint(
+                fields=("household", "user", "provider", "external_account"),
+                condition=models.Q(provider="imap"),
+                name="unique_household_user_imap_account",
+            ),
+        ]
 
 
 class SyncRun(models.Model):

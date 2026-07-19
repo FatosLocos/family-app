@@ -525,16 +525,27 @@ def dropbox_bestand_ruw_lezen(ctx: Context, path: str) -> dict:
 
 
 @mcp.tool()
+def e_mail_accounts(ctx: Context) -> dict:
+    """List every mail account this household member has linked (Outlook and/or one or more
+    IMAP accounts). Use the "account" value from here when e_mail_overzicht/lezen/versturen/
+    beantwoorden need to know which account to use.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/mail/accounts/"))
+
+
+@mcp.tool()
 def e_mail_overzicht(ctx: Context, folder: str | None = None, unread_only: bool = False, account: str | None = None) -> dict:
     """List recent messages in a mail folder, newest first (subject/sender/preview only —
     use e_mail_lezen for the full body). Requires this household member to have linked a
-    mail account (Outlook and/or IMAP) in Instellingen.
+    mail account (Outlook and/or one or more IMAP accounts) in Instellingen.
 
     Args:
         folder: Mail folder to list, e.g. "inbox" (default), "sentitems", "drafts".
         unread_only: Only return unread messages (default False).
-        account: Which linked account to use, "outlook" or "imap". Only required if this
-            household member has linked both — omit it if they only have one.
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
     """
     params = {}
     if folder:
@@ -553,8 +564,9 @@ def e_mail_lezen(ctx: Context, message_id: str, account: str | None = None) -> d
 
     Args:
         message_id: The message's id.
-        account: Which linked account to use, "outlook" or "imap". Only required if this
-            household member has linked both — omit it if they only have one.
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
     """
     params = {"account": account} if account else {}
     with _client(ctx) as client:
@@ -570,8 +582,9 @@ def e_mail_versturen(ctx: Context, to: list[str], subject: str, body: str, cc: l
         subject: Email subject.
         body: Plain-text email body.
         cc: Optional cc email addresses.
-        account: Which linked account to send from, "outlook" or "imap". Only required if
-            this household member has linked both — omit it if they only have one.
+        account: Which linked account to send from — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
     """
     payload = {"to": to, "subject": subject, "body": body}
     if cc:
@@ -590,8 +603,9 @@ def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: 
         message_id: The message's id.
         comment: The reply text.
         reply_all: Reply to all recipients instead of just the sender (default False).
-        account: Which linked account to use, "outlook" or "imap". Only required if this
-            household member has linked both — omit it if they only have one.
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
     """
     payload = {"comment": comment, "reply_all": reply_all}
     if account:

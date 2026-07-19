@@ -35,6 +35,7 @@ urlpatterns = [
     path("api/openclaw/dropbox/zoeken/", openclaw_views.api_dropbox_search, name="api_openclaw_dropbox_search"),
     path("api/openclaw/dropbox/lezen/", openclaw_views.api_dropbox_read, name="api_openclaw_dropbox_read"),
     path("api/openclaw/dropbox/ruw/", openclaw_views.api_dropbox_download_raw, name="api_openclaw_dropbox_download_raw"),
+    path("api/openclaw/mail/accounts/", openclaw_views.api_mail_accounts, name="api_openclaw_mail_accounts"),
     path("api/openclaw/mail/", openclaw_views.api_mail_overview, name="api_openclaw_mail_overview"),
     path("api/openclaw/mail/versturen/", openclaw_views.api_mail_send, name="api_openclaw_mail_send"),
     path("api/openclaw/mail/<str:message_id>/beantwoorden/", openclaw_views.api_mail_reply, name="api_openclaw_mail_reply"),

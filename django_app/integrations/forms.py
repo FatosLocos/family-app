@@ -59,6 +59,7 @@ class GoogleHomeConfigForm(forms.Form):
 
 
 class ImapConfigForm(forms.Form):
+    label = forms.CharField(label="Naam voor deze koppeling", max_length=160, required=False, help_text="Optioneel, handig als je meerdere IMAP-accounts koppelt (bijv. 'Werk' of 'Privé'). Standaard je gebruikersnaam.")
     host = forms.CharField(label="IMAP-server", max_length=240, help_text="Bijvoorbeeld imap.gmail.com.")
     port = forms.IntegerField(label="IMAP-poort", initial=993)
     use_ssl = forms.BooleanField(label="SSL gebruiken (aanbevolen)", required=False, initial=True)

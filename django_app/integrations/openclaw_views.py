@@ -798,8 +798,23 @@ def _no_outlook_connection_response():
     return JsonResponse({"error": "Je hebt geen Outlook-account gekoppeld in Instellingen."}, status=400)
 
 
-def _imap_connection(request):
-    return IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.IMAP, user=request.openclaw_user).first()
+def _imap_connections(request):
+    """A household member can link several IMAP accounts side by side (unlike Outlook)."""
+    return IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.IMAP, user=request.openclaw_user).order_by("external_account")
+
+
+def _mail_account_choices(request):
+    """All mail accounts this household member has linked, keyed by the identifier the
+    `account` parameter expects: "outlook" for Outlook, or the e-mail address for IMAP
+    (since there can be more than one IMAP account).
+    """
+    choices = []
+    outlook_conn = _outlook_connection(request)
+    if outlook_conn:
+        choices.append(("outlook", outlook_conn))
+    for connection in _imap_connections(request):
+        choices.append((connection.external_account, connection))
+    return choices
 
 
 class _MailAccountError(Exception):
@@ -807,36 +822,44 @@ class _MailAccountError(Exception):
 
 
 def _resolve_mail_account(request, account_param, *, write: bool):
-    """Resolve which mail account (outlook/imap) a request should use and confirm the token
-    carries the scope for it. Auto-picks the household member's only linked account when
-    `account_param` is omitted and unambiguous.
+    """Resolve which mail account a request should use and confirm the token carries the
+    scope for it. Auto-picks the household member's only linked account when `account_param`
+    is omitted and unambiguous; otherwise `account_param` must match one of the keys from
+    `_mail_account_choices` ("outlook", or an IMAP account's e-mail address).
     """
-    outlook_conn = _outlook_connection(request)
-    imap_conn = _imap_connection(request)
+    choices = _mail_account_choices(request)
+    if not choices:
+        raise _MailAccountError("Je hebt geen e-mailaccount gekoppeld in Instellingen.")
 
     account = account_param
     if not account:
-        if outlook_conn and imap_conn:
-            raise _MailAccountError("Je hebt zowel Outlook als IMAP gekoppeld — geef 'account' op ('outlook' of 'imap').")
-        if outlook_conn:
-            account = "outlook"
-        elif imap_conn:
-            account = "imap"
-        else:
-            raise _MailAccountError("Je hebt geen e-mailaccount gekoppeld in Instellingen.")
-
-    if account == "outlook":
-        connection, scope = outlook_conn, ("outlook_mail:write" if write else "outlook_mail:read")
-    elif account == "imap":
-        connection, scope = imap_conn, ("imap_mail:write" if write else "imap_mail:read")
+        if len(choices) > 1:
+            available = ", ".join(f"'{key}'" for key, _ in choices)
+            raise _MailAccountError(f"Je hebt meerdere e-mailaccounts gekoppeld — geef 'account' op ({available}).")
+        account, connection = choices[0]
     else:
-        raise _MailAccountError(f"Onbekend account-type '{account}' — gebruik 'outlook' of 'imap'.")
+        match = next((connection for key, connection in choices if key == account), None)
+        if not match:
+            available = ", ".join(f"'{key}'" for key, _ in choices)
+            raise _MailAccountError(f"Onbekend account '{account}' — kies uit: {available}.")
+        connection = match
 
-    if not connection:
-        raise _MailAccountError(f"Je hebt geen {account}-account gekoppeld in Instellingen.")
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    scope = ("outlook_mail:write" if is_outlook else "imap_mail:write") if write else ("outlook_mail:read" if is_outlook else "imap_mail:read")
     if scope not in request.openclaw_token_scopes:
         raise _MailAccountError(f"Dit token heeft geen toestemming voor '{scope}'.")
     return account, connection
+
+
+@require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
+@require_GET
+def api_mail_accounts(request):
+    """List every mail account this household member has linked, so a caller with more than
+    one (e.g. two IMAP accounts) knows which identifiers `account` accepts.
+    """
+    choices = _mail_account_choices(request)
+    accounts = [{"account": key, "provider": connection.provider, "display_name": connection.display_name} for key, connection in choices]
+    return JsonResponse({"accounts": accounts})
 
 
 @require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
@@ -846,11 +869,12 @@ def api_mail_overview(request):
         account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
     except _MailAccountError as error:
         return JsonResponse({"error": str(error)}, status=400)
-    folder = request.GET.get("folder") or ("inbox" if account == "outlook" else "INBOX")
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    folder = request.GET.get("folder") or ("inbox" if is_outlook else "INBOX")
     unread_only = request.GET.get("unread_only") == "true"
-    action = "outlook_mail" if account == "outlook" else "imap_mail"
+    action = "outlook_mail" if is_outlook else "imap_mail"
     try:
-        if account == "outlook":
+        if is_outlook:
             messages = outlook_mail_overview(connection, folder=folder, unread_only=unread_only)
         else:
             messages = imap_mail_overview(connection, folder=folder, unread_only=unread_only)
@@ -868,9 +892,10 @@ def api_mail_read(request, message_id):
         account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
     except _MailAccountError as error:
         return JsonResponse({"error": str(error)}, status=400)
-    action = "outlook_mail" if account == "outlook" else "imap_mail"
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail" if is_outlook else "imap_mail"
     try:
-        message = outlook_mail_read(connection, message_id) if account == "outlook" else imap_mail_read(connection, message_id)
+        message = outlook_mail_read(connection, message_id) if is_outlook else imap_mail_read(connection, message_id)
     except ProviderError as error:
         log_openclaw_action(request.household, action, "E-mail lezen mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
@@ -895,9 +920,10 @@ def api_mail_send(request):
     body = str(payload.get("body") or "")
     if not isinstance(to, list) or not to or not subject:
         return JsonResponse({"error": "Velden 'to' (lijst) en 'subject' zijn verplicht."}, status=400)
-    action = "outlook_mail_versturen" if account == "outlook" else "imap_mail_versturen"
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_versturen" if is_outlook else "imap_mail_versturen"
     try:
-        if account == "outlook":
+        if is_outlook:
             outlook_mail_send(connection, to, subject, body, cc=payload.get("cc"))
         else:
             imap_mail_send(connection, to, subject, body, cc=payload.get("cc"))
@@ -921,9 +947,10 @@ def api_mail_reply(request, message_id):
         return JsonResponse({"error": str(error)}, status=400)
     comment = str(payload.get("comment") or "")
     reply_all = bool(payload.get("reply_all"))
-    action = "outlook_mail_beantwoorden" if account == "outlook" else "imap_mail_beantwoorden"
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_beantwoorden" if is_outlook else "imap_mail_beantwoorden"
     try:
-        if account == "outlook":
+        if is_outlook:
             outlook_mail_reply(connection, message_id, comment, reply_all=reply_all)
         else:
             imap_mail_reply(connection, message_id, comment, reply_all=reply_all)
