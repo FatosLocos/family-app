@@ -21,7 +21,7 @@ from identity.forms import ProfileForm
 from integrations.forms import BunqConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
 from integrations.audit import log_integration_event
 from integrations.data_export import household_export
-from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawToken, SyncRun
+from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawActionLog, OpenClawToken, SyncRun
 from integrations.local_probe import ProbeError, _discovery_identity, create_pairing, expire_stale_probes, pair_probe, revoke_probe, send_probe_system_command
 from planning.models import CalendarSource
 from integrations.providers import ProviderError, arm_hue_bridge_link, finish_hue_bridge_link
@@ -109,6 +109,7 @@ def index(request):
         "probe_server_url": public_origin(request),
         "local_hue_bridge": local_hue_bridge,
         "openclaw_tokens": OpenClawToken.objects.for_household(request.household).filter(revoked_at__isnull=True),
+        "openclaw_action_logs": OpenClawActionLog.objects.for_household(request.household)[:15],
         "openclaw_token": request.session.pop("openclaw_token", ""),
     })
 

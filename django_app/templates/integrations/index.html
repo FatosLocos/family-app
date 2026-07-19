@@ -45,6 +45,8 @@
     <form method="post" action="{% url 'integrations:create_openclaw_token' %}">{% csrf_token %}<button class="button button-primary" type="submit"><i data-lucide="bot"></i>{% if openclaw_tokens %}Token vervangen{% else %}Token aanmaken{% endif %}</button></form>
     {% if openclaw_token %}<div class="form-hint"><strong>Token</strong><code>{{ openclaw_token }}</code><small>Bewaar dit nu — het wordt niet nogmaals getoond.</small></div>{% endif %}
     <ul class="connection-list">{% for token in openclaw_tokens %}<li><i data-lucide="bot"></i><div><strong>{{ token.label }}</strong><small>{% if token.last_used_at %}Laatst gebruikt {{ token.last_used_at|date:'d M H:i' }}{% else %}Nog niet gebruikt{% endif %} · aangemaakt {{ token.created_at|date:'d M H:i' }}</small></div><form method="post" action="{% url 'integrations:revoke_openclaw_token' token.id %}">{% csrf_token %}<button class="icon-button destructive" title="Token intrekken" aria-label="{{ token.label }} intrekken"><i data-lucide="unlink"></i></button></form></li>{% empty %}<li class="empty-copy">Nog geen OpenClaw-token aangemaakt.</li>{% endfor %}</ul>
+    <h3>Recente activiteit</h3>
+    <ul class="clean-list technical-status-list">{% for log in openclaw_action_logs %}<li><i data-lucide="{% if log.status == 'error' %}triangle-alert{% else %}circle-check{% endif %}"></i><div><strong>{{ log.summary }}</strong><small class="technical-status-detail" title="{{ log.detail }}">{{ log.action }} · {{ log.created_at|date:'d M H:i' }}</small></div></li>{% empty %}<li class="empty-copy">Nog geen activiteit.</li>{% endfor %}</ul>
   </section>
   <div class="settings-span-2 settings-group">
     <h2 class="settings-group-title">Koppelingen instellen</h2>

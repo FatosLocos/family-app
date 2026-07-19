@@ -16,11 +16,17 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from common.db_scope import household_db_scope
-from integrations.models import OpenClawToken
+from integrations.models import OpenClawActionLog, OpenClawToken
 
 
 class TokenError(Exception):
     pass
+
+
+def log_openclaw_action(household, action: str, summary: str, status: str = "success", detail: str = "") -> None:
+    """Record what OpenClaw did through FamilyApp, so it's visible in Instellingen."""
+    with household_db_scope(household.id):
+        OpenClawActionLog.objects.create(household=household, action=action, summary=summary[:240], status=status, detail=detail)
 
 
 def create_token(household, label: str = "OpenClaw") -> tuple[OpenClawToken, str]:

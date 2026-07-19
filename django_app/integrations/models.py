@@ -116,6 +116,22 @@ class OpenClawToken(models.Model):
         ordering = ("-created_at",)
 
 
+class OpenClawActionLog(models.Model):
+    """Audit trail of what OpenClaw did through FamilyApp, for user-visible transparency."""
+
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="openclaw_action_logs")
+    source = models.CharField(max_length=40, default="family-app")
+    action = models.CharField(max_length=40)
+    summary = models.CharField(max_length=240)
+    status = models.CharField(max_length=10, choices=(("success", "Gelukt"), ("error", "Mislukt")), default="success")
+    detail = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        ordering = ("-created_at",)
+
+
 class LocalDiscovery(models.Model):
     household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="local_discoveries")
     probe = models.ForeignKey(LocalProbe, on_delete=models.CASCADE, related_name="discoveries")

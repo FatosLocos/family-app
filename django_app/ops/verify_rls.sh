@@ -75,7 +75,7 @@ BEGIN
       ('household_task'), ('household_tasklist'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_shoppingoffer'), ('household_shoppingpriceproviderstatus'), ('household_receipt'), ('household_receiptlineitem'), ('household_mealplan'), ('household_mealingredient'), ('household_pantryitem'), ('household_routine'), ('household_weatherdata'), ('household_weatherpreference'),
       ('planning_calendarsource'), ('planning_calendarevent'), ('planning_icssubscription'),
       ('finance_bankconnection'), ('finance_bankaccount'), ('finance_transaction'), ('finance_recurringrule'), ('finance_budget'),
-      ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'), ('integrations_localprobe'), ('integrations_localdiscovery'), ('integrations_openclawtoken'),
+      ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'), ('integrations_localprobe'), ('integrations_localdiscovery'), ('integrations_openclawtoken'), ('integrations_openclawactionlog'),
       ('notifications_notification'),
       ('home_homeassistantconfig'), ('home_homeentity'), ('home_homeactionaudit'),
       ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument'), ('home_energyreading'), ('home_evvehicle'), ('home_evchargingsession'),
