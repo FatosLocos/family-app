@@ -3,12 +3,14 @@ import json
 from datetime import timedelta
 
 from django.contrib import messages
+from django.db.models import Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from config.services import build_today_summary
+from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
@@ -217,3 +219,47 @@ def api_add_event(request):
     form.save_m2m()
     log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
     return JsonResponse({"id": event.id, "title": event.title, "starts_at": event.starts_at.isoformat()}, status=201)
+
+
+@require_openclaw_token("geld:read")
+@require_GET
+def api_finance(request):
+    """Read-only: account balances, recent transactions, budget status. No mutating finance endpoint exists yet."""
+    month_start = timezone.localdate().replace(day=1)
+    accounts = BankAccount.objects.for_household(request.household).filter(is_active=True).select_related("connection")
+    transactions = Transaction.objects.for_household(request.household).select_related("account")[:20]
+    monthly_expenses = Transaction.objects.for_household(request.household).filter(booked_at__gte=month_start, amount__lt=0)
+    budgets = []
+    for budget in Budget.objects.for_household(request.household):
+        spent = None
+        remaining = None
+        if budget.category:
+            spent = abs(monthly_expenses.filter(category__iexact=budget.category).aggregate(total=Sum("amount"))["total"] or 0)
+            remaining = budget.monthly_limit - spent
+        budgets.append({
+            "name": budget.name,
+            "category": budget.category,
+            "monthly_limit": str(budget.monthly_limit),
+            "spent_this_month": str(spent) if spent is not None else None,
+            "remaining_this_month": str(remaining) if remaining is not None else None,
+        })
+    log_openclaw_action(request.household, "geld", "Financieel overzicht opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "accounts": [
+            {"name": account.name, "iban": account.iban, "balance": str(account.balance) if account.balance is not None else None, "currency": account.currency}
+            for account in accounts
+        ],
+        "recent_transactions": [
+            {
+                "id": transaction.id,
+                "booked_at": transaction.booked_at.isoformat(),
+                "description": transaction.description,
+                "counterparty": transaction.counterparty,
+                "amount": str(transaction.amount),
+                "currency": transaction.currency,
+                "category": transaction.category,
+            }
+            for transaction in transactions
+        ],
+        "budgets": budgets,
+    })

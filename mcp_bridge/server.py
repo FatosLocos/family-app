@@ -189,5 +189,12 @@ def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, i
         return _checked(client.post("/instellingen/api/openclaw/agenda/toevoegen/", json=payload))
 
 
+@mcp.tool()
+def geld(ctx: Context) -> dict:
+    """Get bank account balances, the 20 most recent transactions, and monthly budget status. Read-only — there is no tool to add or categorize transactions."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/geld/"))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
