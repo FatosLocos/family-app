@@ -2311,3 +2311,82 @@ def dropbox_search(connection: IntegrationConnection, query: str, path: str = ""
     matches = response.json().get("matches", [])
     entries = [match["metadata"]["metadata"] for match in matches if match.get("metadata", {}).get(".tag") == "metadata"]
     return [_dropbox_entry_summary(entry) for entry in entries[:limit]]
+
+
+DROPBOX_TEXT_EXTENSIONS = {"txt", "md", "csv", "json"}
+DROPBOX_DOCUMENT_EXTENSIONS = {"pdf", "docx"}
+DROPBOX_MAX_READ_BYTES = 20 * 1024 * 1024
+DROPBOX_MAX_READ_CHARS = 20000
+
+
+def _extract_pdf_text(content: bytes) -> str:
+    import io
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(content))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def _extract_docx_text(content: bytes) -> str:
+    import io
+
+    import docx
+
+    document = docx.Document(io.BytesIO(content))
+    return "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+
+def dropbox_read_file_text(connection: IntegrationConnection, path: str) -> dict:
+    """Download a specific Dropbox file and extract its text content, for AI context.
+
+    Only plain-text (txt/md/csv/json) and document (pdf/docx) formats are supported — there is
+    no support for reading photos, video, audio, or spreadsheets, and file content is never
+    proxied for those. Files above DROPBOX_MAX_READ_BYTES are refused outright to bound memory
+    and latency; extracted text beyond DROPBOX_MAX_READ_CHARS is truncated.
+    """
+    access_token = _dropbox_access_token(connection)
+    meta_response = requests.post(
+        "https://api.dropboxapi.com/2/files/get_metadata",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"path": path},
+        timeout=20,
+    )
+    if not meta_response.ok:
+        raise ProviderError("Dropbox kon de bestandsinfo niet ophalen.")
+    metadata = meta_response.json()
+    if metadata.get(".tag") != "file":
+        raise ProviderError("Dit pad is geen bestand.")
+    name = str(metadata.get("name") or "")
+    size = int(metadata.get("size") or 0)
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    if extension not in DROPBOX_TEXT_EXTENSIONS and extension not in DROPBOX_DOCUMENT_EXTENSIONS:
+        supported = ", ".join(sorted(DROPBOX_TEXT_EXTENSIONS | DROPBOX_DOCUMENT_EXTENSIONS))
+        raise ProviderError(f"Bestandstype '.{extension}' wordt niet ondersteund voor tekst lezen (alleen {supported}).")
+    if size > DROPBOX_MAX_READ_BYTES:
+        raise ProviderError(f"Bestand is te groot om te lezen ({size // (1024 * 1024)} MB, maximum {DROPBOX_MAX_READ_BYTES // (1024 * 1024)} MB).")
+
+    download_response = requests.post(
+        "https://content.dropboxapi.com/2/files/download",
+        headers={"Authorization": f"Bearer {access_token}", "Dropbox-API-Arg": json.dumps({"path": path})},
+        timeout=30,
+    )
+    if not download_response.ok:
+        raise ProviderError("Dropbox kon het bestand niet downloaden.")
+    content = download_response.content
+
+    if extension in DROPBOX_TEXT_EXTENSIONS:
+        text = content.decode("utf-8", errors="replace")
+    elif extension == "pdf":
+        text = _extract_pdf_text(content)
+    else:
+        text = _extract_docx_text(content)
+
+    truncated = len(text) > DROPBOX_MAX_READ_CHARS
+    return {
+        "name": name,
+        "path": metadata.get("path_display"),
+        "text": text[:DROPBOX_MAX_READ_CHARS],
+        "truncated": truncated,
+    }

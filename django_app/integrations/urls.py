@@ -24,6 +24,7 @@ urlpatterns = [
     path("api/openclaw/dropbox/", openclaw_views.api_dropbox_overview, name="api_openclaw_dropbox_overview"),
     path("api/openclaw/dropbox/map/", openclaw_views.api_dropbox_list, name="api_openclaw_dropbox_list"),
     path("api/openclaw/dropbox/zoeken/", openclaw_views.api_dropbox_search, name="api_openclaw_dropbox_search"),
+    path("api/openclaw/dropbox/lezen/", openclaw_views.api_dropbox_read, name="api_openclaw_dropbox_read"),
     path("profiel/", views.save_profile, name="save_profile"),
     path("huishouden/", views.save_household, name="save_household"),
     path("gegevens/exporteren/", views.export_household_data, name="export_household_data"),

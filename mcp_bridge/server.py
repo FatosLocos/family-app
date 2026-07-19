@@ -264,5 +264,18 @@ def dropbox_zoeken(ctx: Context, q: str, pad: str | None = None) -> dict:
         return _checked(client.get("/instellingen/api/openclaw/dropbox/zoeken/", params=params))
 
 
+@mcp.tool()
+def dropbox_lezen(ctx: Context, pad: str) -> dict:
+    """Read the text content of a specific Dropbox document — txt, md, csv, json, pdf, or docx only.
+    Photos, video, audio, and spreadsheets are not supported and never proxied. Large files are
+    refused; long documents are truncated. Find the path first via dropbox_map or dropbox_zoeken.
+
+    Args:
+        pad: The file path, e.g. "/Conquesto/Financiën/Jaarverslag 2025.pdf".
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/dropbox/lezen/", params={"pad": pad}))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

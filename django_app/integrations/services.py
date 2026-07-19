@@ -24,7 +24,7 @@ SPOTIFY_SCOPES = "user-read-playback-state user-modify-playback-state user-read-
 
 DROPBOX_OAUTH_AUTHORIZE_URL = "https://www.dropbox.com/oauth2/authorize"
 DROPBOX_OAUTH_TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
-DROPBOX_SCOPES = "files.metadata.read account_info.read"
+DROPBOX_SCOPES = "files.metadata.read files.content.read account_info.read"
 HOME_CONNECT_OAUTH_AUTHORIZE_URL = "https://api.home-connect.com/security/oauth/authorize"
 HOME_CONNECT_OAUTH_TOKEN_URL = "https://api.home-connect.com/security/oauth/token"
 HOME_CONNECT_SCOPES = "IdentifyAppliance Monitor Settings Control"
