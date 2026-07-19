@@ -96,10 +96,17 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
 
 
 @mcp.tool()
-def taak_afronden(ctx: Context, task_id: int) -> dict:
-    """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list)."""
+def taak_afronden(ctx: Context, task_id: int, reden: str | None = None) -> dict:
+    """Mark a task as done, given its numeric id (from vandaag()'s tasks_open list).
+
+    Args:
+        task_id: The task's numeric id.
+        reden: Optional reason why it's done, e.g. "al geregeld", "niet meer nodig" — shown
+            to the household as context alongside the task, so give one whenever you know why.
+    """
+    payload = {"reason": reden} if reden else {}
     with _client(ctx) as client:
-        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/afronden/"))
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/afronden/", json=payload))
 
 
 @mcp.tool()

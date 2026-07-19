@@ -311,8 +311,13 @@ def add_task(request):
 @require_POST
 def toggle_task(request, task_id):
     task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
-    task.completed_at = None if task.completed_at else timezone.now()
-    task.save(update_fields=["completed_at", "updated_at"])
+    if task.completed_at:
+        task.completed_at = None
+        task.completion_reason = ""
+    else:
+        task.completed_at = timezone.now()
+        task.completion_reason = request.POST.get("reason", "").strip()[:300]
+    task.save(update_fields=["completed_at", "completion_reason", "updated_at"])
     if task.completed_at:
         Notification.objects.for_household(request.household).filter(dedupe_key=f"task-overdue:{task.id}", read_at__isnull=True).update(read_at=timezone.now())
     if request.headers.get("HX-Request") and request.headers.get("HX-Target", "").startswith("today-task-"):

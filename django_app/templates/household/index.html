@@ -64,6 +64,14 @@
       </form>
       <form class="dialog-danger-form" method="post" action="{% url 'household:delete_task' task.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Taak verwijderen</button></form>
     </dialog>
+    <dialog id="task-complete-{{ task.id }}" class="modal">
+      <form method="post" action="{% url 'household:toggle_task' task.id %}">
+        {% csrf_token %}
+        <div class="dialog-title"><h2>Taak afronden</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+        <label>Reden (optioneel)<textarea name="reason" rows="2" placeholder="Bijv. al gedaan, niet meer nodig, uitbesteed…"></textarea></label>
+        <button class="button button-primary" type="submit"><i data-lucide="circle-check"></i>Afronden</button>
+      </form>
+    </dialog>
   {% endfor %}
   {% for task_list in task_lists %}
     <dialog id="tasklist-delete-{{ task_list.id }}" class="modal">

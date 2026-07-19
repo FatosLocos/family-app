@@ -89,6 +89,7 @@ def api_add_task(request):
         return JsonResponse({"error": "Ongeldige taakvelden.", "details": form.errors}, status=400)
     task = form.save(commit=False)
     task.household = request.household
+    task.created_by_agent = True
     task.save()
     log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd", user=request.openclaw_user)
     return JsonResponse({"id": task.id, "title": task.title}, status=201)
@@ -98,8 +99,13 @@ def api_add_task(request):
 @require_POST
 def api_complete_task(request, task_id):
     task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        payload = {}
     task.completed_at = timezone.now()
-    task.save(update_fields=["completed_at", "updated_at"])
+    task.completion_reason = str(payload.get("reason") or "").strip()[:300]
+    task.save(update_fields=["completed_at", "completion_reason", "updated_at"])
     Notification.objects.for_household(request.household).filter(dedupe_key=f"task-overdue:{task.id}", read_at__isnull=True).update(read_at=timezone.now())
     log_openclaw_action(request.household, "taak_afronden", f"Taak '{task.title}' afgerond", user=request.openclaw_user)
     return JsonResponse({"id": task.id, "completed_at": task.completed_at.isoformat()})

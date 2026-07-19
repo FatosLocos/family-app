@@ -39,8 +39,10 @@ class Task(HouseholdRecord):
     due_at = models.DateTimeField(null=True, blank=True)
     priority = models.PositiveSmallIntegerField(choices=Priority.choices, default=Priority.NORMAL)
     completed_at = models.DateTimeField(null=True, blank=True)
+    completion_reason = models.CharField(max_length=300, blank=True)
     list = models.ForeignKey(TaskList, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
     position = models.PositiveIntegerField(default=0)
+    created_by_agent = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("position", "created_at")
