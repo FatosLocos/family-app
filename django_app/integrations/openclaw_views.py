@@ -3,7 +3,7 @@ import json
 from datetime import datetime, time
 
 from django.contrib import messages
-from django.db.models import Count, Max, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
@@ -74,6 +74,29 @@ def api_today(request):
     })
 
 
+def _resolve_household_member(household, name):
+    """Resolve free-text OpenClaw input to a household member, or raise a clear Dutch error."""
+    candidates = User.objects.filter(memberships__household=household).distinct()
+    name = name.strip()
+    exact = candidates.filter(display_name__iexact=name).first() or candidates.filter(email__iexact=name).first()
+    if exact:
+        return exact
+    matches = list(candidates.filter(Q(display_name__icontains=name) | Q(email__icontains=name)))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(f"Geen gezinslid gevonden met naam '{name}'. Gebruik gezinsleden() om de exacte namen te zien.")
+    raise ValueError(f"Meerdere gezinsleden komen overeen met '{name}': {', '.join(str(match) for match in matches)}. Wees specifieker.")
+
+
+@require_openclaw_token("vandaag:read")
+@require_GET
+def api_household_members(request):
+    members = User.objects.filter(memberships__household=request.household).distinct().order_by("display_name")
+    log_openclaw_action(request.household, "gezinsleden", "Gezinsleden opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"members": [{"id": member.id, "name": str(member)} for member in members]})
+
+
 @require_openclaw_token("taken:write")
 @require_POST
 def api_add_task(request):
@@ -83,20 +106,34 @@ def api_add_task(request):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
     payload.setdefault("priority", Task.Priority.NORMAL)
     list_name = str(payload.get("lijst") or "").strip()
+    assignee_name = str(payload.get("toegewezen_aan") or "").strip()
     form = TaskForm(payload)
     form.fields["assigned_to"].queryset = User.objects.filter(memberships__household=request.household).distinct()
     if not form.is_valid():
         log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
         return JsonResponse({"error": "Ongeldige taakvelden.", "details": form.errors}, status=400)
+    if assignee_name:
+        try:
+            assignee = _resolve_household_member(request.household, assignee_name)
+        except ValueError as error:
+            log_openclaw_action(request.household, "taak_toevoegen", "Taak toevoegen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+            return JsonResponse({"error": str(error)}, status=400)
     task = form.save(commit=False)
     task.household = request.household
     task.created_by_agent = True
     if list_name:
         task_list, _ = TaskList.objects.get_or_create(household=request.household, name=list_name)
         task.list = task_list
+    if assignee_name:
+        task.assigned_to = assignee
     task.save()
     log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd" + (f" aan lijstje '{list_name}'" if list_name else ""), user=request.openclaw_user)
-    return JsonResponse({"id": task.id, "title": task.title, "lijst": task.list.name if task.list else None}, status=201)
+    return JsonResponse({
+        "id": task.id,
+        "title": task.title,
+        "lijst": task.list.name if task.list else None,
+        "toegewezen_aan": str(task.assigned_to) if task.assigned_to else None,
+    }, status=201)
 
 
 @require_openclaw_token("taken:write")
@@ -147,6 +184,28 @@ def api_move_task(request, task_id):
     task.save(update_fields=["list", "position", "updated_at"])
     log_openclaw_action(request.household, "taak_verplaatsen", f"Taak '{task.title}' verplaatst naar " + (f"lijstje '{task_list.name}'" if task_list else "Zonder lijst"), user=request.openclaw_user)
     return JsonResponse({"id": task.id, "title": task.title, "lijst": task_list.name if task_list else None})
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_assign_task(request, task_id):
+    """Assign (or unassign) an existing task to a household member — a real assignment, not just text."""
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        payload = {}
+    name = str(payload.get("toegewezen_aan") or "").strip()
+    if name:
+        try:
+            task.assigned_to = _resolve_household_member(request.household, name)
+        except ValueError as error:
+            return JsonResponse({"error": str(error)}, status=400)
+    else:
+        task.assigned_to = None
+    task.save(update_fields=["assigned_to", "updated_at"])
+    log_openclaw_action(request.household, "taak_toewijzen", f"Taak '{task.title}' toegewezen aan " + (str(task.assigned_to) if task.assigned_to else "niemand"), user=request.openclaw_user)
+    return JsonResponse({"id": task.id, "title": task.title, "toegewezen_aan": str(task.assigned_to) if task.assigned_to else None})
 
 
 @require_openclaw_token("vandaag:read")

@@ -75,7 +75,7 @@ def vandaag(ctx: Context) -> dict:
 
 
 @mcp.tool()
-def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None) -> dict:
+def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None, toegewezen_aan: str | None = None) -> dict:
     """Add a new task to the household's task list.
 
     Args:
@@ -86,6 +86,10 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         lijst: Optional name of a task list to file this under, e.g. "Boodschappen" or
             "Klussen". Created automatically if it doesn't exist yet — see taak_lijsten()
             for the existing ones. Omit to leave the task unsorted ("Zonder lijst").
+        toegewezen_aan: Optional household member to assign this to, by name — a real
+            assignment the app understands, not just text in the title or notes. Use
+            gezinsleden() to see valid names first if unsure; an ambiguous or unknown
+            name returns a clear error instead of silently guessing.
     """
     payload = {"title": title}
     if due_at:
@@ -96,8 +100,33 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         payload["notes"] = notes
     if lijst:
         payload["lijst"] = lijst
+    if toegewezen_aan:
+        payload["toegewezen_aan"] = toegewezen_aan
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/taken/", json=payload))
+
+
+@mcp.tool()
+def gezinsleden(ctx: Context) -> dict:
+    """List the household's members by their exact name, each with a numeric id. Use this
+    before assigning a task with taak_toevoegen's `toegewezen_aan` or taak_toewijzen, so
+    the name you pass matches exactly."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/gezinsleden/"))
+
+
+@mcp.tool()
+def taak_toewijzen(ctx: Context, task_id: int, toegewezen_aan: str | None = None) -> dict:
+    """Assign (or unassign) an EXISTING task to a household member by name — a real
+    assignment the app understands and shows on the task, not just text in the title.
+
+    Args:
+        task_id: The task's numeric id (from taken() or vandaag()).
+        toegewezen_aan: The member's name (see gezinsleden()). Omit or pass an empty
+            string to unassign.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/toewijzen/", json={"toegewezen_aan": toegewezen_aan or ""}))
 
 
 @mcp.tool()
