@@ -17,10 +17,10 @@ from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
 from household.models import ShoppingItem, ShoppingList, Task
 from household.tasks import refresh_household_shopping_prices
-from households.decorators import parent_required
+from households.decorators import household_required, parent_required
 from identity.models import User
-from integrations.models import OpenClawToken
-from integrations.openclaw_api import ALL_SCOPES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
+from integrations.models import OpenClawNotificationPreference, OpenClawToken
+from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
 from planning.models import CalendarEvent, CalendarSource
@@ -284,3 +284,50 @@ def api_finance(request):
         ],
         "budgets": budgets,
     })
+
+
+@household_required
+@require_POST
+def save_openclaw_notification_preferences(request):
+    categories = [category for category in request.POST.getlist("categories") if category in NOTIFICATION_CATEGORIES]
+    OpenClawNotificationPreference.objects.update_or_create(
+        household=request.household, user=request.user, defaults={"categories": categories},
+    )
+    messages.success(request, "Voorkeuren voor proactieve meldingen opgeslagen.")
+    return redirect("integrations:index")
+
+
+@require_openclaw_token("meldingen:read")
+@require_GET
+def api_pending_notifications(request):
+    preference = OpenClawNotificationPreference.objects.for_household(request.household).filter(user=request.openclaw_user).first()
+    categories = set(preference.categories) if preference else set()
+    log_openclaw_action(request.household, "meldingen", "Openstaande meldingen opgevraagd", user=request.openclaw_user)
+    if not categories:
+        return JsonResponse({"notifications": []})
+    pending = [
+        notification
+        for notification in Notification.objects.for_household(request.household).filter(delivered_to_openclaw_at__isnull=True)
+        if (notification.dedupe_key or "").split(":")[0] in categories
+    ]
+    return JsonResponse({
+        "notifications": [
+            {"id": notification.id, "title": notification.title, "body": notification.body, "kind": notification.kind, "created_at": notification.created_at.isoformat()}
+            for notification in pending
+        ],
+    })
+
+
+@require_openclaw_token("meldingen:write")
+@require_POST
+def api_mark_notifications_delivered(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return JsonResponse({"error": "Veld 'ids' is verplicht en moet een niet-lege lijst zijn."}, status=400)
+    updated = Notification.objects.for_household(request.household).filter(id__in=ids, delivered_to_openclaw_at__isnull=True).update(delivered_to_openclaw_at=timezone.now())
+    log_openclaw_action(request.household, "meldingen_afgehandeld", f"{updated} melding(en) gemarkeerd als afgeleverd", user=request.openclaw_user)
+    return JsonResponse({"updated": updated})

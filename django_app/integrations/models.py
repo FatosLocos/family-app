@@ -135,6 +135,19 @@ class OpenClawActionLog(models.Model):
         ordering = ("-created_at",)
 
 
+class OpenClawNotificationPreference(models.Model):
+    """Which notification categories a user wants proactively pushed to their own OpenClaw/WhatsApp."""
+
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="openclaw_notification_preferences")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="openclaw_notification_preferences")
+    categories = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("household", "user"), name="unique_household_user_notification_preference")]
+
+
 class LocalDiscovery(models.Model):
     household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="local_discoveries")
     probe = models.ForeignKey(LocalProbe, on_delete=models.CASCADE, related_name="discoveries")

@@ -206,5 +206,26 @@ def geld(ctx: Context) -> dict:
         return _checked(client.get("/instellingen/api/openclaw/geld/"))
 
 
+@mcp.tool()
+def meldingen(ctx: Context) -> dict:
+    """Get notifications this user has opted into proactively receiving (configured in FamilyApp Instellingen),
+    that have not yet been delivered. Each has an id, title, body, kind ("info"/"warning"), and created_at.
+    After delivering these to the user, call meldingen_afgeleverd with their ids so they aren't repeated.
+    If empty, there is nothing new to report — do not send a message in that case."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/meldingen/"))
+
+
+@mcp.tool()
+def meldingen_afgeleverd(ctx: Context, ids: list[int]) -> dict:
+    """Mark notifications as delivered after you have sent them to the user, so they are not repeated next time.
+
+    Args:
+        ids: The notification ids (from meldingen()) that were just delivered.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/meldingen/afgeleverd/", json={"ids": ids}))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

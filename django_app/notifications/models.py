@@ -14,6 +14,7 @@ class Notification(models.Model):
     dedupe_key = models.CharField(max_length=180, null=True, blank=True)
     action_url = models.CharField(max_length=300, blank=True)
     read_at = models.DateTimeField(null=True, blank=True)
+    delivered_to_openclaw_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     objects = HouseholdManager()
 
