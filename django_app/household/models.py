@@ -27,6 +27,22 @@ class TaskList(HouseholdRecord):
         return self.name
 
 
+class TaskListSync(HouseholdRecord):
+    class Provider(models.TextChoices):
+        OUTLOOK_TODO = "outlook_todo", "Microsoft To Do"
+
+    task_list = models.OneToOneField(TaskList, on_delete=models.CASCADE, related_name="sync_link")
+    connection = models.ForeignKey("integrations.IntegrationConnection", on_delete=models.CASCADE, related_name="task_list_syncs")
+    provider = models.CharField(max_length=32, choices=Provider.choices)
+    external_list_id = models.CharField(max_length=240)
+    external_list_name = models.CharField(max_length=160, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_sync_error = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("household", "provider", "external_list_id"), name="unique_task_list_sync_target")]
+
+
 class Task(HouseholdRecord):
     class Priority(models.IntegerChoices):
         LOW = 1, "Laag"
@@ -45,9 +61,13 @@ class Task(HouseholdRecord):
     created_by_agent = models.BooleanField(default=False)
     source_label = models.CharField(max_length=300, blank=True)
     source_url = models.URLField(max_length=500, blank=True)
+    external_provider = models.CharField(max_length=32, blank=True)
+    external_id = models.CharField(max_length=240, blank=True)
+    remote_updated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ("position", "created_at")
+        constraints = [models.UniqueConstraint(fields=("household", "external_provider", "external_id"), condition=~models.Q(external_id=""), name="unique_task_external_ref")]
 
 
 class ShoppingList(HouseholdRecord):

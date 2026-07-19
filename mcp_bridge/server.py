@@ -616,7 +616,12 @@ def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: 
 
 @mcp.tool()
 def to_do_lijsten(ctx: Context) -> dict:
-    """List this household member's Microsoft To Do lists."""
+    """List this household member's Microsoft To Do lists — excluding any list that's already
+    linked to a local taken-lijst in Instellingen (a "sync" setup). Linked lists are mirrored
+    into the app's own task list instead, each task shown with a "Gesynced" badge, so use
+    taken()/taak_toevoegen()/taak_bijwerken() for those — not the to_do_* tools, which would
+    otherwise show the same tasks twice.
+    """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/outlook/todo/lijsten/"))
 

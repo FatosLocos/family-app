@@ -17,7 +17,7 @@ from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
-from household.models import ShoppingItem, ShoppingList, Task, TaskList
+from household.models import ShoppingItem, ShoppingList, Task, TaskList, TaskListSync
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
@@ -972,6 +972,8 @@ def api_outlook_todo_lists(request):
     except ProviderError as error:
         log_openclaw_action(request.household, "outlook_todo", "To-do-lijsten opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
+    linked_external_ids = set(TaskListSync.objects.for_household(request.household).filter(provider=TaskListSync.Provider.OUTLOOK_TODO).values_list("external_list_id", flat=True))
+    lists = [entry for entry in lists if entry.get("id") not in linked_external_ids]
     log_openclaw_action(request.household, "outlook_todo", "To-do-lijsten opgevraagd", user=request.openclaw_user)
     return JsonResponse({"lists": lists})
 

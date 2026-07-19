@@ -16,9 +16,11 @@ from django.views.decorators.http import require_POST
 
 from households.decorators import household_required
 from household.forms import MealIngredientForm, MealPlanForm, PantryItemForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
-from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList
+from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList, TaskListSync
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
+from integrations.models import IntegrationConnection
+from integrations.providers import ProviderError, outlook_todo_lists
 from notifications.models import Notification
 from household.tasks import process_receipt_ocr, refresh_household_shopping_prices
 
@@ -95,6 +97,13 @@ def index(request):
         tasks_by_list[task.list_id].append(task)
     task_groups = [{"list": task_list, "tasks": tasks_by_list.get(task_list.id, [])} for task_list in task_lists]
     task_groups.append({"list": None, "tasks": tasks_by_list.get(None, [])})
+    outlook_connection = IntegrationConnection.objects.for_household(household).filter(provider=IntegrationConnection.Provider.OUTLOOK, user=request.user).first()
+    outlook_todo_list_options = []
+    if tab == "taken" and outlook_connection:
+        try:
+            outlook_todo_list_options = outlook_todo_lists(outlook_connection)
+        except ProviderError:
+            outlook_todo_list_options = []
     members = request.user.__class__.objects.filter(memberships__household=household).distinct()
     task_form = TaskForm()
     task_form.fields["assigned_to"].queryset = members
@@ -254,6 +263,8 @@ def index(request):
         "tasks": tasks,
         "task_lists": task_lists,
         "task_groups": task_groups,
+        "outlook_connection": outlook_connection,
+        "outlook_todo_list_options": outlook_todo_list_options,
         "shopping_items": shopping_items[:50],
         "recurring_items": recurring_items,
         "price_items": price_items,
@@ -354,6 +365,37 @@ def delete_task_list(request, list_id):
             task.save(update_fields=["list", "position", "updated_at"])
         task_list.delete()
     messages.success(request, "Lijstje verwijderd. De taken staan nu onder Zonder lijst.")
+    return _household_tab_redirect("taken")
+
+
+@household_required
+@require_POST
+def link_task_list_sync(request, list_id):
+    task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
+    connection = IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.OUTLOOK, user=request.user).first()
+    if not connection:
+        messages.error(request, "Koppel eerst je eigen Outlook-account in Instellingen.")
+        return _household_tab_redirect("taken")
+    external_list_id = request.POST.get("external_list_id", "").strip()
+    if not external_list_id:
+        messages.error(request, "Kies een Microsoft To Do-lijst.")
+        return _household_tab_redirect("taken")
+    external_list_name = request.POST.get("external_list_name", "").strip()
+    TaskListSync.objects.update_or_create(
+        household=request.household,
+        task_list=task_list,
+        defaults={"connection": connection, "provider": TaskListSync.Provider.OUTLOOK_TODO, "external_list_id": external_list_id, "external_list_name": external_list_name},
+    )
+    messages.success(request, f'"{task_list.name}" is gekoppeld aan Microsoft To Do. De eerste synchronisatie loopt binnen enkele minuten.')
+    return _household_tab_redirect("taken")
+
+
+@household_required
+@require_POST
+def unlink_task_list_sync(request, list_id):
+    task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
+    TaskListSync.objects.for_household(request.household).filter(task_list=task_list).delete()
+    messages.success(request, f'"{task_list.name}" is ontkoppeld van Microsoft To Do.')
     return _household_tab_redirect("taken")
 
 

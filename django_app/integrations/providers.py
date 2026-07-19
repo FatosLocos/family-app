@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from finance.models import BankAccount, BankConnection, Transaction
 from home.models import HomeEntity
+from household.models import Task, TaskListSync
 from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationConnection
 from notifications.models import Notification
@@ -161,7 +162,9 @@ def _stored_outlook_token_is_current(settings: dict) -> bool:
 
 def sync_connection(connection: IntegrationConnection) -> dict:
     if connection.provider == "outlook":
-        return sync_outlook(connection)
+        result = sync_outlook(connection)
+        result["todo"] = sync_outlook_todo_lists(connection)
+        return result
     if connection.provider == "bunq":
         return sync_bunq(connection)
     if connection.provider == "hue":
@@ -2201,8 +2204,22 @@ def outlook_mail_reply(connection: IntegrationConnection, message_id: str, comme
     _safe_response_json(response, "Outlook")
 
 
+def _parse_graph_timestamp(raw: str | None) -> timezone.datetime | None:
+    """Parse a plain ISO datetime string field (e.g. lastModifiedDateTime), unlike
+    _parse_graph_datetime which expects Graph's {dateTime, timeZone} object shape.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = timezone.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return timezone.make_aware(parsed, timezone.get_current_timezone()) if timezone.is_naive(parsed) else parsed
+
+
 def _outlook_todo_task_summary(task: dict, list_id: str) -> dict:
     due = (task.get("dueDateTime") or {}).get("dateTime")
+    completed = (task.get("completedDateTime") or {}).get("dateTime")
     return {
         "id": task.get("id"),
         "list_id": list_id,
@@ -2210,6 +2227,8 @@ def _outlook_todo_task_summary(task: dict, list_id: str) -> dict:
         "status": task.get("status", "notStarted"),
         "due_at": due,
         "notes": (task.get("body") or {}).get("content", ""),
+        "last_modified": task.get("lastModifiedDateTime"),
+        "completed_at": completed,
     }
 
 
@@ -2224,7 +2243,7 @@ def outlook_todo_lists(connection: IntegrationConnection) -> list[dict]:
 def outlook_todo_tasks(connection: IntegrationConnection, list_id: str, include_completed: bool = False) -> list[dict]:
     """List tasks in a Microsoft To Do list, given its id (from outlook_todo_lists)."""
     headers = _outlook_headers(connection)
-    params = {"$select": "id,title,status,dueDateTime,body"}
+    params = {"$select": "id,title,status,dueDateTime,body,lastModifiedDateTime,completedDateTime"}
     if not include_completed:
         params["$filter"] = "status ne 'completed'"
     response = _request_with_retry("GET", f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_id}/tasks", headers=headers, params=params, timeout=20)
@@ -2262,6 +2281,75 @@ def outlook_todo_task_update(connection: IntegrationConnection, list_id: str, ta
     response = _request_with_retry("PATCH", f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_id}/tasks/{task_id}", headers=headers, json=body, timeout=20)
     task = _safe_response_json(response, "Outlook")
     return _outlook_todo_task_summary(task, list_id)
+
+
+def _apply_remote_outlook_todo_task(task: Task, remote: dict) -> None:
+    task.title = remote["title"] or task.title
+    task.notes = remote["notes"]
+    task.due_at = _parse_graph_timestamp(remote["due_at"])
+    if remote["status"] == "completed":
+        task.completed_at = _parse_graph_timestamp(remote["completed_at"]) or task.completed_at or timezone.now()
+    else:
+        task.completed_at = None
+
+
+def _sync_one_todo_list(connection: IntegrationConnection, link: TaskListSync) -> None:
+    """Two-way merge for one linked list: pull remote changes into local Tasks, then push
+    local changes back out. `remote_updated_at` is always re-stamped to now() right after any
+    successful apply (pull or push) — never to the provider's own timestamp — so a task that
+    was just synced in either direction is never immediately re-synced the other way in the
+    same round. See planning/tasks.py's sync_pending_events_to_remote for the same idiom.
+    """
+    remote_tasks = outlook_todo_tasks(connection, link.external_list_id, include_completed=True)
+    for remote in remote_tasks:
+        remote_id = remote.get("id")
+        if not remote_id:
+            continue
+        remote_modified = _parse_graph_timestamp(remote.get("last_modified"))
+        task = Task.objects.for_household(connection.household).filter(external_provider=TaskListSync.Provider.OUTLOOK_TODO, external_id=remote_id).first()
+        if task:
+            if remote_modified and (not task.remote_updated_at or remote_modified > task.remote_updated_at):
+                _apply_remote_outlook_todo_task(task, remote)
+                task.save(update_fields=["title", "notes", "due_at", "completed_at", "updated_at"])
+                Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now())
+        else:
+            task = Task(household=connection.household, list=link.task_list, external_provider=TaskListSync.Provider.OUTLOOK_TODO, external_id=remote_id)
+            _apply_remote_outlook_todo_task(task, remote)
+            task.save()
+            Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now())
+
+    for task in Task.objects.for_household(connection.household).filter(list=link.task_list):
+        if not task.external_id:
+            due_date = task.due_at.isoformat() if task.due_at else None
+            result = outlook_todo_task_create(connection, link.external_list_id, task.title, due_date=due_date, notes=task.notes or None)
+            Task.objects.filter(pk=task.pk).update(external_provider=TaskListSync.Provider.OUTLOOK_TODO, external_id=result["id"], remote_updated_at=timezone.now())
+        elif not task.remote_updated_at or task.updated_at > task.remote_updated_at:
+            due_date = task.due_at.isoformat() if task.due_at else ""
+            outlook_todo_task_update(
+                connection,
+                link.external_list_id,
+                task.external_id,
+                title=task.title,
+                due_date=due_date,
+                notes=task.notes,
+                status="completed" if task.completed_at else "notStarted",
+            )
+            Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now())
+
+
+def sync_outlook_todo_lists(connection: IntegrationConnection) -> dict:
+    """Sync every TaskList this connection's household has linked to a Microsoft To Do list."""
+    synced = 0
+    for link in TaskListSync.objects.for_household(connection.household).filter(connection=connection, provider=TaskListSync.Provider.OUTLOOK_TODO):
+        try:
+            _sync_one_todo_list(connection, link)
+            link.last_sync_error = ""
+        except ProviderError as error:
+            link.last_sync_error = str(error)[:500]
+        link.last_synced_at = timezone.now()
+        link.save(update_fields=["last_synced_at", "last_sync_error", "updated_at"])
+        synced += 1
+    return {"linked_lists": synced}
 
 
 def _bunq_request(url: str, method: str, token: str, private_key, body: dict | None = None):

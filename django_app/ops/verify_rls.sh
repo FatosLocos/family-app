@@ -72,7 +72,7 @@ BEGIN
   FROM (
     VALUES
       ('family_bulletinpost'), ('family_contact'), ('family_contactperson'), ('family_wishlist'), ('family_wishitem'), ('family_wishreservation'),
-      ('household_task'), ('household_tasklist'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_shoppingoffer'), ('household_shoppingpriceproviderstatus'), ('household_receipt'), ('household_receiptlineitem'), ('household_mealplan'), ('household_mealingredient'), ('household_pantryitem'), ('household_routine'), ('household_weatherdata'), ('household_weatherpreference'),
+      ('household_task'), ('household_tasklist'), ('household_tasklistsync'), ('household_shoppinglist'), ('household_shoppingitem'), ('household_shoppingprice'), ('household_shoppingpricesnapshot'), ('household_shoppingoffer'), ('household_shoppingpriceproviderstatus'), ('household_receipt'), ('household_receiptlineitem'), ('household_mealplan'), ('household_mealingredient'), ('household_pantryitem'), ('household_routine'), ('household_weatherdata'), ('household_weatherpreference'),
       ('planning_calendarsource'), ('planning_calendarevent'), ('planning_icssubscription'),
       ('finance_bankconnection'), ('finance_bankaccount'), ('finance_transaction'), ('finance_recurringrule'), ('finance_budget'),
       ('integrations_integrationappconfig'), ('integrations_integrationconnection'), ('integrations_syncrun'), ('integrations_integrationaudit'), ('integrations_localprobe'), ('integrations_localdiscovery'), ('integrations_openclawtoken'), ('integrations_openclawactionlog'), ('integrations_openclawnotificationpreference'),
@@ -100,8 +100,8 @@ BEGIN
   INSERT INTO households_household (name, created_at, invite_only) VALUES ('RLS controle B', now(), false) RETURNING id INTO second_household;
 
   PERFORM set_config('app.household_id', first_household::text, false);
-  INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent, source_label, source_url)
-  VALUES (first_household, now(), now(), 'RLS controle', '', 2, 0, '', false, '', '')
+  INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent, source_label, source_url, external_provider, external_id)
+  VALUES (first_household, now(), now(), 'RLS controle', '', 2, 0, '', false, '', '', '', '')
   RETURNING id INTO task_id;
 
   PERFORM set_config('app.household_id', second_household::text, false);
@@ -111,8 +111,8 @@ BEGIN
   END IF;
 
   BEGIN
-    INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent, source_label, source_url)
-    VALUES (first_household, now(), now(), 'RLS mag dit blokkeren', '', 2, 0, '', false, '', '');
+    INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent, source_label, source_url, external_provider, external_id)
+    VALUES (first_household, now(), now(), 'RLS mag dit blokkeren', '', 2, 0, '', false, '', '', '', '');
     RAISE EXCEPTION 'RLS liet een write voor een ander huishouden toe';
   EXCEPTION
     WHEN insufficient_privilege THEN
