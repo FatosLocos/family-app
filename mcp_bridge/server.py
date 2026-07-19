@@ -228,12 +228,40 @@ def meldingen_afgeleverd(ctx: Context, ids: list[int]) -> dict:
 
 
 @mcp.tool()
-def dropbox_context(ctx: Context) -> dict:
-    """Get the household's most recently modified Dropbox files, for context — name, path, modified date, and size only.
-    Never returns file content, and there is no tool to read file content or write to Dropbox. Requires Dropbox to be
-    connected in FamilyApp Instellingen first."""
+def dropbox_overzicht(ctx: Context) -> dict:
+    """Get the top-level folders and files in the household's Dropbox — a fast table of contents.
+    Use this first, then dropbox_map to look inside a specific folder or dropbox_zoeken to search
+    by name across the whole account. Never returns file content, and there is no tool to read
+    file content or write to Dropbox. Requires Dropbox to be connected in FamilyApp Instellingen."""
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/dropbox/"))
+
+
+@mcp.tool()
+def dropbox_map(ctx: Context, pad: str) -> dict:
+    """List the direct contents (one level deep) of a specific Dropbox folder.
+
+    Args:
+        pad: The folder path, e.g. "/Conquesto" or "/Conquesto/Competitie" (from dropbox_overzicht or a previous dropbox_map call).
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/dropbox/map/", params={"pad": pad}))
+
+
+@mcp.tool()
+def dropbox_zoeken(ctx: Context, q: str, pad: str | None = None) -> dict:
+    """Search the household's Dropbox by name across the whole account (or a subfolder) — server-side
+    search, so it reliably finds files regardless of how deep they're nested.
+
+    Args:
+        q: What to search for, e.g. "bruiloft" or "contributie 2026".
+        pad: Optional folder to limit the search to, e.g. "/Conquesto".
+    """
+    params = {"q": q}
+    if pad:
+        params["pad"] = pad
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/dropbox/zoeken/", params=params))
 
 
 if __name__ == "__main__":

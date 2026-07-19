@@ -2264,26 +2264,50 @@ def _dropbox_list_folder(access_token: str, path: str, *, recursive: bool, page_
     return response.json().get("entries", [])
 
 
-def list_recent_dropbox_files(connection: IntegrationConnection, limit: int = 20) -> list[dict]:
-    """List the household's most recently modified Dropbox files, for AI context — names and metadata only, never content.
+def _dropbox_entry_summary(entry: dict) -> dict:
+    return {
+        "name": entry.get("name"),
+        "path": entry.get("path_display"),
+        "type": entry.get(".tag"),
+        "modified": entry.get("server_modified"),
+        "size": entry.get("size"),
+    }
 
-    Dropbox's list_folder does not sort by recency and shared/mounted folders (e.g. a sports
-    club's shared drive) are siblings of the account's own top-level folders. A single
-    recursive walk from the root can exhaust its page budget inside one large folder before
-    ever reaching the others, silently hiding recent files elsewhere. Instead, sample each
-    top-level folder separately so every one gets a fair share of the budget.
+
+def dropbox_overview(connection: IntegrationConnection) -> list[dict]:
+    """List the top-level folders and files in the household's Dropbox — a fast, single-call
+    table of contents. Deliberately shallow: whole-account recency scans proved unreliable for
+    accounts with deep or shared folder structures (a sports club's shared drive can bury its
+    files many levels down, silently starving a bounded recursive walk). Use dropbox_list or
+    dropbox_search to go deeper once you know where to look.
     """
     access_token = _dropbox_access_token(connection)
-    root_entries = _dropbox_list_folder(access_token, "", recursive=False, page_limit=200)
-    top_level_files = [entry for entry in root_entries if entry.get(".tag") == "file"]
-    top_level_folders = [entry["path_lower"] for entry in root_entries if entry.get(".tag") == "folder"]
+    entries = _dropbox_list_folder(access_token, "", recursive=False, page_limit=200)
+    return [_dropbox_entry_summary(entry) for entry in entries]
 
-    all_files = list(top_level_files)
-    for folder_path in top_level_folders:
-        all_files.extend(entry for entry in _dropbox_list_folder(access_token, folder_path, recursive=True, page_limit=200) if entry.get(".tag") == "file")
 
-    all_files.sort(key=lambda entry: entry.get("server_modified", ""), reverse=True)
-    return [
-        {"name": entry.get("name"), "path": entry.get("path_display"), "modified": entry.get("server_modified"), "size": entry.get("size")}
-        for entry in all_files[:limit]
-    ]
+def dropbox_list_folder_contents(connection: IntegrationConnection, path: str) -> list[dict]:
+    """List the direct contents (folders and files, one level deep) of a specific Dropbox path."""
+    access_token = _dropbox_access_token(connection)
+    entries = _dropbox_list_folder(access_token, path, recursive=False, page_limit=200)
+    return [_dropbox_entry_summary(entry) for entry in entries]
+
+
+def dropbox_search(connection: IntegrationConnection, query: str, path: str = "", limit: int = 20) -> list[dict]:
+    """Search the household's Dropbox by filename (and, where Dropbox supports it, content) —
+    server-side search, so it isn't limited by folder depth the way listing is."""
+    access_token = _dropbox_access_token(connection)
+    body = {"query": query, "options": {"max_results": min(limit, 100), "file_status": "active"}}
+    if path:
+        body["options"]["path"] = path
+    response = requests.post(
+        "https://api.dropboxapi.com/2/files/search_v2",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json=body,
+        timeout=20,
+    )
+    if not response.ok:
+        raise ProviderError("Dropbox kon niet doorzocht worden.")
+    matches = response.json().get("matches", [])
+    entries = [match["metadata"]["metadata"] for match in matches if match.get("metadata", {}).get(".tag") == "metadata"]
+    return [_dropbox_entry_summary(entry) for entry in entries[:limit]]

@@ -21,7 +21,7 @@ from households.decorators import household_required, parent_required
 from identity.models import User
 from integrations.models import IntegrationConnection, OpenClawNotificationPreference, OpenClawToken
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
-from integrations.providers import ProviderError, list_recent_dropbox_files
+from integrations.providers import ProviderError, dropbox_list_folder_contents, dropbox_overview, dropbox_search
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
 from planning.models import CalendarEvent, CalendarSource
@@ -334,16 +334,55 @@ def api_mark_notifications_delivered(request):
     return JsonResponse({"updated": updated})
 
 
+def _dropbox_connection(request):
+    return IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.DROPBOX).first()
+
+
 @require_openclaw_token("dropbox:read")
 @require_GET
-def api_dropbox_context(request):
-    connection = IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.DROPBOX).first()
+def api_dropbox_overview(request):
+    connection = _dropbox_connection(request)
     if not connection:
         return JsonResponse({"error": "Dropbox is niet gekoppeld in Instellingen."}, status=400)
     try:
-        files = list_recent_dropbox_files(connection)
+        entries = dropbox_overview(connection)
     except ProviderError as error:
-        log_openclaw_action(request.household, "dropbox", "Dropbox-context ophalen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        log_openclaw_action(request.household, "dropbox", "Dropbox-overzicht ophalen mislukt", status="error", detail=str(error), user=request.openclaw_user)
         return JsonResponse({"error": str(error)}, status=400)
-    log_openclaw_action(request.household, "dropbox", "Recente Dropbox-bestanden opgevraagd", user=request.openclaw_user)
-    return JsonResponse({"recent_files": files})
+    log_openclaw_action(request.household, "dropbox", "Dropbox-overzicht opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"entries": entries})
+
+
+@require_openclaw_token("dropbox:read")
+@require_GET
+def api_dropbox_list(request):
+    connection = _dropbox_connection(request)
+    if not connection:
+        return JsonResponse({"error": "Dropbox is niet gekoppeld in Instellingen."}, status=400)
+    path = request.GET.get("pad", "")
+    try:
+        entries = dropbox_list_folder_contents(connection, path)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "dropbox", f"Map '{path}' bekijken mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "dropbox", f"Map '{path or '/'}' bekeken", user=request.openclaw_user)
+    return JsonResponse({"entries": entries})
+
+
+@require_openclaw_token("dropbox:read")
+@require_GET
+def api_dropbox_search(request):
+    connection = _dropbox_connection(request)
+    if not connection:
+        return JsonResponse({"error": "Dropbox is niet gekoppeld in Instellingen."}, status=400)
+    query = request.GET.get("q", "").strip()
+    if not query:
+        return JsonResponse({"error": "Parameter 'q' is verplicht."}, status=400)
+    path = request.GET.get("pad", "")
+    try:
+        entries = dropbox_search(connection, query, path=path)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "dropbox", f"Zoeken naar '{query}' mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "dropbox", f"Gezocht naar '{query}'", user=request.openclaw_user)
+    return JsonResponse({"entries": entries})
