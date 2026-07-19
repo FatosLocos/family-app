@@ -99,11 +99,12 @@ def index(request):
     task_groups.append({"list": None, "tasks": tasks_by_list.get(None, [])})
     outlook_connection = IntegrationConnection.objects.for_household(household).filter(provider=IntegrationConnection.Provider.OUTLOOK, user=request.user).first()
     outlook_todo_list_options = []
+    outlook_todo_error = ""
     if tab == "taken" and outlook_connection:
         try:
             outlook_todo_list_options = outlook_todo_lists(outlook_connection)
-        except ProviderError:
-            outlook_todo_list_options = []
+        except ProviderError as error:
+            outlook_todo_error = str(error)
     members = request.user.__class__.objects.filter(memberships__household=household).distinct()
     task_form = TaskForm()
     task_form.fields["assigned_to"].queryset = members
@@ -265,6 +266,7 @@ def index(request):
         "task_groups": task_groups,
         "outlook_connection": outlook_connection,
         "outlook_todo_list_options": outlook_todo_list_options,
+        "outlook_todo_error": outlook_todo_error,
         "shopping_items": shopping_items[:50],
         "recurring_items": recurring_items,
         "price_items": price_items,

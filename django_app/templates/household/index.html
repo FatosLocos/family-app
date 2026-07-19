@@ -93,6 +93,10 @@
         </div>
       {% elif not outlook_connection %}
         <p>Koppel eerst je eigen Outlook-account in <a href="{% url 'integrations:index' %}">Instellingen</a> om een Microsoft To Do-lijst te kunnen koppelen.</p>
+      {% elif outlook_todo_error %}
+        <p>Microsoft To Do-lijsten konden niet worden opgehaald: {{ outlook_todo_error }}. Dit is meestal een tijdelijke storing bij Microsoft — sluit dit venster en probeer het over een paar minuten opnieuw.</p>
+      {% elif not outlook_todo_list_options %}
+        <p>Er zijn geen Microsoft To Do-lijsten gevonden op je Outlook-account.</p>
       {% else %}
         <form method="post" action="{% url 'household:link_task_list_sync' task_list.id %}">
           {% csrf_token %}
