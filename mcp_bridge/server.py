@@ -195,6 +195,18 @@ def taak_lijst_aanmaken(ctx: Context, name: str) -> dict:
 
 
 @mcp.tool()
+def taak_lijst_bijwerken(ctx: Context, list_id: int, name: str) -> dict:
+    """Rename an existing task list. Use taak_lijsten() to find the list's id first.
+
+    Args:
+        list_id: The list's numeric id (from taak_lijsten()).
+        name: The new name.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/lijstjes/{list_id}/bijwerken/", json={"name": name}))
+
+
+@mcp.tool()
 def taken(ctx: Context) -> dict:
     """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
     preview. Each task includes its list ("list", null if unsorted), notes, due date,
@@ -241,6 +253,35 @@ def boodschap_toevoegen(ctx: Context, name: str, quantity: str | None = None, ca
         payload["category"] = category
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/boodschappen/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def boodschap_bijwerken(ctx: Context, item_id: int, name: str | None = None, quantity: str | None = None, category: str | None = None) -> dict:
+    """Update one or more fields on an existing shopping list item. Only the arguments you
+    pass are changed.
+
+    Args:
+        item_id: The item's numeric id (from boodschappen()).
+        name: New product name.
+        quantity: New free-text amount. Pass "" to clear.
+        category: New free-text category. Pass "" to clear.
+    """
+    payload = {}
+    if name is not None:
+        payload["name"] = name
+    if quantity is not None:
+        payload["quantity"] = quantity
+    if category is not None:
+        payload["category"] = category
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/boodschappen/{item_id}/bijwerken/", json=payload))
+
+
+@mcp.tool()
+def boodschap_afvinken(ctx: Context, item_id: int) -> dict:
+    """Mark a shopping list item as bought/done, given its numeric id (from boodschappen())."""
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/boodschappen/{item_id}/afvinken/", json={}))
 
 
 @mcp.tool()
@@ -313,6 +354,37 @@ def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, i
         payload["notes"] = notes
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/agenda/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, starts_at: str | None = None, ends_at: str | None = None, is_all_day: bool | None = None, location: str | None = None, notes: str | None = None) -> dict:
+    """Update one or more fields on an existing calendar event. Only the arguments you
+    pass are changed.
+
+    Args:
+        event_id: The event's numeric id (from agenda()).
+        title: New title.
+        starts_at: New ISO 8601 start datetime.
+        ends_at: New ISO 8601 end datetime.
+        is_all_day: Whether it's an all-day event.
+        location: New location. Pass "" to clear.
+        notes: New free-text notes. Pass "" to clear.
+    """
+    payload = {}
+    if title is not None:
+        payload["title"] = title
+    if starts_at is not None:
+        payload["starts_at"] = starts_at
+    if ends_at is not None:
+        payload["ends_at"] = ends_at
+    if is_all_day is not None:
+        payload["is_all_day"] = is_all_day
+    if location is not None:
+        payload["location"] = location
+    if notes is not None:
+        payload["notes"] = notes
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/agenda/{event_id}/bijwerken/", json=payload))
 
 
 @mcp.tool()

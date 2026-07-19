@@ -181,6 +181,27 @@ def api_add_task_list(request):
 
 @require_openclaw_token("taken:write")
 @require_POST
+def api_update_task_list(request, list_id):
+    """Rename an existing task list — the only field worth updating on a list."""
+    task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
+    if TaskList.objects.for_household(request.household).filter(name=name).exclude(pk=task_list.pk).exists():
+        return JsonResponse({"error": f"Er bestaat al een lijstje met de naam '{name}'."}, status=400)
+    old_name = task_list.name
+    task_list.name = name[:120]
+    task_list.save(update_fields=["name", "updated_at"])
+    log_openclaw_action(request.household, "taak_lijst_bijwerken", f"Lijstje '{old_name}' hernoemd naar '{task_list.name}'", user=request.openclaw_user)
+    return JsonResponse({"id": task_list.id, "name": task_list.name})
+
+
+@require_openclaw_token("taken:write")
+@require_POST
 def api_update_task(request, task_id):
     """Partial update of any field on an existing task, except completion state (see api_complete_task).
 
@@ -356,6 +377,52 @@ def api_add_shopping_item(request):
     return JsonResponse({"id": item.id, "name": item.name}, status=201)
 
 
+@require_openclaw_token("boodschappen:write")
+@require_POST
+def api_update_shopping_item(request, item_id):
+    """Partial update of an existing shopping item's fields, except completion (see api_complete_shopping_item)."""
+    item = get_object_or_404(ShoppingItem.objects.for_household(request.household), pk=item_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+
+    update_fields = ["updated_at"]
+
+    if "name" in payload:
+        name = str(payload["name"] or "").strip()
+        if not name:
+            return JsonResponse({"error": "Naam mag niet leeg zijn."}, status=400)
+        item.name = name[:200]
+        update_fields.append("name")
+
+    if "quantity" in payload:
+        item.quantity = str(payload["quantity"] or "")[:60]
+        update_fields.append("quantity")
+
+    if "category" in payload:
+        item.category = str(payload["category"] or "")[:80]
+        update_fields.append("category")
+
+    if len(update_fields) == 1:
+        return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
+
+    item.save(update_fields=update_fields)
+    refresh_household_shopping_prices.delay(request.household.id)
+    log_openclaw_action(request.household, "boodschap_bijwerken", f"Boodschap '{item.name}' bijgewerkt", user=request.openclaw_user)
+    return JsonResponse({"id": item.id, "name": item.name, "quantity": item.quantity, "category": item.category})
+
+
+@require_openclaw_token("boodschappen:write")
+@require_POST
+def api_complete_shopping_item(request, item_id):
+    item = get_object_or_404(ShoppingItem.objects.for_household(request.household), pk=item_id)
+    item.completed_at = timezone.now()
+    item.save(update_fields=["completed_at", "updated_at"])
+    log_openclaw_action(request.household, "boodschap_afvinken", f"Boodschap '{item.name}' afgevinkt", user=request.openclaw_user)
+    return JsonResponse({"id": item.id, "completed_at": item.completed_at.isoformat()})
+
+
 @require_openclaw_token("huis:read")
 @require_GET
 def api_home_entities(request):
@@ -460,6 +527,66 @@ def api_add_event(request):
     form.save_m2m()
     log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
     return JsonResponse({"id": event.id, "title": event.title, "starts_at": event.starts_at.isoformat()}, status=201)
+
+
+@require_openclaw_token("agenda:write")
+@require_POST
+def api_update_event(request, event_id):
+    """Partial update of any field on an existing calendar event."""
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+
+    update_fields = ["updated_at"]
+
+    if "title" in payload:
+        title = str(payload["title"] or "").strip()
+        if not title:
+            return JsonResponse({"error": "Titel mag niet leeg zijn."}, status=400)
+        event.title = title[:240]
+        update_fields.append("title")
+
+    for field in ("starts_at", "ends_at"):
+        if field in payload:
+            parsed = parse_datetime(str(payload[field]))
+            if parsed is None:
+                return JsonResponse({"error": f"'{payload[field]}' is geen geldige datum/tijd."}, status=400)
+            if timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed)
+            setattr(event, field, parsed)
+            update_fields.append(field)
+
+    if ("starts_at" in payload or "ends_at" in payload) and event.ends_at < event.starts_at:
+        return JsonResponse({"error": "Einde mag niet vóór het begin liggen."}, status=400)
+
+    if "is_all_day" in payload:
+        event.is_all_day = bool(payload["is_all_day"])
+        update_fields.append("is_all_day")
+
+    if "location" in payload:
+        event.location = str(payload["location"] or "")[:240]
+        update_fields.append("location")
+
+    if "notes" in payload:
+        event.notes = str(payload["notes"] or "")
+        update_fields.append("notes")
+
+    if len(update_fields) == 1:
+        return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
+
+    event.save(update_fields=update_fields)
+    log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' bijgewerkt", user=request.openclaw_user)
+    return JsonResponse({
+        "id": event.id,
+        "title": event.title,
+        "starts_at": event.starts_at.isoformat(),
+        "ends_at": event.ends_at.isoformat(),
+        "is_all_day": event.is_all_day,
+        "location": event.location,
+        "notes": event.notes,
+    })
 
 
 @require_openclaw_token("geld:read")
