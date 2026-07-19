@@ -100,8 +100,8 @@ BEGIN
   INSERT INTO households_household (name, created_at, invite_only) VALUES ('RLS controle B', now(), false) RETURNING id INTO second_household;
 
   PERFORM set_config('app.household_id', first_household::text, false);
-  INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position)
-  VALUES (first_household, now(), now(), 'RLS controle', '', 2, 0)
+  INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent)
+  VALUES (first_household, now(), now(), 'RLS controle', '', 2, 0, '', false)
   RETURNING id INTO task_id;
 
   PERFORM set_config('app.household_id', second_household::text, false);
@@ -111,8 +111,8 @@ BEGIN
   END IF;
 
   BEGIN
-    INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position)
-    VALUES (first_household, now(), now(), 'RLS mag dit blokkeren', '', 2, 0);
+    INSERT INTO household_task (household_id, created_at, updated_at, title, notes, priority, position, completion_reason, created_by_agent)
+    VALUES (first_household, now(), now(), 'RLS mag dit blokkeren', '', 2, 0, '', false);
     RAISE EXCEPTION 'RLS liet een write voor een ander huishouden toe';
   EXCEPTION
     WHEN insufficient_privilege THEN
