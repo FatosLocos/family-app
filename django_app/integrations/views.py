@@ -18,7 +18,7 @@ from django.views.decorators.http import require_GET, require_POST
 from households.decorators import household_required, owner_required, parent_required
 from households.forms import HouseholdSettingsForm
 from identity.forms import ProfileForm
-from integrations.forms import BunqConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
+from integrations.forms import BunqConfigForm, DropboxConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
 from integrations.audit import log_integration_event
 from integrations.data_export import household_export
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawActionLog, OpenClawNotificationPreference, OpenClawToken, SyncRun
@@ -26,7 +26,7 @@ from integrations.local_probe import ProbeError, _discovery_identity, create_pai
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, SCOPE_LABELS
 from planning.models import CalendarSource
 from integrations.providers import ProviderError, arm_hue_bridge_link, finish_hue_bridge_link
-from integrations.services import finish_bunq_connection, finish_google_home_connection, finish_home_connect_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_smartcar_connection, finish_sonos_connection, finish_spotify_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_google_home_config as save_google_home_integration_config, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_google_home_connection, start_home_connect_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_smartcar_connection, start_sonos_connection, start_spotify_connection
+from integrations.services import finish_bunq_connection, finish_dropbox_connection, finish_google_home_connection, finish_home_connect_connection, finish_hue_connection, finish_lg_thinq_connection, finish_outlook_connection, finish_smartcar_connection, finish_sonos_connection, finish_spotify_connection, get_app_config, get_sonos_event_callback_token, public_origin, save_app_config, save_google_home_config as save_google_home_integration_config, save_sonos_config as save_sonos_integration_config, start_bunq_connection, start_dropbox_connection, start_google_home_connection, start_home_connect_connection, start_hue_connection, start_lg_thinq_connection, start_outlook_connection, start_smartcar_connection, start_sonos_connection, start_spotify_connection
 from integrations.sonos_events import SonosEventError, process_sonos_event
 from integrations.tasks import sync_connection_task
 
@@ -71,6 +71,7 @@ def index(request):
     sonos_event_callback_token = get_sonos_event_callback_token(request.household)
     google_home_client_id, _, google_home_settings = get_app_config(request.household, "google_home")
     lg_thinq_client_id, _, lg_thinq_settings = get_app_config(request.household, "lg_thinq")
+    dropbox_client_id, _, _ = get_app_config(request.household, "dropbox")
     local_hue_bridge = (
         LocalDiscovery.objects.for_household(request.household)
         .select_related("probe")
@@ -97,6 +98,8 @@ def index(request):
         "sonos_event_callback_url": f"{public_origin(request)}/instellingen/sonos/events/{request.household.id}/{sonos_event_callback_token}/" if sonos_event_callback_token else "Sla eerst de Sonos-configuratie op.",
         "spotify_form": SpotifyConfigForm(initial={"client_id": spotify_client_id}),
         "spotify_redirect_url": f"{public_origin(request)}/instellingen/spotify/callback/",
+        "dropbox_form": DropboxConfigForm(initial={"client_id": dropbox_client_id}),
+        "dropbox_redirect_url": f"{public_origin(request)}/instellingen/dropbox/callback/",
         "home_connect_form": HomeConnectConfigForm(initial={"client_id": home_connect_client_id}),
         "home_connect_redirect_url": f"{public_origin(request)}/instellingen/home-connect/callback/",
         "smartcar_form": SmartcarConfigForm(initial={"client_id": smartcar_client_id, "connect_client_id": smartcar_settings.get("connect_client_id", ""), "country": smartcar_settings.get("country", "NL"), "allow_remote_controls": smartcar_settings.get("allow_remote_controls", False)}),
@@ -291,6 +294,16 @@ def save_spotify_config(request):
 
 @parent_required
 @require_POST
+def save_dropbox_config(request):
+    form = DropboxConfigForm(request.POST)
+    if form.is_valid():
+        save_app_config(request.household, "dropbox", form.cleaned_data["client_id"], form.cleaned_data["client_secret"], {})
+        messages.success(request, "Dropbox-configuratie veilig opgeslagen.")
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_POST
 def save_home_connect_config(request):
     form = HomeConnectConfigForm(request.POST)
     if form.is_valid():
@@ -467,6 +480,28 @@ def spotify_callback(request):
         log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Spotify-account geautoriseerd.")
         sync_connection_task.delay(connection.id, request.household.id)
         messages.success(request, "Spotify is gekoppeld. Beschikbare Connect-apparaten worden nu opgehaald.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def start_dropbox(request):
+    try:
+        return redirect(start_dropbox_connection(request))
+    except ValueError as error:
+        messages.error(request, str(error))
+        return redirect("integrations:index")
+
+
+@parent_required
+@require_GET
+def dropbox_callback(request):
+    try:
+        connection = finish_dropbox_connection(request, request.GET.get("code", ""), request.GET.get("state", ""))
+        log_integration_event(connection=connection, action=IntegrationAudit.Action.CONNECTED, detail="Dropbox-account geautoriseerd.")
+        messages.success(request, "Dropbox is gekoppeld. OpenClaw kan nu recente bestanden lezen (met de juiste rechten).")
     except ValueError as error:
         messages.error(request, str(error))
     return redirect("integrations:index")

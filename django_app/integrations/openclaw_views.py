@@ -19,8 +19,9 @@ from household.models import ShoppingItem, ShoppingList, Task
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
-from integrations.models import OpenClawNotificationPreference, OpenClawToken
+from integrations.models import IntegrationConnection, OpenClawNotificationPreference, OpenClawToken
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
+from integrations.providers import ProviderError, list_recent_dropbox_files
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
 from planning.models import CalendarEvent, CalendarSource
@@ -331,3 +332,18 @@ def api_mark_notifications_delivered(request):
     updated = Notification.objects.for_household(request.household).filter(id__in=ids, delivered_to_openclaw_at__isnull=True).update(delivered_to_openclaw_at=timezone.now())
     log_openclaw_action(request.household, "meldingen_afgehandeld", f"{updated} melding(en) gemarkeerd als afgeleverd", user=request.openclaw_user)
     return JsonResponse({"updated": updated})
+
+
+@require_openclaw_token("dropbox:read")
+@require_GET
+def api_dropbox_context(request):
+    connection = IntegrationConnection.objects.for_household(request.household).filter(provider=IntegrationConnection.Provider.DROPBOX).first()
+    if not connection:
+        return JsonResponse({"error": "Dropbox is niet gekoppeld in Instellingen."}, status=400)
+    try:
+        files = list_recent_dropbox_files(connection)
+    except ProviderError as error:
+        log_openclaw_action(request.household, "dropbox", "Dropbox-context ophalen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, "dropbox", "Recente Dropbox-bestanden opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"recent_files": files})

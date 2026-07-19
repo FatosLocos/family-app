@@ -36,6 +36,11 @@ class HomeConnectConfigForm(forms.Form):
     client_secret = forms.CharField(label="Home Connect client secret", required=False, widget=forms.PasswordInput(render_value=False))
 
 
+class DropboxConfigForm(forms.Form):
+    client_id = forms.CharField(label="Dropbox app key", max_length=240)
+    client_secret = forms.CharField(label="Dropbox app secret", required=False, widget=forms.PasswordInput(render_value=False))
+
+
 class SmartcarConfigForm(forms.Form):
     client_id = forms.CharField(label="API client ID", max_length=240, help_text="De API Credentials client ID voor server-side synchronisatie (meestal beginnend met client_).")
     client_secret = forms.CharField(label="API client secret", required=False, widget=forms.PasswordInput(render_value=False), help_text="De bijbehorende API secret. Deze wordt alleen server-side versleuteld opgeslagen.")

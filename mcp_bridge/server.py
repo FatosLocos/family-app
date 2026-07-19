@@ -227,5 +227,14 @@ def meldingen_afgeleverd(ctx: Context, ids: list[int]) -> dict:
         return _checked(client.post("/instellingen/api/openclaw/meldingen/afgeleverd/", json={"ids": ids}))
 
 
+@mcp.tool()
+def dropbox_context(ctx: Context) -> dict:
+    """Get the household's most recently modified Dropbox files, for context — name, path, modified date, and size only.
+    Never returns file content, and there is no tool to read file content or write to Dropbox. Requires Dropbox to be
+    connected in FamilyApp Instellingen first."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/dropbox/"))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

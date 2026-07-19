@@ -26,7 +26,7 @@ class TokenError(Exception):
 # Every scope the MCP tools currently understand. New tokens get all of
 # these until the scope-picker UI ships; after that, a token only gets what
 # was explicitly checked when it was created.
-ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write", "agenda:read", "agenda:write", "geld:read", "meldingen:read", "meldingen:write"]
+ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write", "agenda:read", "agenda:write", "geld:read", "meldingen:read", "meldingen:write", "dropbox:read"]
 SCOPE_LABELS = {
     "vandaag:read": "Dagoverzicht lezen",
     "taken:write": "Taken aanmaken en afronden",
@@ -39,6 +39,7 @@ SCOPE_LABELS = {
     "geld:read": "Financieel overzicht lezen (saldi, transacties, budgetten)",
     "meldingen:read": "Openstaande meldingen lezen",
     "meldingen:write": "Meldingen als afgeleverd markeren",
+    "dropbox:read": "Dropbox-bestanden lezen (alleen naam, datum, grootte — geen inhoud)",
 }
 
 # Categories a user can opt into for proactive push. Each key is the

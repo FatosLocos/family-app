@@ -21,6 +21,10 @@ SONOS_OAUTH_TOKEN_URL = "https://api.sonos.com/login/v3/oauth/access"
 SPOTIFY_OAUTH_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_OAUTH_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative"
+
+DROPBOX_OAUTH_AUTHORIZE_URL = "https://www.dropbox.com/oauth2/authorize"
+DROPBOX_OAUTH_TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
+DROPBOX_SCOPES = "files.metadata.read account_info.read"
 HOME_CONNECT_OAUTH_AUTHORIZE_URL = "https://api.home-connect.com/security/oauth/authorize"
 HOME_CONNECT_OAUTH_TOKEN_URL = "https://api.home-connect.com/security/oauth/token"
 HOME_CONNECT_SCOPES = "IdentifyAppliance Monitor Settings Control"
@@ -56,6 +60,8 @@ def get_app_config(household, provider: str) -> tuple[str, str, dict]:
         return "", "", {"project_id": ""}
     if provider == "lg_thinq":
         return "", "", {"authorize_url": "", "token_url": "", "api_base_url": "", "devices_path": "/devices"}
+    if provider == "dropbox":
+        return "", "", {}
     return "", "", {}
 
 
@@ -341,6 +347,65 @@ def finish_spotify_connection(request, code: str, state: str) -> IntegrationConn
         "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 3600)) - 60, 60))).isoformat(),
     }
     connection.status, connection.last_error = "needs_sync", ""
+    connection.save()
+    return connection
+
+
+def start_dropbox_connection(request) -> str:
+    client_id, _, _ = get_app_config(request.household, "dropbox")
+    if not client_id:
+        raise ValueError("Vul eerst de Dropbox-appgegevens in.")
+    connection, _ = IntegrationConnection.objects.get_or_create(
+        household=request.household,
+        user=request.user,
+        provider=IntegrationConnection.Provider.DROPBOX,
+        defaults={"display_name": "Dropbox"},
+    )
+    state = secrets.token_urlsafe(24)
+    request.session["dropbox_oauth"] = {"state": state, "connection_id": connection.id}
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": f"{public_origin(request)}/instellingen/dropbox/callback/",
+        "scope": DROPBOX_SCOPES,
+        "state": state,
+        "token_access_type": "offline",
+    }
+    return f"{DROPBOX_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def finish_dropbox_connection(request, code: str, state: str) -> IntegrationConnection:
+    session = request.session.pop("dropbox_oauth", {})
+    if not session or not secrets.compare_digest(session.get("state", ""), state):
+        raise ValueError("Ongeldige of verlopen Dropbox-aanmelding.")
+    client_id, client_secret, _ = get_app_config(request.household, "dropbox")
+    if not client_id or not client_secret:
+        raise ValueError("Dropbox-appgegevens ontbreken.")
+    response = requests.post(
+        DROPBOX_OAUTH_TOKEN_URL,
+        data={"grant_type": "authorization_code", "code": code, "redirect_uri": f"{public_origin(request)}/instellingen/dropbox/callback/"},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("Dropbox gaf geen geldige OAuth-reactie.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ValueError(str(payload.get("error_description") or "Dropbox gaf geen toegangstoken terug."))
+    profile = requests.post("https://api.dropboxapi.com/2/users/get_current_account", headers={"Authorization": f"Bearer {payload['access_token']}"}, timeout=20)
+    try:
+        account = profile.json() if profile.ok else {}
+    except ValueError:
+        account = {}
+    connection = IntegrationConnection.objects.get(pk=session["connection_id"], household=request.household)
+    connection.secret_encrypted = encrypt(payload.get("refresh_token", ""))
+    connection.external_account = str(account.get("email") or (account.get("name") or {}).get("display_name") or "")
+    connection.settings = {
+        "access_token": encrypt(payload["access_token"]),
+        "expires_at": (timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 14400)) - 60, 60))).isoformat(),
+    }
+    connection.status, connection.last_error = "connected", ""
     connection.save()
     return connection
 

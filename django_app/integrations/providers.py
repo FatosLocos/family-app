@@ -2215,3 +2215,58 @@ def sync_bunq(connection: IntegrationConnection) -> dict:
                     _, created = Transaction.objects.update_or_create(household=connection.household, account=account, provider_transaction_id=f"{provider_id}:{payment['id']}", defaults={"booked_at": payment.get("created", "")[:10], "description": payment.get("description", "bunq transactie"), "counterparty": alias.get("display_name") or alias.get("value", ""), "amount": Decimal(str(amount.get("value", "0"))), "currency": amount.get("currency", "EUR"), "metadata": {"source": "bunq", "raw": payment}})
                     transaction_count += int(created)
     return {"accounts": account_count, "new_transactions": transaction_count}
+
+
+def _dropbox_access_token(connection: IntegrationConnection) -> str:
+    """Return a valid Dropbox access token, refreshing it first if it has expired."""
+    from django.utils.dateparse import parse_datetime
+
+    from integrations.services import DROPBOX_OAUTH_TOKEN_URL, get_app_config
+
+    stored = connection.settings if isinstance(connection.settings, dict) else {}
+    expires_at = parse_datetime(stored.get("expires_at") or "") if stored.get("expires_at") else None
+    if expires_at and timezone.now() < expires_at and stored.get("access_token"):
+        return decrypt(stored["access_token"])
+
+    refresh_token = decrypt(connection.secret_encrypted) if connection.secret_encrypted else ""
+    if not refresh_token:
+        raise ProviderError("Dropbox-koppeling mist een refresh token. Koppel Dropbox opnieuw.")
+    client_id, client_secret, _ = get_app_config(connection.household, "dropbox")
+    if not client_id or not client_secret:
+        raise ProviderError("Dropbox-appgegevens ontbreken.")
+    response = requests.post(
+        DROPBOX_OAUTH_TOKEN_URL,
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        auth=(client_id, client_secret),
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ProviderError("Dropbox gaf geen geldige reactie bij het vernieuwen van de toegang.") from error
+    if not response.ok or not payload.get("access_token"):
+        raise ProviderError("Dropbox-toegang vernieuwen is mislukt. Koppel Dropbox opnieuw.")
+    new_expires_at = timezone.now() + timedelta(seconds=max(int(payload.get("expires_in", 14400)) - 60, 60))
+    connection.settings = {**stored, "access_token": encrypt(payload["access_token"]), "expires_at": new_expires_at.isoformat()}
+    connection.save(update_fields=["settings", "updated_at"])
+    return payload["access_token"]
+
+
+def list_recent_dropbox_files(connection: IntegrationConnection, limit: int = 20) -> list[dict]:
+    """List the household's most recently modified Dropbox files, for AI context — names and metadata only, never content."""
+    access_token = _dropbox_access_token(connection)
+    response = requests.post(
+        "https://api.dropboxapi.com/2/files/list_folder",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"path": "", "recursive": False, "include_deleted": False, "limit": 200},
+        timeout=20,
+    )
+    if not response.ok:
+        raise ProviderError("Dropbox kon de bestandenlijst niet ophalen.")
+    entries = response.json().get("entries", [])
+    files = [entry for entry in entries if entry.get(".tag") == "file"]
+    files.sort(key=lambda entry: entry.get("server_modified", ""), reverse=True)
+    return [
+        {"name": entry.get("name"), "path": entry.get("path_display"), "modified": entry.get("server_modified"), "size": entry.get("size")}
+        for entry in files[:limit]
+    ]
