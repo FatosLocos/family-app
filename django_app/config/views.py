@@ -6,11 +6,11 @@ from django.shortcuts import render
 from django.db.models import Q
 from django.utils import timezone
 
-from family.birthdays import upcoming_birthdays
-from family.models import Contact, ContactPerson, WishItem
+from config.services import build_today_summary
+from family.models import Contact, WishItem
 from finance.models import Transaction
 from home.models import HomeEntity
-from household.models import MealPlan, Routine, ShoppingItem, Task
+from household.models import Task
 from notifications.models import Notification
 from planning.models import CalendarEvent
 
@@ -38,9 +38,7 @@ def service_worker(request):
 
 @login_required
 def today(request):
-    household = request.household
     now = timezone.now()
-    today = timezone.localdate()
     local_hour = timezone.localtime(now).hour
     if local_hour < 12:
         greeting = "Goedemorgen"
@@ -48,31 +46,7 @@ def today(request):
         greeting = "Goedemiddag"
     else:
         greeting = "Goedenavond"
-    tasks = Task.objects.for_household(household).filter(completed_at__isnull=True).order_by("due_at", "-priority")[:5]
-    shopping = ShoppingItem.objects.for_household(household).filter(completed_at__isnull=True).select_related("list")[:5]
-    events = CalendarEvent.objects.for_household(household).filter(ends_at__gte=now).order_by("starts_at")[:5]
-    notifications = Notification.objects.for_household(household).filter(read_at__isnull=True).order_by("-created_at")[:4]
-    routines = Routine.objects.for_household(household).filter(is_active=True, next_due_on__lte=today).select_related("assigned_to").order_by("next_due_on", "title")[:5]
-    meals = MealPlan.objects.for_household(household).filter(planned_for__gte=today).order_by("planned_for")[:2]
-    birthdays = upcoming_birthdays(
-        ContactPerson.objects.for_household(household).filter(birth_date__isnull=False).select_related("contact"),
-        today,
-    )[:3]
-
-    tasks_due_today = Task.objects.for_household(household).filter(due_at__date=today)
-    tasks_due_today_total = tasks_due_today.count()
-    tasks_due_today_done = tasks_due_today.filter(completed_at__isnull=False).count()
-    tasks_due_today_pct = round(tasks_due_today_done / tasks_due_today_total * 100) if tasks_due_today_total else 0
-    shopping_open_count = ShoppingItem.objects.for_household(household).filter(completed_at__isnull=True).count()
-    tomorrow = today + timezone.timedelta(days=1)
-    events_today_count = CalendarEvent.objects.for_household(household).filter(starts_at__date__lt=tomorrow, ends_at__date__gte=today).count()
-
-    return render(request, "today/index.html", {
-        "tasks": tasks, "shopping_items": shopping, "events": events, "notifications": notifications, "birthdays": birthdays, "routines": routines, "meals": meals,
-        "today": today, "greeting": greeting,
-        "tasks_due_today_total": tasks_due_today_total, "tasks_due_today_done": tasks_due_today_done, "tasks_due_today_pct": tasks_due_today_pct,
-        "shopping_open_count": shopping_open_count, "events_today_count": events_today_count,
-    })
+    return render(request, "today/index.html", {**build_today_summary(request.household), "greeting": greeting})
 
 
 @login_required

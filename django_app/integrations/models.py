@@ -100,6 +100,22 @@ class LocalProbe(models.Model):
         ordering = ("-last_seen_at", "name")
 
 
+class OpenClawToken(models.Model):
+    """A household-scoped bearer credential for the OpenClaw chat agent to call our API."""
+
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="openclaw_tokens")
+    label = models.CharField(max_length=120, default="OpenClaw")
+    token_hash = models.CharField(max_length=255)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    objects = HouseholdManager()
+
+    class Meta:
+        ordering = ("-created_at",)
+
+
 class LocalDiscovery(models.Model):
     household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="local_discoveries")
     probe = models.ForeignKey(LocalProbe, on_delete=models.CASCADE, related_name="discoveries")

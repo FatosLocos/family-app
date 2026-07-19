@@ -1,10 +1,16 @@
 from django.urls import path
 
 from integrations import views
+from integrations import openclaw_views
 
 app_name = "integrations"
 urlpatterns = [
     path("", views.index, name="index"),
+    path("openclaw/token/aanmaken/", openclaw_views.create_openclaw_token, name="create_openclaw_token"),
+    path("openclaw/token/<int:token_id>/intrekken/", openclaw_views.revoke_openclaw_token, name="revoke_openclaw_token"),
+    path("api/openclaw/vandaag/", openclaw_views.api_today, name="api_openclaw_today"),
+    path("api/openclaw/taken/", openclaw_views.api_add_task, name="api_openclaw_add_task"),
+    path("api/openclaw/taken/<int:task_id>/afronden/", openclaw_views.api_complete_task, name="api_openclaw_complete_task"),
     path("profiel/", views.save_profile, name="save_profile"),
     path("huishouden/", views.save_household, name="save_household"),
     path("gegevens/exporteren/", views.export_household_data, name="export_household_data"),
