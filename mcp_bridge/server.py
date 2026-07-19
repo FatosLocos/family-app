@@ -75,7 +75,7 @@ def vandaag(ctx: Context) -> dict:
 
 
 @mcp.tool()
-def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None) -> dict:
+def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, lijst: str | None = None) -> dict:
     """Add a new task to the household's task list.
 
     Args:
@@ -83,6 +83,9 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         due_at: Optional ISO 8601 deadline, e.g. "2026-07-20T18:00:00".
         priority: Optional priority: 1 (low), 2 (normal, default), 3 (high).
         notes: Optional free-text notes.
+        lijst: Optional name of a task list to file this under, e.g. "Boodschappen" or
+            "Klussen". Created automatically if it doesn't exist yet — see taak_lijsten()
+            for the existing ones. Omit to leave the task unsorted ("Zonder lijst").
     """
     payload = {"title": title}
     if due_at:
@@ -91,8 +94,33 @@ def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority
         payload["priority"] = priority
     if notes:
         payload["notes"] = notes
+    if lijst:
+        payload["lijst"] = lijst
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/taken/", json=payload))
+
+
+@mcp.tool()
+def taak_lijsten(ctx: Context) -> dict:
+    """List the household's task lists ("lijstjes"), each with how many open tasks it has.
+    Use this to see what lists already exist before deciding whether taak_toevoegen's
+    `lijst` argument should reuse one or create a new one."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/taken/lijstjes/"))
+
+
+@mcp.tool()
+def taak_lijst_aanmaken(ctx: Context, naam: str) -> dict:
+    """Create a new, empty task list ("lijstje"). If a list with this name already exists,
+    returns that one instead of creating a duplicate — safe to call speculatively.
+    Usually unnecessary: taak_toevoegen's `lijst` argument creates the list automatically
+    if needed, so only call this to make an empty list with no task yet.
+
+    Args:
+        naam: The list's name, e.g. "Klussen" or "Verjaardag Emma".
+    """
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/taken/lijstjes/toevoegen/", json={"naam": naam}))
 
 
 @mcp.tool()

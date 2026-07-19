@@ -3,7 +3,7 @@ import json
 from datetime import datetime, time
 
 from django.contrib import messages
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
@@ -15,7 +15,7 @@ from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
-from household.models import ShoppingItem, ShoppingList, Task
+from household.models import ShoppingItem, ShoppingList, Task, TaskList
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
@@ -82,6 +82,7 @@ def api_add_task(request):
     except (TypeError, ValueError):
         return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
     payload.setdefault("priority", Task.Priority.NORMAL)
+    list_name = str(payload.get("lijst") or "").strip()
     form = TaskForm(payload)
     form.fields["assigned_to"].queryset = User.objects.filter(memberships__household=request.household).distinct()
     if not form.is_valid():
@@ -90,9 +91,41 @@ def api_add_task(request):
     task = form.save(commit=False)
     task.household = request.household
     task.created_by_agent = True
+    if list_name:
+        task_list, _ = TaskList.objects.get_or_create(household=request.household, name=list_name)
+        task.list = task_list
     task.save()
-    log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd", user=request.openclaw_user)
-    return JsonResponse({"id": task.id, "title": task.title}, status=201)
+    log_openclaw_action(request.household, "taak_toevoegen", f"Taak '{task.title}' toegevoegd" + (f" aan lijstje '{list_name}'" if list_name else ""), user=request.openclaw_user)
+    return JsonResponse({"id": task.id, "title": task.title, "lijst": task.list.name if task.list else None}, status=201)
+
+
+@require_openclaw_token("taken:write")
+@require_GET
+def api_task_lists(request):
+    lists = TaskList.objects.for_household(request.household)
+    open_counts = {}
+    counts = Task.objects.for_household(request.household).filter(completed_at__isnull=True, list__isnull=False).values("list_id").annotate(count=Count("id"))
+    for row in counts:
+        open_counts[row["list_id"]] = row["count"]
+    log_openclaw_action(request.household, "taak_lijsten", "Lijstjes opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "lists": [{"id": task_list.id, "name": task_list.name, "open_task_count": open_counts.get(task_list.id, 0)} for task_list in lists],
+    })
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_add_task_list(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    name = str(payload.get("naam") or "").strip()
+    if not name:
+        return JsonResponse({"error": "Veld 'naam' is verplicht."}, status=400)
+    task_list, created = TaskList.objects.get_or_create(household=request.household, name=name)
+    log_openclaw_action(request.household, "taak_lijst_aanmaken", f"Lijstje '{task_list.name}' " + ("aangemaakt" if created else "bestond al"), user=request.openclaw_user)
+    return JsonResponse({"id": task_list.id, "name": task_list.name, "created": created}, status=201 if created else 200)
 
 
 @require_openclaw_token("taken:write")
