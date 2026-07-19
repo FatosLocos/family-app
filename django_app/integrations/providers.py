@@ -38,13 +38,33 @@ class HueProviderError(ProviderError):
         self.status_code = status_code
 
 
+def _is_transient_graph_error(response: requests.Response) -> bool:
+    """Microsoft Graph occasionally answers a well-formed request with a spurious
+    RequestBroker--ParseUri "Invalid request" 400 — a known, documented transient error on
+    Microsoft's side (confirmed by replaying the exact same request seconds later and getting
+    a normal 200). Safe to retry: unlike other 400s, this one isn't caused by anything in the
+    request itself.
+    """
+    if response.status_code < 500:
+        if response.status_code != 400:
+            return False
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        error = payload.get("error") if isinstance(payload, dict) else None
+        code = error.get("code", "") if isinstance(error, dict) else ""
+        return isinstance(code, str) and code.startswith("RequestBroker")
+    return True
+
+
 def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
     max_retries = 3
     base_delay = 1
     for attempt in range(max_retries):
         try:
             response = requests.request(method, url, **kwargs)
-            if response.status_code == 429:
+            if response.status_code == 429 or _is_transient_graph_error(response):
                 if attempt < max_retries - 1:
                     retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
                     time.sleep(retry_after)
