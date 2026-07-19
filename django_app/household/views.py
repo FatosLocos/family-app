@@ -20,7 +20,7 @@ from household.models import MealIngredient, MealPlan, PantryItem, Receipt, Rece
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
 from integrations.models import IntegrationConnection
-from integrations.providers import ProviderError, outlook_todo_lists
+from integrations.providers import ProviderError, outlook_todo_lists, sync_task_list_link
 from notifications.models import Notification
 from household.tasks import process_receipt_ocr, refresh_household_shopping_prices
 
@@ -396,6 +396,22 @@ def unlink_task_list_sync(request, list_id):
     task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
     TaskListSync.objects.for_household(request.household).filter(task_list=task_list).delete()
     messages.success(request, f'"{task_list.name}" is ontkoppeld van Microsoft To Do.')
+    return _household_tab_redirect("taken")
+
+
+@household_required
+@require_POST
+def sync_task_list_now(request, list_id):
+    task_list = get_object_or_404(TaskList.objects.for_household(request.household), pk=list_id)
+    link = TaskListSync.objects.for_household(request.household).filter(task_list=task_list).first()
+    if not link:
+        messages.error(request, "Dit lijstje is niet gekoppeld aan Microsoft To Do.")
+        return _household_tab_redirect("taken")
+    sync_task_list_link(link)
+    if link.last_sync_error:
+        messages.error(request, f"Synchroniseren mislukt: {link.last_sync_error}")
+    else:
+        messages.success(request, f'"{task_list.name}" is gesynchroniseerd met Microsoft To Do.')
     return _household_tab_redirect("taken")
 
 

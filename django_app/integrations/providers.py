@@ -2357,17 +2357,24 @@ def _sync_one_todo_list(connection: IntegrationConnection, link: TaskListSync) -
             Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now())
 
 
+def sync_task_list_link(link: TaskListSync) -> None:
+    """Sync a single linked TaskList right now. Shared by the periodic sync (sync_connection,
+    via sync_outlook_todo_lists) and the manual "Nu synchroniseren" button on the list.
+    """
+    try:
+        _sync_one_todo_list(link.connection, link)
+        link.last_sync_error = ""
+    except ProviderError as error:
+        link.last_sync_error = str(error)[:500]
+    link.last_synced_at = timezone.now()
+    link.save(update_fields=["last_synced_at", "last_sync_error", "updated_at"])
+
+
 def sync_outlook_todo_lists(connection: IntegrationConnection) -> dict:
     """Sync every TaskList this connection's household has linked to a Microsoft To Do list."""
     synced = 0
     for link in TaskListSync.objects.for_household(connection.household).filter(connection=connection, provider=TaskListSync.Provider.OUTLOOK_TODO):
-        try:
-            _sync_one_todo_list(connection, link)
-            link.last_sync_error = ""
-        except ProviderError as error:
-            link.last_sync_error = str(error)[:500]
-        link.last_synced_at = timezone.now()
-        link.save(update_fields=["last_synced_at", "last_sync_error", "updated_at"])
+        sync_task_list_link(link)
         synced += 1
     return {"linked_lists": synced}
 

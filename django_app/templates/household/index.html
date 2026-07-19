@@ -86,7 +86,11 @@
       <div class="dialog-title"><h2>Koppelen met Microsoft To Do</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
       {% if task_list.sync_link %}
         <p>"{{ task_list.name }}" is gekoppeld aan de Microsoft To Do-lijst "{{ task_list.sync_link.external_list_name|default:task_list.sync_link.external_list_id }}". Nieuwe en gewijzigde taken worden binnen enkele minuten in beide richtingen bijgewerkt.</p>
-        <form method="post" action="{% url 'household:unlink_task_list_sync' task_list.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="unlink"></i>Ontkoppelen</button></form>
+        <p class="form-hint">{% if task_list.sync_link.last_synced_at %}Laatst gesynchroniseerd {{ task_list.sync_link.last_synced_at|date:'d M H:i' }}{% else %}Nog niet gesynchroniseerd{% endif %}{% if task_list.sync_link.last_sync_error %} · <em>{{ task_list.sync_link.last_sync_error }}</em>{% endif %}</p>
+        <div class="button-row">
+          <form method="post" action="{% url 'household:sync_task_list_now' task_list.id %}">{% csrf_token %}<button class="button button-secondary" type="submit"><i data-lucide="refresh-cw"></i>Nu synchroniseren</button></form>
+          <form method="post" action="{% url 'household:unlink_task_list_sync' task_list.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="unlink"></i>Ontkoppelen</button></form>
+        </div>
       {% elif not outlook_connection %}
         <p>Koppel eerst je eigen Outlook-account in <a href="{% url 'integrations:index' %}">Instellingen</a> om een Microsoft To Do-lijst te kunnen koppelen.</p>
       {% else %}

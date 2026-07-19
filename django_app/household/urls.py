@@ -13,6 +13,7 @@ urlpatterns = [
     path("taken/lijstjes/<int:list_id>/verwijderen/", views.delete_task_list, name="delete_task_list"),
     path("taken/lijstjes/<int:list_id>/koppelen/", views.link_task_list_sync, name="link_task_list_sync"),
     path("taken/lijstjes/<int:list_id>/ontkoppelen/", views.unlink_task_list_sync, name="unlink_task_list_sync"),
+    path("taken/lijstjes/<int:list_id>/synchroniseren/", views.sync_task_list_now, name="sync_task_list_now"),
     path("taken/herschikken/", views.reorder_tasks, name="reorder_tasks"),
     path("boodschappen/toevoegen/", views.add_shopping_item, name="add_shopping_item"),
     path("boodschappen/<int:item_id>/toggle/", views.toggle_shopping_item, name="toggle_shopping_item"),
