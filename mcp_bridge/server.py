@@ -161,5 +161,33 @@ def huis_bedienen(ctx: Context, entity_id: int, action: str, value: str | None =
         return _checked(client.post(f"/instellingen/api/openclaw/huis/{entity_id}/bedienen/", json=payload))
 
 
+@mcp.tool()
+def agenda(ctx: Context) -> dict:
+    """Get upcoming calendar events for the next two weeks (broader than vandaag()'s today-only preview)."""
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/agenda/"))
+
+
+@mcp.tool()
+def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None) -> dict:
+    """Add a new event to the household's shared calendar.
+
+    Args:
+        title: What the event is (required).
+        starts_at: ISO 8601 start datetime, e.g. "2026-07-20T18:00:00".
+        ends_at: ISO 8601 end datetime, e.g. "2026-07-20T19:00:00".
+        is_all_day: Whether this is an all-day event (default False).
+        location: Optional location.
+        notes: Optional free-text notes.
+    """
+    payload = {"title": title, "starts_at": starts_at, "ends_at": ends_at, "is_all_day": is_all_day}
+    if location:
+        payload["location"] = location
+    if notes:
+        payload["notes"] = notes
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/agenda/toevoegen/", json=payload))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

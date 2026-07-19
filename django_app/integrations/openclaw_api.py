@@ -26,7 +26,7 @@ class TokenError(Exception):
 # Every scope the MCP tools currently understand. New tokens get all of
 # these until the scope-picker UI ships; after that, a token only gets what
 # was explicitly checked when it was created.
-ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write"]
+ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write", "huis:read", "huis:write", "agenda:read", "agenda:write"]
 SCOPE_LABELS = {
     "vandaag:read": "Dagoverzicht lezen",
     "taken:write": "Taken aanmaken en afronden",
@@ -34,6 +34,8 @@ SCOPE_LABELS = {
     "boodschappen:write": "Boodschappen toevoegen",
     "huis:read": "Apparaten in huis lezen",
     "huis:write": "Apparaten in huis bedienen",
+    "agenda:read": "Agenda lezen",
+    "agenda:write": "Afspraken toevoegen",
 }
 
 

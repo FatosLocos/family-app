@@ -1,5 +1,6 @@
 """Browser-side token management plus the bearer-token API surface for OpenClaw."""
 import json
+from datetime import timedelta
 
 from django.contrib import messages
 from django.http import JsonResponse
@@ -18,6 +19,8 @@ from identity.models import User
 from integrations.models import OpenClawToken
 from integrations.openclaw_api import ALL_SCOPES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
 from notifications.models import Notification
+from planning.forms import CalendarEventForm
+from planning.models import CalendarEvent, CalendarSource
 
 
 @parent_required
@@ -170,3 +173,47 @@ def api_home_control(request, entity_id):
     entity.refresh_from_db()
     log_openclaw_action(request.household, "huis_bedienen", f"'{entity.name}': {action}", user=request.openclaw_user)
     return JsonResponse({"id": entity.id, "name": entity.name, "state": entity.state, **result})
+
+
+@require_openclaw_token("agenda:read")
+@require_GET
+def api_agenda(request):
+    now = timezone.now()
+    window_end = now + timedelta(days=14)
+    events = CalendarEvent.objects.for_household(request.household).filter(starts_at__lt=window_end, ends_at__gte=now).order_by("starts_at")
+    log_openclaw_action(request.household, "agenda", "Agenda opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "events": [
+            {
+                "id": event.id,
+                "title": event.title,
+                "starts_at": event.starts_at.isoformat(),
+                "ends_at": event.ends_at.isoformat(),
+                "is_all_day": event.is_all_day,
+                "location": event.location,
+                "notes": event.notes,
+            }
+            for event in events
+        ],
+    })
+
+
+@require_openclaw_token("agenda:write")
+@require_POST
+def api_add_event(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    form = CalendarEventForm(payload)
+    form.fields["participants"].queryset = User.objects.filter(memberships__household=request.household).distinct()
+    if not form.is_valid():
+        log_openclaw_action(request.household, "afspraak_toevoegen", "Afspraak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
+        return JsonResponse({"error": "Ongeldige afspraakvelden.", "details": form.errors}, status=400)
+    event = form.save(commit=False)
+    event.household = request.household
+    event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+    event.save()
+    form.save_m2m()
+    log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
+    return JsonResponse({"id": event.id, "title": event.title, "starts_at": event.starts_at.isoformat()}, status=201)
