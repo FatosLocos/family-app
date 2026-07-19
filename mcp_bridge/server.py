@@ -17,7 +17,10 @@ Run directly: FAMILY_APP_TOKEN=... python server.py
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
+import time
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
@@ -26,6 +29,10 @@ FAMILY_APP_BASE_URL = os.environ.get("FAMILY_APP_BASE_URL", "http://127.0.0.1:80
 FAMILY_APP_TOKEN = os.environ.get("FAMILY_APP_TOKEN", "")
 BRIDGE_HOST = os.environ.get("MCP_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT = int(os.environ.get("MCP_BRIDGE_PORT", "8899"))
+# Must be readable by whatever user runs the OpenClaw agent (a setgid directory shared
+# between this bridge's user and that one) — this bridge and OpenClaw run on the same host.
+DROPBOX_DOWNLOAD_DIR = os.environ.get("DROPBOX_DOWNLOAD_DIR", "/var/lib/family-app-dropbox-cache")
+DROPBOX_DOWNLOAD_MAX_AGE_SECONDS = 24 * 60 * 60
 
 mcp = FastMCP("family-app", host=BRIDGE_HOST, port=BRIDGE_PORT)
 
@@ -466,21 +473,55 @@ def dropbox_lezen(ctx: Context, pad: str) -> dict:
         return _checked(client.get("/instellingen/api/openclaw/dropbox/lezen/", params={"pad": pad}))
 
 
+def _prune_dropbox_downloads() -> None:
+    """Delete cached downloads older than DROPBOX_DOWNLOAD_MAX_AGE_SECONDS.
+
+    Runs opportunistically on every download rather than via a separate cron/timer — cheap
+    for the small number of files this directory ever holds, and keeps household documents
+    from lingering on disk indefinitely.
+    """
+    cutoff = time.time() - DROPBOX_DOWNLOAD_MAX_AGE_SECONDS
+    try:
+        entries = os.scandir(DROPBOX_DOWNLOAD_DIR)
+    except FileNotFoundError:
+        return
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    os.remove(entry.path)
+            except OSError:
+                pass
+
+
 @mcp.tool()
 def dropbox_bestand_ruw_lezen(ctx: Context, path: str) -> dict:
-    """Download a Dropbox file exactly as-is (base64-encoded), regardless of format — use this
-    for spreadsheets, presentations, images, or anything else dropbox_lezen's text extraction
-    doesn't handle. Decode content_base64 yourself and parse it with the appropriate library
-    (e.g. openpyxl for .xlsx, python-pptx for .pptx). Bounded to a smaller size than
-    dropbox_lezen, since base64 inflates size and the result has to fit in your context — for
-    large text-heavy documents, prefer dropbox_lezen instead.
+    """Download a Dropbox file exactly as-is, regardless of format, and save it to a local
+    file — use this for spreadsheets, presentations, images, or anything else dropbox_lezen's
+    text extraction doesn't handle. Open local_path directly with Bash + the appropriate
+    library (e.g. openpyxl for .xlsx, python-pptx for .pptx). There is no inline file content
+    in this response — do not attempt to reconstruct the file from text, and never retype or
+    paste file bytes by hand; read the path instead. Bounded to a smaller size than
+    dropbox_lezen — for large text-heavy documents, prefer dropbox_lezen instead.
 
     Args:
         path: The file path, e.g. "/Conquesto/Begroting 2026.xlsx". Find it first via
             dropbox_map or dropbox_zoeken.
     """
     with _client(ctx) as client:
-        return _checked(client.get("/instellingen/api/openclaw/dropbox/ruw/", params={"path": path}))
+        result = _checked(client.get("/instellingen/api/openclaw/dropbox/ruw/", params={"path": path}))
+    content = base64.b64decode(result.pop("content_base64"))
+
+    _prune_dropbox_downloads()
+    os.makedirs(DROPBOX_DOWNLOAD_DIR, exist_ok=True)
+    unique_prefix = f"{int(time.time())}_{hashlib.sha1(path.encode()).hexdigest()[:8]}"
+    local_path = os.path.join(DROPBOX_DOWNLOAD_DIR, f"{unique_prefix}_{os.path.basename(result['name'])}")
+    with open(local_path, "wb") as f:
+        f.write(content)
+    os.chmod(local_path, 0o640)
+
+    result["local_path"] = local_path
+    return result
 
 
 if __name__ == "__main__":
