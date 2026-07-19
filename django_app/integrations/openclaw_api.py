@@ -23,18 +23,36 @@ class TokenError(Exception):
     pass
 
 
+# Every scope the MCP tools currently understand. New tokens get all of
+# these until the scope-picker UI ships; after that, a token only gets what
+# was explicitly checked when it was created.
+ALL_SCOPES = ["vandaag:read", "taken:write", "boodschappen:read", "boodschappen:write"]
+SCOPE_LABELS = {
+    "vandaag:read": "Dagoverzicht lezen",
+    "taken:write": "Taken aanmaken en afronden",
+    "boodschappen:read": "Boodschappenlijst lezen",
+    "boodschappen:write": "Boodschappen toevoegen",
+}
+
+
 def log_openclaw_action(household, action: str, summary: str, status: str = "success", detail: str = "", user=None) -> None:
     """Record what OpenClaw did through FamilyApp, so it's visible in Instellingen."""
     with household_db_scope(household.id):
         OpenClawActionLog.objects.create(household=household, user=user, action=action, summary=summary[:240], status=status, detail=detail)
 
 
-def create_token(household, user, label: str | None = None) -> tuple[OpenClawToken, str]:
+def create_token(household, user, label: str | None = None, scopes: list[str] | None = None) -> tuple[OpenClawToken, str]:
     """Mint a new token for this user, revoking any previously active token of theirs."""
     with household_db_scope(household.id):
         OpenClawToken.objects.for_household(household).filter(user=user, revoked_at__isnull=True).update(revoked_at=timezone.now())
         raw_token = secrets.token_urlsafe(32)
-        token = OpenClawToken.objects.create(household=household, user=user, label=(label or str(user)).strip()[:120], token_hash=make_password(raw_token))
+        token = OpenClawToken.objects.create(
+            household=household,
+            user=user,
+            label=(label or str(user)).strip()[:120],
+            token_hash=make_password(raw_token),
+            scopes=list(scopes) if scopes is not None else list(ALL_SCOPES),
+        )
     return token, f"{household.id}.{raw_token}"
 
 
@@ -61,27 +79,41 @@ def authenticate_token(bearer_value: str) -> OpenClawToken:
         raise TokenError("Token is niet geautoriseerd.")
 
 
-def require_openclaw_token(view_func):
-    """Authenticate via `Authorization: Bearer <token>` instead of a session cookie.
+def require_openclaw_token(scope: str):
+    """Authenticate via `Authorization: Bearer <token>` and require it to carry `scope`.
 
     Enters household_db_scope for the duration of the view, since the usual
-    ActiveHouseholdMiddleware never runs for these requests (no session).
+    ActiveHouseholdMiddleware never runs for these requests (no session). A
+    token missing the required scope is refused with a 403, and the refusal
+    is logged too — so a locked-down token is just as visible as a working one.
     """
 
-    @csrf_exempt
-    @functools.wraps(view_func)
-    def wrapped(request, *args, **kwargs):
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            return JsonResponse({"error": "Ontbrekende of ongeldige Authorization-header."}, status=401)
-        try:
-            token = authenticate_token(header.removeprefix("Bearer ").strip())
-        except TokenError as error:
-            return JsonResponse({"error": str(error)}, status=401)
-        with household_db_scope(token.household_id):
-            request.household = token.household
-            request.openclaw_user = token.user
-            OpenClawToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
-            return view_func(request, *args, **kwargs)
+    def decorator(view_func):
+        @csrf_exempt
+        @functools.wraps(view_func)
+        def wrapped(request, *args, **kwargs):
+            header = request.headers.get("Authorization", "")
+            if not header.startswith("Bearer "):
+                return JsonResponse({"error": "Ontbrekende of ongeldige Authorization-header."}, status=401)
+            try:
+                token = authenticate_token(header.removeprefix("Bearer ").strip())
+            except TokenError as error:
+                return JsonResponse({"error": str(error)}, status=401)
+            with household_db_scope(token.household_id):
+                request.household = token.household
+                request.openclaw_user = token.user
+                OpenClawToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+                if scope not in (token.scopes or []):
+                    log_openclaw_action(
+                        token.household,
+                        "toegang_geweigerd",
+                        f"Actie geweigerd: token '{token.label}' mist scope '{scope}'",
+                        status="error",
+                        user=token.user,
+                    )
+                    return JsonResponse({"error": f"Dit token heeft geen toestemming voor '{scope}'."}, status=403)
+                return view_func(request, *args, **kwargs)
 
-    return wrapped
+        return wrapped
+
+    return decorator

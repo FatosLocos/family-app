@@ -14,14 +14,15 @@ from household.tasks import refresh_household_shopping_prices
 from households.decorators import parent_required
 from identity.models import User
 from integrations.models import OpenClawToken
-from integrations.openclaw_api import create_token, log_openclaw_action, require_openclaw_token, revoke_token
+from integrations.openclaw_api import ALL_SCOPES, create_token, log_openclaw_action, require_openclaw_token, revoke_token
 from notifications.models import Notification
 
 
 @parent_required
 @require_POST
 def create_openclaw_token(request):
-    _, token = create_token(request.household, request.user)
+    scopes = [scope for scope in request.POST.getlist("scopes") if scope in ALL_SCOPES]
+    _, token = create_token(request.household, request.user, scopes=scopes)
     request.session["openclaw_token"] = token
     messages.success(request, "Nieuw OpenClaw-token gemaakt. Bewaar het meteen — het wordt niet nogmaals getoond.")
     return redirect("integrations:index")
@@ -36,7 +37,7 @@ def revoke_openclaw_token(request, token_id):
     return redirect("integrations:index")
 
 
-@require_openclaw_token
+@require_openclaw_token("vandaag:read")
 @require_GET
 def api_today(request):
     summary = build_today_summary(request.household)
@@ -64,7 +65,7 @@ def api_today(request):
     })
 
 
-@require_openclaw_token
+@require_openclaw_token("taken:write")
 @require_POST
 def api_add_task(request):
     try:
@@ -84,7 +85,7 @@ def api_add_task(request):
     return JsonResponse({"id": task.id, "title": task.title}, status=201)
 
 
-@require_openclaw_token
+@require_openclaw_token("taken:write")
 @require_POST
 def api_complete_task(request, task_id):
     task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
@@ -95,7 +96,7 @@ def api_complete_task(request, task_id):
     return JsonResponse({"id": task.id, "completed_at": task.completed_at.isoformat()})
 
 
-@require_openclaw_token
+@require_openclaw_token("boodschappen:read")
 @require_GET
 def api_shopping_list(request):
     items = ShoppingItem.objects.for_household(request.household).filter(completed_at__isnull=True).order_by("created_at")
@@ -105,7 +106,7 @@ def api_shopping_list(request):
     })
 
 
-@require_openclaw_token
+@require_openclaw_token("boodschappen:write")
 @require_POST
 def api_add_shopping_item(request):
     try:

@@ -86,6 +86,9 @@
 .checkbox-row, .checkbox-field { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
 .checkbox-row input[type="checkbox"], .checkbox-field input[type="checkbox"] { width: auto; margin: 0; }
 .checkbox-row label, .checkbox-field label { margin: 0; font-weight: 400; }
+.checkbox-field-group { border: 0; padding: 0; margin: 4px 0 12px; }
+.checkbox-field-group legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0; margin-bottom: 4px; }
+.checkbox-field-group .checkbox-field { padding: 4px 0; }
 
 /* Touch targets: minimum 44px for accessibility */
 button, a[role="button"], input[type="button"], input[type="submit"], input[type="reset"], .button { min-height: 44px; min-width: 44px; }

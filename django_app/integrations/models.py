@@ -107,6 +107,7 @@ class OpenClawToken(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="openclaw_tokens")
     label = models.CharField(max_length=120, default="OpenClaw")
     token_hash = models.CharField(max_length=255)
+    scopes = models.JSONField(default=list, blank=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
