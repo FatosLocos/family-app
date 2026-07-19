@@ -455,14 +455,32 @@ def dropbox_zoeken(ctx: Context, q: str, pad: str | None = None) -> dict:
 @mcp.tool()
 def dropbox_lezen(ctx: Context, pad: str) -> dict:
     """Read the text content of a specific Dropbox document — txt, md, csv, json, pdf, or docx only.
-    Photos, video, audio, and spreadsheets are not supported and never proxied. Large files are
-    refused; long documents are truncated. Find the path first via dropbox_map or dropbox_zoeken.
+    For spreadsheets, presentations, images, or any other format, use dropbox_bestand_ruw_lezen
+    instead. Large files are refused; long documents are truncated. Find the path first via
+    dropbox_map or dropbox_zoeken.
 
     Args:
         pad: The file path, e.g. "/Conquesto/Financiën/Jaarverslag 2025.pdf".
     """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/dropbox/lezen/", params={"pad": pad}))
+
+
+@mcp.tool()
+def dropbox_bestand_ruw_lezen(ctx: Context, path: str) -> dict:
+    """Download a Dropbox file exactly as-is (base64-encoded), regardless of format — use this
+    for spreadsheets, presentations, images, or anything else dropbox_lezen's text extraction
+    doesn't handle. Decode content_base64 yourself and parse it with the appropriate library
+    (e.g. openpyxl for .xlsx, python-pptx for .pptx). Bounded to a smaller size than
+    dropbox_lezen, since base64 inflates size and the result has to fit in your context — for
+    large text-heavy documents, prefer dropbox_lezen instead.
+
+    Args:
+        path: The file path, e.g. "/Conquesto/Begroting 2026.xlsx". Find it first via
+            dropbox_map or dropbox_zoeken.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/dropbox/ruw/", params={"path": path}))
 
 
 if __name__ == "__main__":

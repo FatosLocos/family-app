@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -2389,4 +2390,52 @@ def dropbox_read_file_text(connection: IntegrationConnection, path: str) -> dict
         "path": metadata.get("path_display"),
         "text": text[:DROPBOX_MAX_READ_CHARS],
         "truncated": truncated,
+    }
+
+
+DROPBOX_MAX_RAW_BYTES = 5 * 1024 * 1024
+
+
+def dropbox_download_file_raw(connection: IntegrationConnection, path: str) -> dict:
+    """Download any Dropbox file's raw bytes (base64-encoded), regardless of format.
+
+    Unlike dropbox_read_file_text, this does no text extraction — it hands back the file
+    exactly as it is, so the caller can parse formats FamilyApp doesn't understand itself
+    (spreadsheets, presentations, images). Bounded much tighter than the text-read path
+    (DROPBOX_MAX_RAW_BYTES vs DROPBOX_MAX_READ_BYTES) because base64 inflates size by ~33%
+    and the result ultimately has to fit in an LLM's context.
+    """
+    access_token = _dropbox_access_token(connection)
+    meta_response = requests.post(
+        "https://api.dropboxapi.com/2/files/get_metadata",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"path": path},
+        timeout=20,
+    )
+    if not meta_response.ok:
+        raise ProviderError("Dropbox kon de bestandsinfo niet ophalen.")
+    metadata = meta_response.json()
+    if metadata.get(".tag") != "file":
+        raise ProviderError("Dit pad is geen bestand.")
+    name = str(metadata.get("name") or "")
+    size = int(metadata.get("size") or 0)
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    if size > DROPBOX_MAX_RAW_BYTES:
+        raise ProviderError(f"Bestand is te groot om ruw te lezen ({size // (1024 * 1024)} MB, maximum {DROPBOX_MAX_RAW_BYTES // (1024 * 1024)} MB).")
+
+    download_response = requests.post(
+        "https://content.dropboxapi.com/2/files/download",
+        headers={"Authorization": f"Bearer {access_token}", "Dropbox-API-Arg": json.dumps({"path": path})},
+        timeout=30,
+    )
+    if not download_response.ok:
+        raise ProviderError("Dropbox kon het bestand niet downloaden.")
+
+    return {
+        "name": name,
+        "path": metadata.get("path_display"),
+        "extension": extension,
+        "size": size,
+        "content_base64": base64.b64encode(download_response.content).decode("ascii"),
     }
