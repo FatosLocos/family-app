@@ -2252,30 +2252,38 @@ def _dropbox_access_token(connection: IntegrationConnection) -> str:
     return payload["access_token"]
 
 
+def _dropbox_list_folder(access_token: str, path: str, *, recursive: bool, page_limit: int) -> list[dict]:
+    response = requests.post(
+        "https://api.dropboxapi.com/2/files/list_folder",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"path": path, "recursive": recursive, "include_deleted": False, "limit": page_limit},
+        timeout=20,
+    )
+    if not response.ok:
+        raise ProviderError("Dropbox kon de bestandenlijst niet ophalen.")
+    return response.json().get("entries", [])
+
+
 def list_recent_dropbox_files(connection: IntegrationConnection, limit: int = 20) -> list[dict]:
     """List the household's most recently modified Dropbox files, for AI context — names and metadata only, never content.
 
-    Dropbox's list_folder does not sort by recency, so a single page can easily miss the
-    actual most-recently-modified files in a large account. Fetch a few pages (bounded, not
-    exhaustive) before sorting, to make "recent" reasonably accurate without unbounded calls.
+    Dropbox's list_folder does not sort by recency and shared/mounted folders (e.g. a sports
+    club's shared drive) are siblings of the account's own top-level folders. A single
+    recursive walk from the root can exhaust its page budget inside one large folder before
+    ever reaching the others, silently hiding recent files elsewhere. Instead, sample each
+    top-level folder separately so every one gets a fair share of the budget.
     """
     access_token = _dropbox_access_token(connection)
-    entries = []
-    payload = {"path": "", "recursive": True, "include_deleted": False, "limit": 200}
-    url = "https://api.dropboxapi.com/2/files/list_folder"
-    for _ in range(5):
-        response = requests.post(url, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}, json=payload, timeout=20)
-        if not response.ok:
-            raise ProviderError("Dropbox kon de bestandenlijst niet ophalen.")
-        data = response.json()
-        entries.extend(data.get("entries", []))
-        if not data.get("has_more"):
-            break
-        url = "https://api.dropboxapi.com/2/files/list_folder/continue"
-        payload = {"cursor": data.get("cursor")}
-    files = [entry for entry in entries if entry.get(".tag") == "file"]
-    files.sort(key=lambda entry: entry.get("server_modified", ""), reverse=True)
+    root_entries = _dropbox_list_folder(access_token, "", recursive=False, page_limit=200)
+    top_level_files = [entry for entry in root_entries if entry.get(".tag") == "file"]
+    top_level_folders = [entry["path_lower"] for entry in root_entries if entry.get(".tag") == "folder"]
+
+    all_files = list(top_level_files)
+    for folder_path in top_level_folders:
+        all_files.extend(entry for entry in _dropbox_list_folder(access_token, folder_path, recursive=True, page_limit=200) if entry.get(".tag") == "file")
+
+    all_files.sort(key=lambda entry: entry.get("server_modified", ""), reverse=True)
     return [
         {"name": entry.get("name"), "path": entry.get("path_display"), "modified": entry.get("server_modified"), "size": entry.get("size")}
-        for entry in files[:limit]
+        for entry in all_files[:limit]
     ]
