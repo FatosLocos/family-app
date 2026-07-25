@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "integrations",
     "notifications",
     "home",
+    "travel",
 ]
 
 MIDDLEWARE = [
