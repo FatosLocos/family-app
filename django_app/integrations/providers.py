@@ -5,6 +5,7 @@ import email
 import imaplib
 import json
 import os
+import re
 import smtplib
 import time
 import uuid
@@ -26,6 +27,10 @@ from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationConnection
 from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource
+
+
+_IMAP_LIST_LINE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?P<delimiter>"(?:\\.|[^"\\])*"|NIL)\s+(?P<name>.*)$')
+_IMAP_COPYUID = re.compile(r"COPYUID\s+\d+\s+\S+\s+(?P<uid>\d+)", re.IGNORECASE)
 
 
 class ProviderError(Exception):
@@ -2224,6 +2229,53 @@ def outlook_mail_reply(connection: IntegrationConnection, message_id: str, comme
     _safe_response_json(response, "Outlook")
 
 
+def _outlook_mail_folder_summary(folder: dict) -> dict:
+    return {
+        "id": folder.get("id"),
+        "name": folder.get("displayName") or "",
+        "parent_id": folder.get("parentFolderId"),
+        "unread": folder.get("unreadItemCount"),
+        "total": folder.get("totalItemCount"),
+    }
+
+
+def outlook_mail_folders(connection: IntegrationConnection) -> list[dict]:
+    """List the mail folders of this mailbox, so a caller can look up a folder id before
+    moving a message into it — or see that a folder already exists instead of creating a
+    duplicate. Graph returns the top-level folders; folders nested under another folder are
+    reachable through their parent's childFolders and are not enumerated here.
+    """
+    headers = _outlook_headers(connection)
+    url = "https://graph.microsoft.com/v1.0/me/mailFolders"
+    params = {"$select": "id,displayName,parentFolderId,unreadItemCount,totalItemCount", "$top": 100}
+    folders = []
+    while url:
+        response = _request_with_retry("GET", url, headers=headers, params=params, timeout=20)
+        payload = _safe_response_json(response, "Outlook")
+        folders.extend(_outlook_mail_folder_summary(folder) for folder in payload.get("value", []))
+        url = payload.get("@odata.nextLink")
+        params = None
+    return folders
+
+
+def outlook_mail_create_folder(connection: IntegrationConnection, name: str, parent_folder_id: str | None = None) -> dict:
+    """Create a mail folder, at the top level or under an existing folder (from outlook_mail_folders)."""
+    headers = _outlook_headers(connection)
+    url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{parent_folder_id}/childFolders" if parent_folder_id else "https://graph.microsoft.com/v1.0/me/mailFolders"
+    response = _request_with_retry("POST", url, headers=headers, json={"displayName": name}, timeout=20)
+    return _outlook_mail_folder_summary(_safe_response_json(response, "Outlook"))
+
+
+def outlook_mail_move(connection: IntegrationConnection, message_id: str, destination_folder_id: str) -> dict:
+    """Move a message to another mail folder. Graph hands the message a new id in its new
+    folder, so the returned id — not the one that was passed in — is the one to use afterwards.
+    """
+    headers = _outlook_headers(connection)
+    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/move", headers=headers, json={"destinationId": destination_folder_id}, timeout=20)
+    moved = _safe_response_json(response, "Outlook")
+    return {"id": moved.get("id") or message_id, "folder": moved.get("parentFolderId") or destination_folder_id}
+
+
 def _parse_graph_timestamp(raw: str | None) -> timezone.datetime | None:
     """Parse a plain ISO datetime string field (e.g. lastModifiedDateTime), unlike
     _parse_graph_datetime which expects Graph's {dateTime, timeZone} object shape.
@@ -2863,3 +2915,214 @@ def imap_mail_reply(connection: IntegrationConnection, message_id: str, comment:
         message["References"] = original["message_id_header"]
     message.set_content(comment)
     _imap_smtp_send(connection, message)
+
+
+def _imap_utf7_chunk_decode(chunk: str) -> str:
+    padded = chunk.replace(",", "/")
+    padded += "=" * (-len(padded) % 4)
+    try:
+        return base64.b64decode(padded).decode("utf-16-be")
+    except (ValueError, UnicodeDecodeError):
+        return f"&{chunk}-"
+
+
+def _imap_utf7_decode(value: str) -> str:
+    """Decode a mailbox name from IMAP's modified UTF-7 (RFC 3501 5.1.3) into readable text,
+    so a folder shows up as "Verzonden items" instead of "Verzonden &AO0-tems".
+    """
+    parts: list[str] = []
+    buffer = ""
+    shifted = False
+    for char in value:
+        if not shifted:
+            if char == "&":
+                shifted, buffer = True, ""
+            else:
+                parts.append(char)
+        elif char == "-":
+            parts.append("&" if not buffer else _imap_utf7_chunk_decode(buffer))
+            shifted, buffer = False, ""
+        else:
+            buffer += char
+    if shifted:
+        parts.append(f"&{buffer}")
+    return "".join(parts)
+
+
+def _imap_utf7_encode(value: str) -> str:
+    """Encode a mailbox name back into modified UTF-7, the only form an IMAP command accepts
+    (imaplib writes its arguments as plain ASCII, so an accent would raise before it is sent).
+    """
+    parts: list[str] = []
+    buffer = ""
+
+    def flush() -> None:
+        nonlocal buffer
+        if buffer:
+            encoded = base64.b64encode(buffer.encode("utf-16-be")).decode("ascii").rstrip("=")
+            parts.append(f"&{encoded.replace('/', ',')}-")
+            buffer = ""
+
+    for char in value:
+        if char == "&":
+            flush()
+            parts.append("&-")
+        elif " " <= char <= "~":
+            flush()
+            parts.append(char)
+        else:
+            buffer += char
+    flush()
+    return "".join(parts)
+
+
+def _imap_mailbox_arg(name: str) -> str:
+    """Quote and encode a mailbox name for use as an IMAP command argument. imaplib does no
+    quoting of its own, so a name with a space would otherwise be read as two arguments.
+    """
+    encoded = _imap_utf7_encode(name).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{encoded}"'
+
+
+def _imap_unquote(value: str) -> str:
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return value
+
+
+def _imap_detail(data) -> str:
+    parts = [item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item) for item in (data or []) if item]
+    return " ".join(parts)[:200]
+
+
+def _parse_imap_list_entry(entry) -> tuple[str, str] | None:
+    """Split one LIST response line into its hierarchy delimiter and decoded mailbox path.
+    A line looks like `(\\HasNoChildren) "/" "Archief/2024"`, but servers may send the name as
+    a literal, in which case imaplib hands us a (header, name) tuple instead of one line.
+    """
+    literal = None
+    if isinstance(entry, tuple) and len(entry) >= 2:
+        head, literal = entry[0], entry[1]
+    else:
+        head = entry
+    if isinstance(head, bytes):
+        head = head.decode("ascii", errors="replace")
+    if not isinstance(head, str):
+        return None
+    match = _IMAP_LIST_LINE.match(head.strip())
+    if not match:
+        return None
+    raw_delimiter = match.group("delimiter")
+    delimiter = "" if raw_delimiter == "NIL" else _imap_unquote(raw_delimiter)
+    if literal is None:
+        raw_name = _imap_unquote(match.group("name").strip())
+    else:
+        raw_name = literal.decode("ascii", errors="replace") if isinstance(literal, bytes) else str(literal)
+    if not raw_name:
+        return None
+    return delimiter, _imap_utf7_decode(raw_name)
+
+
+def _imap_folder_entry(path: str, delimiter: str) -> dict:
+    parent, _, name = path.rpartition(delimiter) if delimiter else ("", "", path)
+    return {"id": path, "name": name or path, "parent_id": parent or None, "unread": None, "total": None}
+
+
+def _imap_list_folders(client: imaplib.IMAP4) -> tuple[list[dict], str]:
+    status, data = client.list()
+    if status != "OK":
+        raise ProviderError("Mappen opvragen bij de IMAP-server is mislukt.")
+    folders, delimiter = [], "/"
+    for entry in data or []:
+        parsed = _parse_imap_list_entry(entry)
+        if not parsed:
+            continue
+        entry_delimiter, path = parsed
+        if entry_delimiter:
+            delimiter = entry_delimiter
+        folders.append(_imap_folder_entry(path, entry_delimiter))
+    return folders, delimiter
+
+
+def imap_mail_folders(connection: IntegrationConnection) -> list[dict]:
+    """List the mailboxes of this IMAP account, so a caller can see which folders already
+    exist before moving a message or creating a duplicate. Unread and total counts stay empty:
+    IMAP only reports those through a separate STATUS round trip per folder.
+    """
+    client = _imap_client(connection)
+    try:
+        folders, _ = _imap_list_folders(client)
+        return folders
+    except imaplib.IMAP4.error as error:
+        raise ProviderError(f"Mappen opvragen bij de IMAP-server is mislukt: {error}") from error
+    finally:
+        client.logout()
+
+
+def imap_mail_create_folder(connection: IntegrationConnection, name: str, parent_folder: str | None = None) -> dict:
+    """Create a mailbox, at the top level or under an existing one (from imap_mail_folders).
+    The parent is joined to the new name with the hierarchy delimiter the server reports.
+    """
+    client = _imap_client(connection)
+    try:
+        delimiter = "/"
+        if parent_folder:
+            _, delimiter = _imap_list_folders(client)
+        path = f"{parent_folder}{delimiter}{name}" if parent_folder else name
+        status, data = client.create(_imap_mailbox_arg(path))
+        if status != "OK":
+            raise ProviderError(f"Map '{path}' aanmaken is mislukt: {_imap_detail(data)}".strip())
+        return _imap_folder_entry(path, delimiter)
+    except imaplib.IMAP4.error as error:
+        raise ProviderError(f"Map '{name}' aanmaken is mislukt: {error}") from error
+    finally:
+        client.logout()
+
+
+def _imap_copied_uid(data) -> str | None:
+    """Dig the new UID out of a COPYUID response code when the server sends one. imaplib keeps
+    the tagged line of a UID COPY/MOVE to itself, so this often finds nothing — the caller then
+    reports only the destination folder instead of guessing a UID.
+    """
+    match = _IMAP_COPYUID.search(_imap_detail(data))
+    return match.group("uid") if match else None
+
+
+def imap_mail_move(connection: IntegrationConnection, message_id: str, destination: str) -> dict:
+    """Move one message to another mailbox, given its id ("folder:uid", from
+    imap_mail_overview/imap_mail_read). Uses the server's MOVE extension when it advertises
+    one, and otherwise falls back to the copy-flag-expunge dance that MOVE replaced.
+    """
+    try:
+        folder, uid = message_id.split(":", 1)
+    except ValueError as error:
+        raise ProviderError("Ongeldig bericht-id.") from error
+    client = _imap_client(connection)
+    try:
+        status, _ = client.select(_imap_mailbox_arg(folder))
+        if status != "OK":
+            raise ProviderError(f"Map '{folder}' bestaat niet of is niet bereikbaar.")
+        target = _imap_mailbox_arg(destination)
+        if "MOVE" in client.capabilities:
+            status, data = client.uid("MOVE", uid, target)
+            if status != "OK":
+                raise ProviderError(f"Bericht verplaatsen naar '{destination}' is mislukt: {_imap_detail(data)}".strip())
+        else:
+            status, data = client.uid("COPY", uid, target)
+            if status != "OK":
+                raise ProviderError(f"Bericht kopiëren naar '{destination}' is mislukt: {_imap_detail(data)}".strip())
+            status, store_data = client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            if status != "OK":
+                raise ProviderError(f"Het origineel in '{folder}' kon niet worden opgeruimd: {_imap_detail(store_data)}".strip())
+            # UID EXPUNGE removes just this message; a bare EXPUNGE would also throw away
+            # anything else in the folder that was already flagged as deleted elsewhere.
+            if "UIDPLUS" in client.capabilities:
+                client.uid("EXPUNGE", uid)
+            else:
+                client.expunge()
+        new_uid = _imap_copied_uid(data)
+        return {"id": f"{destination}:{new_uid}" if new_uid else destination, "folder": destination}
+    except imaplib.IMAP4.error as error:
+        raise ProviderError(f"Bericht verplaatsen naar '{destination}' is mislukt: {error}") from error
+    finally:
+        client.logout()

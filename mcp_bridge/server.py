@@ -664,6 +664,65 @@ def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: 
 
 
 @mcp.tool()
+def e_mail_mappen(ctx: Context, account: str | None = None) -> dict:
+    """List the mail folders of this household member's mailbox, with the id to hand to
+    e_mail_verplaatsen and the id to hand to e_mail_map_aanmaken as a parent. Call this before
+    e_mail_map_aanmaken to check whether a suitable folder already exists.
+
+    Args:
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    params = {"account": account} if account else {}
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/mail/mappen/", params=params))
+
+
+@mcp.tool()
+def e_mail_map_aanmaken(ctx: Context, name: str, parent: str | None = None, account: str | None = None) -> dict:
+    """Create a new mail folder. Call e_mail_mappen first and only create a folder when none
+    of the existing ones fits — otherwise you end up with two folders for the same purpose.
+
+    Args:
+        name: Name of the new folder, e.g. "Nieuwsbrieven".
+        parent: Optional id of the folder to nest the new one under (from e_mail_mappen).
+            Omit it to create the folder at the top level of the mailbox.
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    payload = {"name": name}
+    if parent:
+        payload["parent"] = parent
+    if account:
+        payload["account"] = account
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/mail/mappen/aanmaken/", json=payload))
+
+
+@mcp.tool()
+def e_mail_verplaatsen(ctx: Context, message_id: str, destination: str, account: str | None = None) -> dict:
+    """Move a message to another mail folder, e.g. to archive a newsletter out of the inbox.
+    Call e_mail_mappen first to see which folders exist and to pick the destination id — that
+    way you never create a duplicate folder for one that is already there. The message gets a
+    new id in its new folder, so use the returned "id" for anything you do with it afterwards.
+
+    Args:
+        message_id: The message's id (from e_mail_overzicht/e_mail_lezen).
+        destination: Id of the destination folder (from e_mail_mappen or e_mail_map_aanmaken).
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    payload = {"destination": destination}
+    if account:
+        payload["account"] = account
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/mail/{message_id}/verplaatsen/", json=payload))
+
+
+@mcp.tool()
 def to_do_lijsten(ctx: Context) -> dict:
     """List this household member's Microsoft To Do lists — excluding any list that's already
     linked to a local taken-lijst in Instellingen (a "sync" setup). Linked lists are mirrored
