@@ -83,6 +83,29 @@ def sync_event_to_caldav(event, caldav_url: str, username: str, password: str) -
         return {"status": "error", "error": str(e), "external_id": event.external_id}
 
 
+def sync_event_to_outlook(event, connection) -> dict | None:
+    """Sync a calendar event to the Outlook calendar its source points at.
+
+    `connection` is the IntegrationConnection behind event.source; the source's external_id is
+    the Graph calendar id. Like the Google and CalDAV variants this never raises — a
+    ProviderError from the Graph call is reported back as an "error" result so the caller can
+    record it on the event.
+    """
+    try:
+        from integrations.providers import outlook_calendar_event_create, outlook_calendar_event_update
+
+        if event.external_id:
+            external_id = outlook_calendar_event_update(connection, event.external_id, event)
+        else:
+            external_id = outlook_calendar_event_create(connection, event.source.external_id, event)
+
+        return {"status": "synced", "error": None, "external_id": external_id}
+
+    except Exception as e:
+        logger.error(f"Failed to sync event to Outlook: {e}")
+        return {"status": "error", "error": str(e), "external_id": event.external_id}
+
+
 def _build_google_credentials(access_token: str):
     """Build Google credentials from an already-valid access token.
 

@@ -50,6 +50,15 @@ def adjacent_anchors(anchor, view):
     return anchor - timedelta(days=span), anchor + timedelta(days=span)
 
 
+def _latest_push_error(source):
+    """CalendarSource has no error field of its own — a failed write-back is recorded on the
+    event that failed, so surface the most recent one instead of leaving a broken toggle silent.
+    """
+    if not source.sync_local_events:
+        return ""
+    return source.events.filter(sync_status=CalendarEvent.SyncStatus.ERROR).exclude(last_sync_error="").order_by("-updated_at").values_list("last_sync_error", flat=True).first() or ""
+
+
 @household_required
 def index(request):
     view = request.GET.get("view", "week")
@@ -64,7 +73,9 @@ def index(request):
     events = CalendarEvent.objects.for_household(request.household).filter(starts_at__lt=end, ends_at__gte=start).filter(Q(source__isnull=True) | Q(source__is_enabled=True)).select_related("source")
     if selected_sources:
         events = events.filter(source_id__in=selected_sources)
-    sources = CalendarSource.objects.for_household(request.household).order_by("provider", "name")
+    sources = list(CalendarSource.objects.for_household(request.household).order_by("provider", "name"))
+    for source in sources:
+        source.last_sync_error = _latest_push_error(source)
     form = CalendarEventForm()
     form.fields["participants"].queryset = request.user.__class__.objects.filter(memberships__household=request.household).distinct()
     event_list = list(events)
@@ -86,6 +97,7 @@ def add_event(request):
         event = form.save(commit=False)
         event.household = request.household
         event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+        event.mark_pending()
         event.save()
         form.save_m2m()
         messages.success(request, "Afspraak toegevoegd.")
@@ -106,7 +118,10 @@ def update_event(request, event_id):
     form = CalendarEventForm(request.POST, instance=event)
     form.fields["participants"].queryset = request.user.__class__.objects.filter(memberships__household=request.household).distinct()
     if form.is_valid():
-        form.save()
+        event = form.save(commit=False)
+        event.mark_pending()
+        event.save()
+        form.save_m2m()
         messages.success(request, "Afspraak aangepast.")
     else:
         messages.error(request, "Controleer de afspraakvelden.")
@@ -178,4 +193,27 @@ def toggle_source(request, source_id):
         source.is_enabled = not source.is_enabled
         source.save(update_fields=["is_enabled", "updated_at"])
         messages.success(request, f"{source.name} is {'ingeschakeld' if source.is_enabled else 'uitgeschakeld'}.")
+    return redirect("planning:index")
+
+
+@parent_required
+@require_POST
+def toggle_source_write_back(request, source_id):
+    """Turn "lokale afspraken hierheen terugsturen" on or off for one linked calendar."""
+    source = get_object_or_404(CalendarSource.objects.for_household(request.household), pk=source_id)
+    if not source.supports_write_back:
+        messages.error(request, f"{source.name} kan geen afspraken ontvangen.")
+        return redirect("planning:index")
+    if source.provider == CalendarSource.Provider.OUTLOOK and source.connection_id is None and not source.sync_local_events:
+        messages.error(request, f"{source.name} heeft geen gekoppeld Outlook-account meer. Synchroniseer Outlook opnieuw in Instellingen.")
+        return redirect("planning:index")
+    source.sync_local_events = not source.sync_local_events
+    # is_read_only is the other half of the same decision; keeping them opposed stops the push
+    # task from ever seeing a source that is both "stuur hierheen" and "alleen-lezen".
+    source.is_read_only = not source.sync_local_events
+    source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
+    if source.sync_local_events:
+        messages.success(request, f"Lokale afspraken worden voortaan naar {source.name} teruggestuurd.")
+    else:
+        messages.success(request, f"Lokale afspraken worden niet meer naar {source.name} teruggestuurd.")
     return redirect("planning:index")

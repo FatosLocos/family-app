@@ -1244,12 +1244,14 @@ class ProviderSyncTests(TestCase):
             settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
         )
 
-        def outlook_get(url, **_kwargs):
+        # sync_outlook goes through _request_with_retry, which calls requests.request - patching
+        # requests.get here used to let the call escape to the real Graph endpoint.
+        def outlook_request(_method, url, **_kwargs):
             if url.endswith("me/calendars?$select=id,name"):
                 return FakeResponse({"value": [{"id": "calendar-1", "name": "Gezin"}]})
             return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}}]})
 
-        with patch("integrations.providers.requests.get", side_effect=outlook_get):
+        with patch("integrations.providers.requests.request", side_effect=outlook_request):
             result = sync_outlook(connection)
 
         self.assertEqual(result, {"calendars": 1, "events": 1})
@@ -1258,6 +1260,13 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(source.name, "Gezin")
         self.assertTrue(timezone.is_aware(event.starts_at))
         self.assertEqual(event.location, "Hal")
+        # Writable, linked to the connection that produced it, but not pushing anything yet.
+        self.assertFalse(source.is_read_only)
+        self.assertFalse(source.sync_local_events)
+        self.assertEqual(source.connection_id, connection.pk)
+        # A freshly pulled event must never look like an unsent local change.
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+        self.assertIsNotNone(event.remote_updated_at)
 
     def test_bunq_sync_falls_back_to_user_endpoint_and_discovers_multiple_accounts(self):
         connection = IntegrationConnection.objects.create(
@@ -2347,3 +2356,74 @@ class OpenClawMailFolderTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Toegang geweigerd.")
+
+
+class OpenClawCalendarSourceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="agenda-ouder@example.com", email="agenda-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", is_read_only=False, sync_local_events=True)
+        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.ICS, name="Feestdagen", is_read_only=True, sync_local_events=False)
+        CalendarSource.objects.create(household=self.other_household, provider=CalendarSource.Provider.OUTLOOK, name="Agenda van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["agenda:read"])
+
+    def test_sources_report_where_a_local_event_ends_up(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual(response.status_code, 200)
+        sources = {source["name"]: source for source in response.json()["sources"]}
+        self.assertEqual(sorted(sources), ["Feestdagen", "Gezinsagenda", "Werkagenda"])
+        self.assertTrue(sources["Werkagenda"]["sends_local_events"])
+        self.assertTrue(sources["Werkagenda"]["supports_write_back"])
+        self.assertFalse(sources["Feestdagen"]["sends_local_events"])
+        self.assertFalse(sources["Feestdagen"]["supports_write_back"])
+        self.assertFalse(sources["Gezinsagenda"]["supports_write_back"])
+
+    def test_another_households_calendars_are_never_returned(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertNotIn("Agenda van de buren", [source["name"] for source in response.json()["sources"]])
+
+    def test_sources_need_the_agenda_read_scope(self):
+        _, other_token = create_token(self.household, self.user, scopes=["vandaag:read"])
+
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {other_token}")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_updating_an_event_queues_it_for_the_next_push(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(household=self.household, title="Tandarts", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED, last_sync_error="oude fout")
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[event.id]),
+            data=json.dumps({"location": "Praktijk"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.location, "Praktijk")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+        self.assertEqual(event.last_sync_error, "")
+
+    def test_updating_an_event_from_another_household_is_not_found(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        other_event = CalendarEvent.objects.create(household=self.other_household, title="Afspraak van de buren", starts_at=start, ends_at=start + timedelta(hours=1))
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[other_event.id]),
+            data=json.dumps({"location": "Niet van dit gezin"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        other_event.refresh_from_db()
+        self.assertEqual(other_event.location, "")

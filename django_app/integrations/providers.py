@@ -2136,11 +2136,27 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
             household=connection.household,
             provider=CalendarSource.Provider.OUTLOOK,
             external_id=calendar_id,
-            defaults={"name": calendar.get("name", "Outlook agenda"), "owner": connection.user, "is_read_only": True},
+            defaults={
+                "name": calendar.get("name", "Outlook agenda"),
+                "owner": connection.user,
+                "connection": connection,
+                # Outlook calendars are writable, but a fresh source never pushes anything until
+                # a parent turns "lokale afspraken hierheen terugsturen" on in the Agenda tab.
+                "is_read_only": False,
+                "sync_local_events": False,
+            },
         )
+        source_updates = []
         if not created and source.name != calendar.get("name", source.name):
             source.name = calendar.get("name", source.name)
-            source.save(update_fields=["name", "updated_at"])
+            source_updates.append("name")
+        if source.connection_id is None:
+            # This calendar came out of this connection's own mailbox, so it is the only
+            # connection that can ever write to it.
+            source.connection = connection
+            source_updates.append("connection")
+        if source_updates:
+            source.save(update_fields=[*source_updates, "updated_at"])
         if not source.is_enabled:
             continue
         url = f"https://graph.microsoft.com/v1.0/me/calendars/{calendar['id']}/calendarView"
@@ -2153,7 +2169,13 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
                     continue
                 starts_at = _parse_graph_datetime(event.get("start", {}))
                 ends_at = _parse_graph_datetime(event.get("end", {}))
-                CalendarEvent.objects.update_or_create(household=connection.household, source=source, external_id=event["id"], defaults={"title": event.get("subject") or "Outlook afspraak", "starts_at": starts_at, "ends_at": ends_at, "is_all_day": bool(event.get("isAllDay")), "location": event.get("location", {}).get("displayName", "")})
+                # sync_status must be SYNCED here: an event we just pulled is by definition
+                # identical to the remote one, and leaving it on the PENDING default would make
+                # planning.tasks.sync_pending_events_to_remote push it straight back out again.
+                # remote_updated_at is re-stamped to now() right after the write, the same
+                # anti-pingpong idiom as _sync_one_todo_list above.
+                local_event, _ = CalendarEvent.objects.update_or_create(household=connection.household, source=source, external_id=event["id"], defaults={"title": event.get("subject") or "Outlook afspraak", "starts_at": starts_at, "ends_at": ends_at, "is_all_day": bool(event.get("isAllDay")), "location": event.get("location", {}).get("displayName", ""), "sync_status": CalendarEvent.SyncStatus.SYNCED, "last_sync_error": ""})
+                CalendarEvent.objects.filter(pk=local_event.pk).update(remote_updated_at=timezone.now())
                 total += 1
             url = payload.get("@odata.nextLink")
             params = None
@@ -2169,6 +2191,52 @@ def _outlook_headers(connection: IntegrationConnection) -> dict:
         "Prefer": 'outlook.body-content-type="text"',
         "Content-Type": "application/json",
     }
+
+
+def _outlook_calendar_datetime(value, is_all_day: bool) -> dict:
+    """Format one local datetime the way Graph wants it for a calendar event.
+
+    _outlook_headers deliberately carries no outlook.timezone Prefer, so the timeZone has to be
+    spelled out in the body or Graph would silently read the naive value as UTC. All-day events
+    must start and end on midnight boundaries, otherwise Graph rejects the whole request.
+    """
+    local = timezone.localtime(value)
+    if is_all_day:
+        local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return {"dateTime": local.replace(tzinfo=None).isoformat(), "timeZone": "Europe/Amsterdam"}
+
+
+def _outlook_calendar_event_body(event: CalendarEvent) -> dict:
+    """Translate one local CalendarEvent into a Graph event body."""
+    ends_at = event.ends_at
+    if event.is_all_day and timezone.localtime(ends_at).date() <= timezone.localtime(event.starts_at).date():
+        ends_at = event.starts_at + timedelta(days=1)
+    return {
+        "subject": event.title,
+        "body": {"contentType": "Text", "content": event.notes or ""},
+        "location": {"displayName": event.location or ""},
+        "isAllDay": bool(event.is_all_day),
+        "start": _outlook_calendar_datetime(event.starts_at, event.is_all_day),
+        "end": _outlook_calendar_datetime(ends_at, event.is_all_day),
+    }
+
+
+def outlook_calendar_event_create(connection: IntegrationConnection, calendar_id: str, event: CalendarEvent) -> str:
+    """Create a local calendar event in an Outlook calendar and return its new Graph event id."""
+    headers = _outlook_headers(connection)
+    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/calendars/{_graph_segment(calendar_id)}/events", headers=headers, json=_outlook_calendar_event_body(event), timeout=20)
+    created = _safe_response_json(response, "Outlook")
+    if not created.get("id"):
+        raise ProviderError("Outlook gaf geen afspraak-id terug.")
+    return created["id"]
+
+
+def outlook_calendar_event_update(connection: IntegrationConnection, event_id: str, event: CalendarEvent) -> str:
+    """Overwrite an existing Outlook event with the local version and return its Graph event id."""
+    headers = _outlook_headers(connection)
+    response = _request_with_retry("PATCH", f"https://graph.microsoft.com/v1.0/me/events/{_graph_segment(event_id)}", headers=headers, json=_outlook_calendar_event_body(event), timeout=20)
+    updated = _safe_response_json(response, "Outlook")
+    return updated.get("id") or event_id
 
 
 def _outlook_mail_summary(message: dict) -> dict:

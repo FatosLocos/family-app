@@ -392,6 +392,21 @@ def agenda(ctx: Context, start: str | None = None, end: str | None = None) -> di
 
 
 @mcp.tool()
+def agenda_bronnen(ctx: Context) -> dict:
+    """List the household's calendars and where a new event actually ends up.
+
+    Every source reports its name, its provider ("local", "outlook", "ics", "google_calendar"
+    or "caldav"), whether it is switched on, and "sends_local_events": whether events created
+    in FamilyApp are pushed back to that external calendar. Call this before promising someone
+    that an appointment will show up in Outlook — afspraak_toevoegen always writes to the local
+    family calendar, so it only reaches Outlook if a parent turned write-back on for that
+    calendar in the Agenda tab. There is no tool to change that setting.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/agenda/bronnen/"))
+
+
+@mcp.tool()
 def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None) -> dict:
     """Add a new event to the household's shared calendar.
 

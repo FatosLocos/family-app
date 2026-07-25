@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from common.db_scope import household_db_scope
 from households.models import Household
-from planning.calendar_sync import sync_event_to_google_calendar, sync_event_to_caldav
+from planning.calendar_sync import sync_event_to_google_calendar, sync_event_to_caldav, sync_event_to_outlook
 from planning.ics import parse_ics
 from planning.models import CalendarEvent, CalendarSource, IcsSubscription
 
@@ -43,10 +43,14 @@ def sync_pending_events_to_remote():
                     is_enabled=True,
                     is_read_only=False,
                     sync_local_events=True,
-                    provider__in=[CalendarSource.Provider.GOOGLE_CALENDAR, CalendarSource.Provider.CALDAV],
+                    provider__in=[CalendarSource.Provider.GOOGLE_CALENDAR, CalendarSource.Provider.CALDAV, CalendarSource.Provider.OUTLOOK],
                 )
+                .select_related("connection")
                 .prefetch_related("events")
             ):
+                if source.provider == CalendarSource.Provider.OUTLOOK and source.connection_id is None:
+                    logger.warning("Skipping Outlook calendar source %s: no linked Outlook connection to write with.", source.pk)
+                    continue
                 for event in source.events.filter(sync_status=CalendarEvent.SyncStatus.PENDING):
                     try:
                         if source.provider == CalendarSource.Provider.GOOGLE_CALENDAR:
@@ -55,6 +59,8 @@ def sync_pending_events_to_remote():
                             # Decrypt password from field encryption
                             password = source.write_access_token
                             result = sync_event_to_caldav(event, source.caldav_url, source.caldav_username, password)
+                        elif source.provider == CalendarSource.Provider.OUTLOOK:
+                            result = sync_event_to_outlook(event, source.connection)
                         else:
                             continue
 
