@@ -38,8 +38,32 @@ CREATE POLICY household_isolation ON "<tabel>"
 
 De tenantvariabele `app.household_id` wordt gezet door
 `django_app/common/db_scope.py` (`household_db_scope`, nestbaar: hij herstelt de vorige waarde
-in plaats van hem te wissen) en voor gewone webrequests aangeroepen door
-`django_app/households/middleware.py` (`ActiveHouseholdMiddleware`).
+in plaats van hem te wissen). Er zijn precies drie soorten aanroepers:
+
+1. **Gewone webrequests** — `django_app/households/middleware.py`
+   (`ActiveHouseholdMiddleware`) wrapt de hele response. Views doen zelf niets.
+2. **MCP-requests** — `require_openclaw_token(scope)` in
+   `django_app/integrations/openclaw_api.py` opent de scope om de héle view heen, op basis van
+   het huishouden in het composite token. Ook hier doet de view zelf niets.
+3. **Alles zonder request-cyclus: Celery-taken, webhooks/callbacks, management commands en
+   servicelagen die door zulke paden aangeroepen worden.** Die hebben geen middleware en geen
+   token, dus **openen zelf `household_db_scope(...)` om elke query heen** — zie
+   `django_app/integrations/tasks.py` (`sync_connection_task`), `django_app/planning/tasks.py`,
+   `django_app/household/tasks.py`, `django_app/notifications/tasks.py`,
+   `django_app/integrations/sonos_events.py`, `django_app/integrations/home_connect_events.py`,
+   `django_app/integrations/google_home_events.py`, `django_app/integrations/local_probe.py`,
+   `django_app/home/ha_integration.py`, `django_app/home/energy_service.py`,
+   `django_app/finance/psd2_service.py` en
+   `django_app/home/management/commands/listen_home_assistant.py`.
+
+Categorie 3 is de gevaarlijkste, want de fout is onzichtbaar in de testsuite: die draait als
+databasesuperuser en omzeilt RLS, dus een taak zonder scope is daar gewoon groen. Op de VPS
+draait de beperkte applicatierol met `FORCE ROW LEVEL SECURITY`; daar geeft
+`Model.objects.for_household(...)` dan nul rijen terug en falen INSERTs met
+`insufficient_privilege` — de synchronisatie doet stilletjes niets. **Schrijf je een
+`@shared_task`, een webhookview zonder login of een management command, dan is
+`household_db_scope(household_id)` verplicht**, en dat hoort in de PR expliciet aangewezen te
+worden.
 
 Applicatiecode filtert daarbovenop altijd expliciet via
 `django_app/common/scoping.py` (`HouseholdQuerySet.for_household`) — twee lagen, niet één.
@@ -53,11 +77,19 @@ De rolscheiding die maakt dat de applicatierol RLS niet kan uitzetten, staat bes
 
 ### 1.2 De RLS-migratie is een apart bestand, geen bijzaak
 
-De policy komt **nooit** mee in de `CreateModel`-migratie. Elk nieuw household-model krijgt een
-eigen migratie `<n>_<modelnaam>_rls.py` die van de create-migratie afhangt. Kopieer
-`django_app/household/migrations/0021_tasklist_rls.py` letterlijk en verander alleen `TABLES`
-en `dependencies`. Voor meerdere tabellen tegelijk (met defensieve `DROP POLICY IF EXISTS`):
-`django_app/integrations/migrations/0002_enable_household_rls.py`.
+**Afspraak voor nieuw werk:** de policy komt niet mee in de `CreateModel`-migratie. Elk nieuw
+household-model krijgt een eigen migratie `<n>_<modelnaam>_rls.py` die van de create-migratie
+afhangt. Kopieer `django_app/household/migrations/0021_tasklist_rls.py` letterlijk en verander
+alleen `TABLES` en `dependencies`. Voor meerdere tabellen tegelijk (met defensieve
+`DROP POLICY IF EXISTS`): `django_app/integrations/migrations/0002_enable_household_rls.py`.
+
+Dat is een vooruitkijkende afspraak, geen beschrijving van de bestaande codebase: een reeks
+oudere migraties combineert `CreateModel` en `RunPython(enable_rls)` wél in één bestand (onder
+meer `django_app/household/migrations/0006_receipt.py`, `0015_receiptlineitem.py`,
+`django_app/home/migrations/0003_householddocument.py` en
+`django_app/integrations/migrations/0004_integrationaudit.py`). Die zijn niet fout en worden
+níét herschreven — zie de regel over bestaande migraties hieronder. Het apart houden maakt de
+policy alleen makkelijker terug te vinden, te reviewen en te corrigeren met een nieuwe migratie.
 
 Harde eisen aan zo'n migratie:
 
@@ -75,9 +107,10 @@ Twee mechanismen falen zodra iemand een household-model toevoegt zonder policy:
 
 - `django_app/ops/verify_rls.sh` — draait als de beperkte applicatierol op de VPS en in CI.
   Het eerste `DO $$`-blok bevat een `VALUES`-lijst met élke verwachte tabel en gooit een
-  exception zodra er één ontbreekt of RLS niet geforceerd is. Daarna bewijst een tweede blok de
-  isolatie echt: het schrijft een taak in huishouden A, leest hem niet in huishouden B, en
-  verwacht dat een write voor A vanuit B met `insufficient_privilege` faalt.
+  exception zodra er één ontbreekt of RLS niet geforceerd is. Het tweede controleert het
+  predicaat van de publieke deelpolicy uit §1.4. Het derde bewijst de isolatie echt: het
+  schrijft een taak in huishouden A, leest hem niet in huishouden B, en verwacht dat een write
+  voor A vanuit B met `insufficient_privilege` faalt.
 - `django_app/config/tests.py`, klasse `HouseholdRlsPolicyTests`:
   - `test_all_household_scoped_models_have_forced_postgres_rls` inspecteert `pg_class` en
     `pg_policies` voor elk model met een veld dat letterlijk `household` heet, en eist
@@ -103,13 +136,23 @@ die "tenant matcht" vervangt door "deze rij hangt onder een gedeeld object" — 
 `OR is_shared`, op een kindtabel `OR EXISTS (SELECT 1 FROM <parent> ...)`.
 
 **`USING` versus `WITH CHECK` is hier de security-grens, en dat is precies wat migratie 0005
-repareerde.** `USING` bepaalt wat gelezen mag worden, `WITH CHECK` wat geschreven mag worden.
-Voor `family_wishlist` en `family_wishitem` staat de gedeeld-clausule daarom **alleen** in
-`USING`; `WITH CHECK` blijft de kale huishoudencheck. Anoniem lezen mag, anoniem schrijven
-niet. Alleen `family_wishreservation` — de énige tabel waar het publiek mag INSERTen — heeft de
+repareerde.** `USING` bepaalt welke bestaande rijen zichtbaar zijn — voor `SELECT`, maar ook
+voor `UPDATE` en `DELETE` — en `WITH CHECK` toetst de rij zoals hij ná een `INSERT` of `UPDATE`
+komt te staan. Voor `family_wishlist` en `family_wishitem` staat de gedeeld-clausule daarom
+**alleen** in `USING`; `WITH CHECK` blijft de kale huishoudencheck. Alleen
+`family_wishreservation` — de énige tabel waar het publiek mag INSERTen — heeft de
 `OR EXISTS(...)` óók in `WITH CHECK`, en dan met per voorouder een extra
 `AND <parent>.household_id = family_wishreservation.household_id`, zodat een anonieme bezoeker
 geen willekeurig `household_id` kan meesmokkelen.
+
+**Let op de scherpe rand: Postgres past `WITH CHECK` niet toe op `DELETE`.** Een `DELETE` wordt
+alleen door `USING` afgeschermd, dus de gedeeld-clausule maakt rijen van een gedeelde lijst in
+theorie anoniem verwijderbaar. Dat is vandaag geen gat, omdat geen enkele publieke view iets
+verwijdert — maar het is wél een gat zodra iemand dit patroon kopieert naar een module met een
+anoniem verwijderpad ("reservering intrekken"). Bouw je zoiets, dan is de databasegrens niet
+gratis: voeg dan een aparte `AS RESTRICTIVE ... FOR DELETE`-policy toe met alléén de
+huishoudencheck, naast `household_isolation`, en bewijs in de PR dat een sessie zonder
+`app.household_id` niets kan verwijderen.
 
 Autorisatie zelf zit niet in de policy: de ongokbare `share_token`
 (`secrets.token_urlsafe(24)`, `django_app/family/views.py` `toggle_wishlist_share`) wordt in
@@ -118,8 +161,25 @@ Python gecontroleerd, RLS doet alleen containment. De publieke views
 `household_required` en gebruiken bewust `.filter(is_shared=True)` in plaats van
 `.for_household()`, omdat er op een anonieme request geen huishouden is.
 
-Wil je iets vergelijkbaars bouwen, kopieer dan deze twee migraties en die drie views — en
-motiveer in de PR expliciet waarom de nieuwe `WITH CHECK` veilig is.
+**En let op de migratievolgorde.** Een verfijnde policy is niet veilig zolang een andere,
+bredere migratie dezelfde policynaam op dezelfde tabel opnieuw kan aanmaken.
+`django_app/integrations/migrations/0002_enable_household_rls.py` doet precies dat voor
+`family_wishlist` en `family_wishitem` en had geen dependency op `family.0005`, waardoor die op
+een verse database de gedeeld-clausule wegschreef en de publieke link 404 gaf. Dat is hersteld
+met `django_app/family/migrations/0007_reapply_public_wishlist_policy.py`, dat op beide takken
+afhangt en daarmee altijd als laatste draait. Verfijn je een policy die elders ook gezet wordt,
+zet dan expliciet de dependency op die andere migratie.
+
+Deze twee mechanismen bewaken dat het zo blijft:
+
+- `django_app/family/tests.py`, `PublicWishlistPolicyTests` — leest `pg_policies` en eist dat
+  `is_shared` in `qual` staat en níét in `with_check`. Een gedragstest kan dit niet: de suite
+  draait als superuser en omzeilt RLS, dus alleen de catalogus is bruikbaar bewijs.
+- `django_app/ops/verify_rls.sh` — hetzelfde predicaat, maar dan tegen de echte database met de
+  beperkte applicatierol.
+
+Wil je iets vergelijkbaars bouwen, kopieer dan deze migraties en die drie views — en motiveer
+in de PR expliciet waarom de nieuwe `WITH CHECK` veilig is.
 
 ---
 
@@ -151,7 +211,9 @@ De keten die je volgt, in deze volgorde:
    RLS-scope bekend is vóór de eerste query), opent `household_db_scope` om de héle view, zet
    `request.household` / `request.openclaw_user` / `request.openclaw_token_scopes`, bumpt
    `last_used_at`, en weigert met 403 als de scope ontbreekt. **Views roepen zelf nooit
-   `household_db_scope` aan** — de decorator deed dat al. Voor endpoints die meerdere providers
+   `household_db_scope` aan** — de decorator deed dat al. Dat geldt alléén voor views; een
+   Celery-taak of webhook die vanuit zo'n view gestart wordt, moet de scope wél zelf openen
+   (zie principe 1.1, categorie 3). Voor endpoints die meerdere providers
    bedienen bestaat `require_openclaw_token_any([...])`; die view moet dan zélf de precieze
    scope checken tegen `request.openclaw_token_scopes` (zie `_resolve_mail_account`).
 4. **`OpenClawActionLog`** (`django_app/integrations/models.py`) — elke actie, gelukt of
@@ -246,8 +308,12 @@ Wat dat concreet betekent voor een nieuwe module:
   MCP-tool `vandaag`. Heeft je module iets dat vandaag speelt, dan hoort het daar.
 - **Vindbaar.** `search()` in `django_app/config/views.py` doorzoekt alle modules tegelijk;
   een nieuw zoekbaar model komt in **beide** dicts (de lege en de gevulde) plus in
-  `django_app/templates/search/index.html` en
-  `django_app/templates/search/partials/results.html`.
+  `django_app/templates/search/partials/results.html` — dat is het enige template met
+  modelspecifieke markup (`django_app/templates/search/index.html` include't het alleen maar en
+  bevat hooguit een zin die de doorzochte modules opsomt). Vergeet in `results.html` de
+  `{% elif tasks or contacts or ... %}`-guard bovenaan niet: staat je nieuwe key daar niet bij,
+  dan valt een zoekopdracht die alléén jouw model matcht in de `{% else %}`-tak en meldt
+  "Geen resultaten", terwijl er wel resultaten zijn.
 - **Hergebruik in plaats van een silo.** Bestaande bouwstenen zijn er om gebruikt te worden:
   `TaskList`/`Task` (`django_app/household/models.py`) voor alles wat een afvinkbare
   actie is, `CalendarEvent`/`CalendarSource` (`django_app/planning/models.py`) voor alles met
@@ -301,6 +367,9 @@ Af te vinken in de PR. Niet van toepassing mag, maar dan met één regel uitleg.
 - [ ] Views scopen met `for_household()` + `get_object_or_404` (cross-household ⇒ 404).
 - [ ] Rechten via `@household_required` / `@parent_required` / `@owner_required`
       (`django_app/households/decorators.py`), boven `@require_POST`.
+- [ ] Elke Celery-taak, webhook/callback en management command opent zélf
+      `household_db_scope(household_id)` — er is daar geen middleware en geen token, en de
+      testsuite dekt dit niet af (die draait als superuser).
 
 **MCP-pariteit (principe 2)**
 
@@ -328,7 +397,9 @@ Af te vinken in de PR. Niet van toepassing mag, maar dan met één regel uitleg.
 **Overzicht (principe 5)**
 
 - [ ] Relevante data zichtbaar in `build_today_summary()` en op Start.
-- [ ] Zoekbaar model toegevoegd aan `search()` en de twee zoektemplates.
+- [ ] Zoekbaar model toegevoegd aan `search()` én aan
+      `django_app/templates/search/partials/results.html`, inclusief de guard bovenaan dat
+      template.
 - [ ] Bestaande bouwstenen hergebruikt (`Task`/`TaskList`, `CalendarEvent`, het scope-systeem)
       in plaats van een eigen variant.
 - [ ] Nav-link in het "Meer"-paneel van `django_app/templates/base.html` (beide plekken).
