@@ -1,6 +1,6 @@
 """Browser-side token management plus the bearer-token API surface for OpenClaw."""
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -17,7 +17,7 @@ from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
-from household.models import ShoppingItem, ShoppingList, Task, TaskList, TaskListSync
+from household.models import TASK_NOTE_MAX_LENGTH, ShoppingItem, ShoppingList, Task, TaskList, TaskListSync, TaskNote
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
@@ -74,6 +74,8 @@ def api_today(request):
     log_openclaw_action(request.household, "vandaag", "Dagoverzicht opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "today": summary["today"].isoformat(),
+        # Only open tasks live here (build_today_summary filters on completed_at__isnull=True),
+        # so completion state deliberately isn't repeated: api_all_tasks answers that question.
         "tasks_open": [
             {"id": task.id, "title": task.title, "due_at": task.due_at.isoformat() if task.due_at else None, "priority": task.priority}
             for task in summary["tasks"]
@@ -323,11 +325,48 @@ def api_update_task(request, task_id):
     })
 
 
+COMPLETED_TASK_WINDOW_DAYS = 30
+TASK_TIMELINE_NOTE_LIMIT = 5
+
+
+def _task_timeline(task):
+    """The most recent TASK_TIMELINE_NOTE_LIMIT notes of a task, oldest first.
+
+    Capped on purpose: a long-running task collects notes forever, and api_all_tasks
+    serialises the timeline of every task in one response. The cap keeps that payload
+    bounded the same way COMPLETED_TASK_WINDOW_DAYS bounds the completed tasks; the
+    accompanying notes_total tells OpenClaw when older notes exist.
+    """
+    return [
+        {
+            "created_at": note.created_at.isoformat(),
+            "author": str(note.author) if note.author else None,
+            "text": note.text,
+            "created_by_agent": note.created_by_agent,
+        }
+        for note in list(task.timeline_notes.all())[-TASK_TIMELINE_NOTE_LIMIT:]
+    ]
+
+
 @require_openclaw_token("vandaag:read")
 @require_GET
 def api_all_tasks(request):
-    """Every open task (not capped to a handful like api_today's preview), with list membership."""
-    tasks = Task.objects.for_household(request.household).filter(completed_at__isnull=True).select_related("list", "assigned_to").order_by("list_id", "position", "created_at")
+    """Every open task (not capped to a handful like api_today's preview), with list membership.
+
+    Each task carries its completion state and its note timeline, so OpenClaw can tell
+    whether something was already handled. include_completed=true widens the result with
+    tasks finished in the last COMPLETED_TASK_WINDOW_DAYS days; the default stays open-only
+    to keep the payload small. The timeline itself is capped at the last
+    TASK_TIMELINE_NOTE_LIMIT notes per task, with notes_total as the full count.
+    """
+    include_completed = request.GET.get("include_completed") == "true"
+    tasks = Task.objects.for_household(request.household).select_related("list", "assigned_to").prefetch_related("timeline_notes__author")
+    if include_completed:
+        cutoff = timezone.now() - timedelta(days=COMPLETED_TASK_WINDOW_DAYS)
+        tasks = tasks.filter(Q(completed_at__isnull=True) | Q(completed_at__gte=cutoff))
+    else:
+        tasks = tasks.filter(completed_at__isnull=True)
+    tasks = tasks.order_by("list_id", "position", "created_at")
     log_openclaw_action(request.household, "taken", "Volledige takenlijst opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "tasks": [
@@ -342,10 +381,44 @@ def api_all_tasks(request):
                 "created_by_agent": task.created_by_agent,
                 "source_label": task.source_label or None,
                 "source_url": task.source_url or None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                # A reason only means anything while the task is done; a task that was
+                # reopened elsewhere must not look handled (see providers._apply_remote_outlook_todo_task).
+                "completion_reason": (task.completion_reason or None) if task.completed_at else None,
+                "notes_timeline": _task_timeline(task),
+                "notes_total": len(task.timeline_notes.all()),
             }
             for task in tasks
         ],
     })
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_add_task_note(request, task_id):
+    """Append a note to an existing task's timeline, without touching the task itself.
+
+    The text is capped at TASK_NOTE_MAX_LENGTH characters so one verbose agent run can't
+    blow up the timeline that every api_all_tasks response carries.
+    """
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    text = str(payload.get("text") or "").strip()[:TASK_NOTE_MAX_LENGTH]
+    if not text:
+        return JsonResponse({"error": "Veld 'text' is verplicht."}, status=400)
+    note = TaskNote.objects.create(household=request.household, task=task, author=request.openclaw_user, text=text, created_by_agent=True)
+    log_openclaw_action(request.household, "taak_notitie_toevoegen", f"Notitie toegevoegd aan taak '{task.title}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": note.id,
+        "task_id": task.id,
+        "created_at": note.created_at.isoformat(),
+        "author": str(note.author) if note.author else None,
+        "text": note.text,
+        "created_by_agent": note.created_by_agent,
+    }, status=201)
 
 
 @require_openclaw_token("taken:write")

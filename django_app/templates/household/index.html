@@ -62,6 +62,20 @@
         <label>Notitie<textarea name="notes" rows="2">{{ task.notes }}</textarea></label>
         <button class="button button-primary" type="submit">Opslaan</button>
       </form>
+      {% if task.completed_at and task.completion_reason %}<p class="modal-inline-section task-completion-reason"><strong>Afgerond:</strong> {{ task.completion_reason }} · {{ task.completed_at|date:'D j M H:i' }}</p>{% endif %}
+      <div class="modal-inline-section task-timeline">
+        <h3>Tijdlijn</h3>
+        {% for note in task.timeline_notes.all %}
+          <p class="task-timeline-note"><small>{{ note.created_at|date:'D j M H:i' }} · {% if note.created_by_agent %}OpenClaw{% elif note.author %}{{ note.author }}{% else %}Onbekend{% endif %}</small>{{ note.text }}</p>
+        {% empty %}
+          <p class="empty-copy">Nog geen aantekeningen bij deze taak.</p>
+        {% endfor %}
+        <form method="post" action="{% url 'household:add_task_note' task.id %}">
+          {% csrf_token %}
+          <label>Notitie toevoegen<textarea name="text" rows="2" placeholder="Bijv. gebeld met de school, wachten op antwoord…" required></textarea></label>
+          <button class="button button-secondary" type="submit"><i data-lucide="message-square-plus"></i>Toevoegen aan tijdlijn</button>
+        </form>
+      </div>
       <form class="dialog-danger-form" method="post" action="{% url 'household:delete_task' task.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Taak verwijderen</button></form>
     </dialog>
     <dialog id="task-complete-{{ task.id }}" class="modal">

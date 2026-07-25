@@ -12,14 +12,15 @@ from django.utils import timezone
 
 from finance.models import BankAccount, Transaction
 from home.models import HomeActionAudit, HomeEntity
-from household.models import Task
+from household.models import TASK_NOTE_MAX_LENGTH, Task, TaskList, TaskListSync, TaskNote
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
 from integrations.home_connect_events import listen_home_connect_events_once, parse_sse_events
 from integrations.local_probe import ProbeError, apply_discovery, apply_inventory, authenticate_probe, create_pairing, expire_stale_probes, mark_probe_offline, mark_probe_seen, pair_probe, record_probe_command_result, revoke_probe, send_probe_command, send_probe_system_command
+from integrations.openclaw_api import create_token
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, SyncRun
-from integrations.providers import HueProviderError, ProviderError, _home_connect_appliance_meta, _home_connect_display_name, _home_connect_label, _home_connect_program_forecasts, _home_connect_start_status, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, google_home_thermostat_attributes, start_google_home_live_stream, sync_bunq, sync_google_home, sync_home_connect, sync_hue, sync_lg_thinq, sync_outlook, sync_smartcar, sync_sonos, sync_spotify
+from integrations.providers import HueProviderError, ProviderError, _home_connect_appliance_meta, _home_connect_display_name, _home_connect_label, _home_connect_program_forecasts, _home_connect_start_status, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, google_home_thermostat_attributes, start_google_home_live_stream, sync_bunq, sync_google_home, sync_home_connect, sync_hue, sync_lg_thinq, sync_outlook, sync_smartcar, sync_sonos, sync_spotify, sync_task_list_link
 from integrations.services import get_sonos_event_callback_token, save_app_config, save_sonos_config
 from integrations.sonos_events import sonos_event_signature
 from integrations.tasks import sync_active_connections, sync_connection_task, sync_home_connect_connections
@@ -1884,7 +1885,174 @@ class HouseholdDataExportTests(TestCase):
         self.assertNotIn("gevoelig-token", response.content.decode())
         self.assertNotIn("secret_encrypted", response.content.decode())
 
+    def test_export_contains_the_task_note_timeline(self):
+        task = Task.objects.get(household=self.household, title="Eigen taak")
+        TaskNote.objects.create(household=self.household, task=task, author=self.owner, text="Gebeld met de gemeente.")
+        TaskNote.objects.create(household=self.other_household, task=Task.objects.get(household=self.other_household, title="Andere taak"), text="Van de buren.")
+        self.client.force_login(self.owner)
+
+        payload = json.loads(self.client.get(reverse("integrations:export_household_data")).content)
+
+        notes = payload["household_data"]["task_notes"]
+        self.assertEqual([note["text"] for note in notes], ["Gebeld met de gemeente."])
+        self.assertEqual(notes[0]["task__title"], "Eigen taak")
+
     def test_child_cannot_export_household_data(self):
         self.client.force_login(self.child)
 
         self.assertEqual(self.client.get(reverse("integrations:export_household_data")).status_code, 403)
+
+
+class OpenClawTaskTimelineTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        self.task = Task.objects.create(household=self.household, title="Rijbewijs verlengen")
+        self.other_task = Task.objects.create(household=self.other_household, title="Taak van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["vandaag:read", "taken:write"])
+
+    def _get(self, name, token=None, **params):
+        return self.client.get(reverse(f"integrations:{name}"), params, HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def test_all_tasks_exposes_the_note_timeline_and_completion_reason(self):
+        TaskNote.objects.create(household=self.household, task=self.task, author=self.user, text="Gebeld met de gemeente.")
+        TaskNote.objects.create(household=self.household, task=self.task, text="E-mail verwerkt, geen actie nodig.", created_by_agent=True)
+
+        response = self._get("api_openclaw_all_tasks")
+
+        self.assertEqual(response.status_code, 200)
+        task = response.json()["tasks"][0]
+        self.assertIsNone(task["completed_at"])
+        self.assertIsNone(task["completion_reason"])
+        self.assertEqual([note["text"] for note in task["notes_timeline"]], ["Gebeld met de gemeente.", "E-mail verwerkt, geen actie nodig."])
+        self.assertEqual(task["notes_timeline"][0]["author"], str(self.user))
+        self.assertFalse(task["notes_timeline"][0]["created_by_agent"])
+        self.assertIsNone(task["notes_timeline"][1]["author"])
+        self.assertTrue(task["notes_timeline"][1]["created_by_agent"])
+
+    def test_include_completed_adds_recently_finished_tasks_with_their_reason(self):
+        recent = Task.objects.create(household=self.household, title="Cadeau kopen", completed_at=timezone.now() - timedelta(days=3), completion_reason="Al geregeld door oma")
+        Task.objects.create(household=self.household, title="Oude klus", completed_at=timezone.now() - timedelta(days=45), completion_reason="Lang geleden gedaan")
+
+        default_titles = [task["title"] for task in self._get("api_openclaw_all_tasks").json()["tasks"]]
+        payload = self._get("api_openclaw_all_tasks", include_completed="true").json()
+
+        self.assertEqual(default_titles, ["Rijbewijs verlengen"])
+        self.assertEqual(sorted(task["title"] for task in payload["tasks"]), ["Cadeau kopen", "Rijbewijs verlengen"])
+        completed = next(task for task in payload["tasks"] if task["id"] == recent.id)
+        self.assertEqual(completed["completion_reason"], "Al geregeld door oma")
+        self.assertIsNotNone(completed["completed_at"])
+
+    def test_agent_note_is_appended_to_the_timeline(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "E-mail van de gemeente verwerkt, geen actie nodig."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        note = TaskNote.objects.get(task=self.task)
+        self.assertEqual(note.text, "E-mail van de gemeente verwerkt, geen actie nodig.")
+        self.assertTrue(note.created_by_agent)
+        self.assertEqual(note.author, self.user)
+        self.assertEqual(note.household, self.household)
+        self.assertEqual(response.json()["id"], note.id)
+
+    def test_empty_note_is_refused(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "   "}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(TaskNote.objects.filter(task=self.task).exists())
+
+    def test_note_needs_the_taken_write_scope(self):
+        _, read_only_token = create_token(self.household, self.user, scopes=["vandaag:read"])
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "Mag niet."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {read_only_token}",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(TaskNote.objects.filter(task=self.task).exists())
+
+    def test_note_on_a_task_from_another_household_is_not_found(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.other_task.id]),
+            data=json.dumps({"text": "Niet van dit gezin."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(TaskNote.objects.filter(task=self.other_task).exists())
+
+    def test_reopened_task_no_longer_reports_a_completion_reason(self):
+        Task.objects.filter(pk=self.task.pk).update(completion_reason="Al geregeld door oma")
+
+        response = self._get("api_openclaw_all_tasks")
+
+        task = response.json()["tasks"][0]
+        self.assertIsNone(task["completed_at"])
+        self.assertIsNone(task["completion_reason"])
+
+    def test_timeline_only_carries_the_most_recent_notes_with_the_full_count(self):
+        for number in range(1, 8):
+            TaskNote.objects.create(household=self.household, task=self.task, author=self.user, text=f"Notitie {number}")
+
+        response = self._get("api_openclaw_all_tasks")
+
+        task = response.json()["tasks"][0]
+        self.assertEqual([note["text"] for note in task["notes_timeline"]], ["Notitie 3", "Notitie 4", "Notitie 5", "Notitie 6", "Notitie 7"])
+        self.assertEqual(task["notes_total"], 7)
+
+    def test_overly_long_agent_note_is_truncated(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "Heel lang verhaal. " * 300}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(TaskNote.objects.get(task=self.task).text), TASK_NOTE_MAX_LENGTH)
+
+
+class OutlookTodoSyncTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="todo-ouder@example.com", email="todo-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Takengezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.connection = IntegrationConnection.objects.create(household=self.household, user=self.user, provider="outlook", display_name="Outlook")
+        self.task_list = TaskList.objects.create(household=self.household, name="Klussen")
+        self.link = TaskListSync.objects.create(household=self.household, task_list=self.task_list, connection=self.connection, provider=TaskListSync.Provider.OUTLOOK_TODO, external_list_id="lijst-1")
+
+    def test_reopening_a_task_in_microsoft_to_do_clears_the_completion_reason(self):
+        task = Task.objects.create(
+            household=self.household,
+            list=self.task_list,
+            title="Rijbewijs verlengen",
+            external_provider=TaskListSync.Provider.OUTLOOK_TODO,
+            external_id="remote-1",
+            completed_at=timezone.now() - timedelta(days=2),
+            completion_reason="Al geregeld door oma",
+        )
+        Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now() - timedelta(days=2))
+        remote = {"id": "remote-1", "list_id": "lijst-1", "title": "Rijbewijs verlengen", "status": "notStarted", "due_at": None, "notes": "", "last_modified": timezone.now().isoformat(), "completed_at": None}
+
+        with patch("integrations.providers.outlook_todo_tasks", return_value=[remote]), patch("integrations.providers.outlook_todo_task_update") as update:
+            sync_task_list_link(self.link)
+
+        task.refresh_from_db()
+        self.assertIsNone(task.completed_at)
+        self.assertEqual(task.completion_reason, "")
+        self.assertFalse(update.called)

@@ -2310,7 +2310,10 @@ def _apply_remote_outlook_todo_task(task: Task, remote: dict) -> None:
     if remote["status"] == "completed":
         task.completed_at = _parse_graph_timestamp(remote["completed_at"]) or task.completed_at or timezone.now()
     else:
+        # Reopening remotely clears the completion reason too, like household.views.toggle_task
+        # does locally — an open task must never carry a stale "this is why it was done".
         task.completed_at = None
+        task.completion_reason = ""
 
 
 def _sync_one_todo_list(connection: IntegrationConnection, link: TaskListSync) -> None:
@@ -2330,7 +2333,7 @@ def _sync_one_todo_list(connection: IntegrationConnection, link: TaskListSync) -
         if task:
             if remote_modified and (not task.remote_updated_at or remote_modified > task.remote_updated_at):
                 _apply_remote_outlook_todo_task(task, remote)
-                task.save(update_fields=["title", "notes", "due_at", "completed_at", "updated_at"])
+                task.save(update_fields=["title", "notes", "due_at", "completed_at", "completion_reason", "updated_at"])
                 Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now())
         else:
             task = Task(household=connection.household, list=link.task_list, external_provider=TaskListSync.Provider.OUTLOOK_TODO, external_id=remote_id)

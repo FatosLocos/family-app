@@ -16,6 +16,7 @@ urlpatterns = [
     path("api/openclaw/taken/lijstjes/<int:list_id>/bijwerken/", openclaw_views.api_update_task_list, name="api_openclaw_update_task_list"),
     path("api/openclaw/taken/<int:task_id>/bijwerken/", openclaw_views.api_update_task, name="api_openclaw_update_task"),
     path("api/openclaw/taken/alle/", openclaw_views.api_all_tasks, name="api_openclaw_all_tasks"),
+    path("api/openclaw/taken/<int:task_id>/notitie/", openclaw_views.api_add_task_note, name="api_openclaw_add_task_note"),
     path("api/openclaw/gezinsleden/", openclaw_views.api_household_members, name="api_openclaw_household_members"),
     path("api/openclaw/boodschappen/", openclaw_views.api_shopping_list, name="api_openclaw_shopping_list"),
     path("api/openclaw/boodschappen/toevoegen/", openclaw_views.api_add_shopping_item, name="api_openclaw_add_shopping_item"),
