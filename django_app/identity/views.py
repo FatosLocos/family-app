@@ -64,7 +64,11 @@ def signup(request):
                 household_name = request.POST.get("household_name", "").strip() or f"Gezin {user.display_name}"
                 household = Household.objects.create(name=household_name)
                 Membership.objects.create(household=household, user=user, role=Membership.Role.OWNER)
-            login(request, user)
+            # Er zijn twee authenticatie-backends geconfigureerd (axes en ModelBackend), dus
+            # Django kan niet zelf bepalen welke bij deze verse gebruiker hoort. De gebruiker
+            # komt uit form.save() en niet uit authenticate(), waardoor .backend ontbreekt.
+            # Zonder expliciete backend gooit login() een ValueError en rolt de registratie terug.
+            login(request, user, backend="django.contrib.auth.backends.ModelBackend")
             request.session["active_household_id"] = household.pk
         return redirect("today")
     return render(request, "identity/signup.html", {"form": form, "pending_invite": pending_invite})
