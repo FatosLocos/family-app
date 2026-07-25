@@ -18,6 +18,20 @@ def _travel_tab_redirect(tab: str):
     return redirect(f"{reverse('travel:index')}?{urlencode({'tab': tab})}")
 
 
+def _first_form_error(form, fallback: str) -> str:
+    """The most concrete reason a form was refused.
+
+    Field errors come first on purpose: a rejected upload (too large, wrong type) drops the
+    file from cleaned_data, after which TripDocument.clean() also complains that no source
+    was given. Showing that non-field error would hide the real reason.
+    """
+    for name in form.fields:
+        if form.errors.get(name):
+            return form.errors[name][0]
+    non_field_errors = form.non_field_errors()
+    return non_field_errors[0] if non_field_errors else fallback
+
+
 @household_required
 def index(request):
     tab = request.GET.get("tab", "reizen")
@@ -40,7 +54,7 @@ def index(request):
 def add_trip(request):
     form = TripForm(request.POST)
     if not form.is_valid():
-        messages.error(request, "Controleer de reisgegevens.")
+        messages.error(request, _first_form_error(form, "Controleer de reisgegevens."))
         return _travel_tab_redirect("reizen")
     trip = form.save(commit=False)
     trip.household = request.household
@@ -61,7 +75,21 @@ def update_trip(request, trip_id):
         form.save()
         messages.success(request, "Reis aangepast.")
     else:
-        messages.error(request, "Controleer de reisgegevens.")
+        messages.error(request, _first_form_error(form, "Controleer de reisgegevens."))
+    return _travel_tab_redirect("reizen")
+
+
+@parent_required
+@require_POST
+def link_task_list(request, trip_id):
+    """Reconnect a trip to a list in the Taken tab after the old one was deleted there."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    if trip.task_list_id:
+        messages.error(request, "Deze reis heeft al een gekoppelde takenlijst.")
+    elif ensure_trip_task_list(trip):
+        messages.success(request, f"Takenlijst \"{trip.task_list.name}\" gekoppeld aan deze reis.")
+    else:
+        messages.error(request, "Er kon geen takenlijst worden gekoppeld omdat er al lijstjes met deze naam bestaan.")
     return _travel_tab_redirect("reizen")
 
 
@@ -117,7 +145,7 @@ def add_document(request, trip_id):
         document.save()
         messages.success(request, "Document gekoppeld aan de reis.")
     else:
-        messages.error(request, form.non_field_errors()[0] if form.non_field_errors() else "Controleer het document.")
+        messages.error(request, _first_form_error(form, "Controleer het document."))
     return _travel_tab_redirect("documenten")
 
 

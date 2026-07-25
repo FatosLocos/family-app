@@ -894,6 +894,46 @@ def reis_bijwerken(ctx: Context, trip_id: int, destination: str | None = None, s
 
 
 @mcp.tool()
+def reis_tussenstop_toevoegen(ctx: Context, trip_id: int, name: str, arrives_on: str | None = None, departs_on: str | None = None) -> dict:
+    """Add one intermediate stop to an EXISTING trip, at the end of its route.
+
+    Use this when you learn about a place the family stays on the way — a hotel booking for
+    two nights in Girona on the road to Barcelona. Get trip_id from reizen() and check its
+    "stops" first, so you don't add the same stop twice; a stop can only be removed in the
+    app itself. For a whole new journey, use reis_toevoegen with its stops argument instead.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        name: The place of the stop, e.g. "Girona".
+        arrives_on: Arrival date as ISO 8601 (YYYY-MM-DD). Omit if unknown.
+        departs_on: Departure date as ISO 8601 (YYYY-MM-DD). Must not be before arrives_on.
+    """
+    payload = {"name": name}
+    if arrives_on:
+        payload["arrives_on"] = arrives_on
+    if departs_on:
+        payload["departs_on"] = departs_on
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/tussenstops/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_takenlijst_koppelen(ctx: Context, trip_id: int) -> dict:
+    """Give a trip a new list in FamilyApp's Taken tab when it lost the old one.
+
+    Only needed when reizen() reports "task_list": null for a trip — that happens after the
+    family deleted the list in the Taken tab. A new list "Reis: <destination>" is created and
+    linked, so packing and preparation tasks have somewhere to go again. Creating a trip
+    already does this by itself, so never call this right after reis_toevoegen.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/takenlijst/koppelen/", json={}))
+
+
+@mcp.tool()
 def reis_document_toevoegen(ctx: Context, trip_id: int, title: str, url: str | None = None, dropbox_path: str | None = None) -> dict:
     """Attach a travel document (ticket, booking confirmation, insurance policy) to a trip.
 

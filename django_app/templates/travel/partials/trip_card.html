@@ -18,6 +18,7 @@
     <p class="form-hint"><i data-lucide="clipboard-check"></i> Takenlijst <a href="{% url 'household:index' %}?tab=taken">{{ trip.task_list.name }}</a> · {{ trip.open_task_count }} open {% if trip.open_task_count == 1 %}taak{% else %}taken{% endif %}</p>
   {% else %}
     <p class="form-hint">Geen takenlijst gekoppeld aan deze reis.</p>
+    {% if active_membership.can_manage %}<form method="post" action="{% url 'travel:link_task_list' trip.id %}">{% csrf_token %}<button class="button button-secondary" type="submit"><i data-lucide="clipboard-check"></i>Takenlijst koppelen</button></form>{% endif %}
   {% endif %}
   <h3>Tussenstops</h3>
   <ul class="clean-list">

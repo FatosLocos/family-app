@@ -2639,6 +2639,60 @@ class OpenClawTravelTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Veld 'destination' is verplicht.")
 
+    def test_a_refused_stop_leaves_no_half_created_trip_behind(self):
+        wrong_type = self._post("api_openclaw_add_trip", [], {"destination": "Rome", "stops": "Florence"})
+        wrong_date = self._post("api_openclaw_add_trip", [], {"destination": "Wenen", "stops": [{"name": "Praag"}, {"name": "Linz", "arrives_on": "morgen"}]})
+
+        self.assertEqual(wrong_type.status_code, 400)
+        self.assertEqual(wrong_type.json()["error"], "Veld 'stops' moet een lijst zijn.")
+        self.assertEqual(wrong_date.status_code, 400)
+        self.assertFalse(Trip.objects.filter(household=self.household, destination__in=["Rome", "Wenen"]).exists())
+        self.assertFalse(TripStop.objects.filter(household=self.household, name="Praag").exists())
+
+    def test_an_impossible_date_gets_a_dutch_hint(self):
+        response = self._post("api_openclaw_add_trip", [], {"destination": "Ardennen", "start_date": "2026-02-30"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "'2026-02-30' is geen geldige datum voor 'start_date' (gebruik JJJJ-MM-DD).")
+        self.assertFalse(Trip.objects.filter(household=self.household, destination="Ardennen").exists())
+
+    def test_a_stop_can_be_added_to_an_existing_trip(self):
+        response = self._post("api_openclaw_add_trip_stop", [self.trip.id], {"name": "Figueres", "arrives_on": "2026-08-05", "departs_on": "2026-08-06"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["arrives_on"], "2026-08-05")
+        stops = list(TripStop.objects.for_household(self.household).filter(trip=self.trip))
+        self.assertEqual([stop.name for stop in stops], ["Girona", "Figueres"])
+        self.assertEqual(stops[-1].sort_order, 1)
+
+    def test_a_stop_without_a_name_is_refused(self):
+        response = self._post("api_openclaw_add_trip_stop", [self.trip.id], {"arrives_on": "2026-08-05"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'name' is verplicht.")
+        self.assertEqual(TripStop.objects.for_household(self.household).filter(trip=self.trip).count(), 1)
+
+    def test_a_trip_that_lost_its_task_list_can_be_linked_again(self):
+        task_list = ensure_trip_task_list(self.trip)
+        task_list.delete()
+        self.trip.refresh_from_db()
+        self.assertIsNone(self.trip.task_list)
+
+        response = self._post("api_openclaw_link_trip_task_list", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["task_list"]["name"], "Reis: Barcelona")
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.task_list.name, "Reis: Barcelona")
+
+    def test_linking_a_task_list_twice_is_refused(self):
+        ensure_trip_task_list(self.trip)
+
+        response = self._post("api_openclaw_link_trip_task_list", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Deze reis heeft al een gekoppelde takenlijst.")
+
     def test_update_only_touches_the_keys_it_was_given(self):
         response = self._post("api_openclaw_update_trip", [self.trip.id], {"end_date": "2026-08-12", "notes": "Vlucht bevestigd, KL1234"})
 
@@ -2706,6 +2760,8 @@ class OpenClawTravelTests(TestCase):
     def test_every_mutating_endpoint_refuses_a_trip_of_another_household(self):
         endpoints = [
             ("api_openclaw_update_trip", {"destination": "Overgenomen"}),
+            ("api_openclaw_add_trip_stop", {"name": "Ongewenst"}),
+            ("api_openclaw_link_trip_task_list", {}),
             ("api_openclaw_add_trip_document", {"title": "Ongewenst", "url": "https://example.com/x"}),
             ("api_openclaw_add_trip_idea", {"text": "Ongewenst idee"}),
         ]
@@ -2717,5 +2773,7 @@ class OpenClawTravelTests(TestCase):
 
         self.other_trip.refresh_from_db()
         self.assertEqual(self.other_trip.destination, "Reis van de buren")
+        self.assertIsNone(self.other_trip.task_list)
+        self.assertFalse(TripStop.objects.filter(trip=self.other_trip).exists())
         self.assertFalse(TripDocument.objects.filter(trip=self.other_trip).exists())
         self.assertFalse(TripIdea.objects.filter(trip=self.other_trip).exists())

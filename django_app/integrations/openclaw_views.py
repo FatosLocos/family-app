@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
+from django.db import transaction
 from django.db.models import Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -1234,10 +1235,33 @@ def _parse_trip_date(value, field: str):
     """Parse an optional ISO 8601 date; raise ValueError with a Dutch hint like the agenda helpers."""
     if value in (None, ""):
         return None
-    parsed = parse_date(str(value))
+    try:
+        # parse_date itself raises ValueError (in English) for a well-formed but impossible
+        # date like "2026-02-30", so catch that and give the agent the same Dutch hint.
+        parsed = parse_date(str(value))
+    except ValueError:
+        parsed = None
     if parsed is None:
         raise ValueError(f"'{value}' is geen geldige datum voor '{field}' (gebruik JJJJ-MM-DD).")
     return parsed
+
+
+def _parse_trip_stops(raw_stops):
+    """Validate the whole 'stops' payload up front; raise ValueError with a Dutch hint."""
+    if not isinstance(raw_stops, list):
+        raise ValueError("Veld 'stops' moet een lijst zijn.")
+    stops = []
+    for raw_stop in raw_stops:
+        stop = raw_stop if isinstance(raw_stop, dict) else {"name": raw_stop}
+        name = str(stop.get("name") or "").strip()[:160]
+        if not name:
+            continue
+        stops.append({
+            "name": name,
+            "arrives_on": _parse_trip_date(stop.get("arrives_on"), "arrives_on"),
+            "departs_on": _parse_trip_date(stop.get("departs_on"), "departs_on"),
+        })
+    return stops
 
 
 @require_openclaw_token("reizen:read")
@@ -1264,35 +1288,27 @@ def api_add_trip(request):
     destination = str(payload.get("destination") or "").strip()[:160]
     if not destination:
         return JsonResponse({"error": "Veld 'destination' is verplicht."}, status=400)
+    # Everything is validated before the first write: a 400 on a stop used to leave a
+    # half-created trip behind, which the agent then duplicated on its retry.
     try:
         start_date = _parse_trip_date(payload.get("start_date"), "start_date")
         end_date = _parse_trip_date(payload.get("end_date"), "end_date")
+        stops = _parse_trip_stops(payload.get("stops") or [])
     except ValueError as error:
         return JsonResponse({"error": str(error)}, status=400)
     if start_date and end_date and end_date < start_date:
         return JsonResponse({"error": "De terugreis mag niet vóór het vertrek liggen."}, status=400)
-    trip = Trip.objects.create(
-        household=request.household,
-        destination=destination,
-        start_date=start_date,
-        end_date=end_date,
-        notes=str(payload.get("notes") or ""),
-    )
-    stops = payload.get("stops") or []
-    if not isinstance(stops, list):
-        return JsonResponse({"error": "Veld 'stops' moet een lijst zijn."}, status=400)
-    for index, raw_stop in enumerate(stops):
-        stop = raw_stop if isinstance(raw_stop, dict) else {"name": raw_stop}
-        name = str(stop.get("name") or "").strip()[:160]
-        if not name:
-            continue
-        try:
-            arrives_on = _parse_trip_date(stop.get("arrives_on"), "arrives_on")
-            departs_on = _parse_trip_date(stop.get("departs_on"), "departs_on")
-        except ValueError as error:
-            return JsonResponse({"error": str(error)}, status=400)
-        TripStop.objects.create(household=request.household, trip=trip, name=name, arrives_on=arrives_on, departs_on=departs_on, sort_order=index)
-    task_list = ensure_trip_task_list(trip)
+    with transaction.atomic():
+        trip = Trip.objects.create(
+            household=request.household,
+            destination=destination,
+            start_date=start_date,
+            end_date=end_date,
+            notes=str(payload.get("notes") or ""),
+        )
+        for index, stop in enumerate(stops):
+            TripStop.objects.create(household=request.household, trip=trip, sort_order=index, **stop)
+        task_list = ensure_trip_task_list(trip)
     log_openclaw_action(request.household, "reis_toevoegen", f"Reis naar '{trip.destination}' toegevoegd", user=request.openclaw_user)
     trip.refresh_from_db()
     return JsonResponse({**trip_payload(trip), "task_list_created": task_list is not None}, status=201)
@@ -1337,6 +1353,58 @@ def api_update_trip(request, trip_id):
     trip.save(update_fields=update_fields)
     log_openclaw_action(request.household, "reis_bijwerken", f"Reis naar '{trip.destination}' bijgewerkt", user=request.openclaw_user)
     return JsonResponse(trip_payload(trip))
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_add_trip_stop(request, trip_id):
+    """Add one intermediate stop to an existing trip, at the end of the route."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    name = str(payload.get("name") or "").strip()[:160]
+    if not name:
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
+    try:
+        arrives_on = _parse_trip_date(payload.get("arrives_on"), "arrives_on")
+        departs_on = _parse_trip_date(payload.get("departs_on"), "departs_on")
+    except ValueError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    if arrives_on and departs_on and departs_on < arrives_on:
+        return JsonResponse({"error": "Het vertrek uit een tussenstop mag niet vóór de aankomst liggen."}, status=400)
+    highest = trip.stops.aggregate(Max("sort_order"))["sort_order__max"]
+    stop = TripStop.objects.create(
+        household=request.household,
+        trip=trip,
+        name=name,
+        arrives_on=arrives_on,
+        departs_on=departs_on,
+        sort_order=(highest + 1) if highest is not None else 0,
+    )
+    log_openclaw_action(request.household, "reis_tussenstop_toevoegen", f"Tussenstop '{stop.name}' toegevoegd aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": stop.id,
+        "trip_id": trip.id,
+        "name": stop.name,
+        "arrives_on": stop.arrives_on.isoformat() if stop.arrives_on else None,
+        "departs_on": stop.departs_on.isoformat() if stop.departs_on else None,
+    }, status=201)
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_link_trip_task_list(request, trip_id):
+    """Give a trip a list in the normal Taken tab again after the old one was deleted."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    if trip.task_list_id:
+        return JsonResponse({"error": "Deze reis heeft al een gekoppelde takenlijst."}, status=400)
+    task_list = ensure_trip_task_list(trip)
+    if task_list is None:
+        return JsonResponse({"error": "Er kon geen takenlijst worden gekoppeld omdat er al lijstjes met deze naam bestaan."}, status=400)
+    log_openclaw_action(request.household, "reis_takenlijst_koppelen", f"Takenlijst '{task_list.name}' gekoppeld aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({"trip_id": trip.id, "task_list": {"id": task_list.id, "name": task_list.name}}, status=201)
 
 
 @require_openclaw_token("reizen:write")

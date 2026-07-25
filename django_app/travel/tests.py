@@ -122,6 +122,40 @@ class TravelModuleTests(TestCase):
 
         self.assertFalse(TripDocument.objects.filter(title="Twee bronnen").exists())
 
+    def test_a_refused_upload_names_the_real_reason(self):
+        self.client.force_login(self.owner)
+        uploaded = SimpleUploadedFile("tickets.exe", b"nope", content_type="application/octet-stream")
+
+        response = self.client.post(reverse("travel:add_document", args=[self.trip.pk]), {"title": "Tickets", "file": uploaded}, follow=True)
+
+        self.assertContains(response, "Gebruik PDF, afbeelding of tekstbestand.")
+        self.assertNotContains(response, "Kies precies één bron")
+        self.assertFalse(TripDocument.objects.filter(title="Tickets").exists())
+
+    def test_a_trip_without_a_task_list_can_be_linked_again(self):
+        task_list = ensure_trip_task_list(self.trip)
+        task_list.delete()
+        self.trip.refresh_from_db()
+        self.assertIsNone(self.trip.task_list)
+        self.client.force_login(self.owner)
+
+        overview = self.client.get(reverse("travel:index"))
+        self.client.post(reverse("travel:link_task_list", args=[self.trip.pk]))
+
+        self.assertContains(overview, "Takenlijst koppelen")
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.task_list.name, "Reis: Barcelona")
+
+    def test_linking_a_task_list_twice_changes_nothing(self):
+        task_list = ensure_trip_task_list(self.trip)
+        self.client.force_login(self.owner)
+
+        self.client.post(reverse("travel:link_task_list", args=[self.trip.pk]))
+
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.task_list, task_list)
+        self.assertEqual(TaskList.objects.for_household(self.first_household).count(), 1)
+
     def test_uploaded_document_is_downloadable_inside_the_household(self):
         self.client.force_login(self.owner)
         uploaded = SimpleUploadedFile("tickets.pdf", b"ticket", content_type="application/pdf")
@@ -177,6 +211,7 @@ class TravelModuleTests(TestCase):
             ("travel:update_trip", [self.trip.pk], {"destination": "Overgenomen"}),
             ("travel:delete_trip", [self.trip.pk], {}),
             ("travel:add_stop", [self.trip.pk], {"name": "Ongewenst"}),
+            ("travel:link_task_list", [self.trip.pk], {}),
             ("travel:delete_stop", [self.stop.pk], {}),
             ("travel:add_document", [self.trip.pk], {"title": "Ongewenst", "url": "https://example.com/x"}),
             ("travel:delete_document", [self.document.pk], {}),
@@ -191,6 +226,7 @@ class TravelModuleTests(TestCase):
 
         self.trip.refresh_from_db()
         self.assertEqual(self.trip.destination, "Barcelona")
+        self.assertIsNone(self.trip.task_list)
         self.assertTrue(TripStop.objects.filter(pk=self.stop.pk).exists())
         self.assertTrue(TripDocument.objects.filter(pk=self.document.pk).exists())
         self.assertTrue(TripIdea.objects.filter(pk=self.idea.pk).exists())

@@ -93,6 +93,7 @@
         {% csrf_token %}
         <div class="dialog-title"><h2>Lijstje verwijderen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
         <p>De taken in "{{ task_list.name }}" worden niet verwijderd, maar verplaatst naar Zonder lijst.</p>
+        {% if task_list.trip %}<p class="form-hint">Let op: dit lijstje hoort bij de reis naar {{ task_list.trip.destination }}. Die reis blijft bestaan, maar raakt haar takenlijst kwijt — in Reizen kun je er dan een nieuwe aan koppelen.</p>{% endif %}
         <button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Lijstje verwijderen</button>
       </form>
     </dialog>
