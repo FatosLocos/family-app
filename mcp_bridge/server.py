@@ -819,6 +819,122 @@ def to_do_bijwerken(ctx: Context, list_id: str, task_id: str, title: str | None 
     with _client(ctx) as client:
         return _checked(client.post(f"/instellingen/api/openclaw/outlook/todo/{list_id}/{task_id}/bijwerken/", json=payload))
 
+@mcp.tool()
+def reizen(ctx: Context) -> dict:
+    """Get every trip of this household: destination, dates, stops, documents, ideas and the
+    trip's own task list ("Reis: <destination>") with its tasks.
+
+    Always call this first when an e-mail, document or message mentions travel — a flight
+    confirmation, hotel booking, rental car or insurance policy almost always belongs to a
+    trip that already exists. Update that trip (reis_bijwerken) or attach the document to it
+    (reis_document_toevoegen) instead of creating a second trip for the same journey. Packing
+    and preparation tasks are normal tasks in the trip's task list, so add them with
+    taak_toevoegen(list_name=<the task_list name from here>), not as an idea.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/reizen/"))
+
+
+@mcp.tool()
+def reis_toevoegen(ctx: Context, destination: str, start_date: str | None = None, end_date: str | None = None, notes: str | None = None, stops: list[dict] | None = None) -> dict:
+    """Create a NEW trip and give it its own task list in FamilyApp's normal Taken tab.
+
+    Check reizen() first: only create a trip when this journey isn't in the list yet.
+    The task list is created automatically and is named "Reis: <destination>"; use that name
+    with taak_toevoegen's `list_name` for packing and preparation tasks.
+
+    Args:
+        destination: Where the trip goes, e.g. "Barcelona" or "Ardennen". Required.
+        start_date: Departure date as ISO 8601 (YYYY-MM-DD). Omit if unknown.
+        end_date: Return date as ISO 8601 (YYYY-MM-DD). Must not be before start_date.
+        notes: Free-text notes, e.g. "vlucht 's ochtends, huurauto geregeld".
+        stops: Optional intermediate stops, in order. Each stop is a dict with "name"
+            (required) and optionally "arrives_on"/"departs_on" as YYYY-MM-DD.
+    """
+    payload: dict = {"destination": destination}
+    if start_date:
+        payload["start_date"] = start_date
+    if end_date:
+        payload["end_date"] = end_date
+    if notes:
+        payload["notes"] = notes
+    if stops:
+        payload["stops"] = stops
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/reizen/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_bijwerken(ctx: Context, trip_id: int, destination: str | None = None, start_date: str | None = None, end_date: str | None = None, notes: str | None = None) -> dict:
+    """Update an EXISTING trip. Only the arguments you actually pass are changed.
+
+    This is the tool for the common case where you learn something new about a trip that is
+    already in FamilyApp — a flight confirmation that finally names the departure date, or a
+    hotel booking that shifts the return. Get trip_id from reizen(). To attach the
+    confirmation itself, use reis_document_toevoegen.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        destination: New destination, if it changed.
+        start_date: New departure date (YYYY-MM-DD). Pass "" to clear it.
+        end_date: New return date (YYYY-MM-DD). Pass "" to clear it.
+        notes: New free-text notes. Pass "" to clear.
+    """
+    payload = {}
+    if destination is not None:
+        payload["destination"] = destination
+    if start_date is not None:
+        payload["start_date"] = start_date
+    if end_date is not None:
+        payload["end_date"] = end_date
+    if notes is not None:
+        payload["notes"] = notes
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/bijwerken/", json=payload))
+
+
+@mcp.tool()
+def reis_document_toevoegen(ctx: Context, trip_id: int, title: str, url: str | None = None, dropbox_path: str | None = None) -> dict:
+    """Attach a travel document (ticket, booking confirmation, insurance policy) to a trip.
+
+    Pass exactly ONE of url or dropbox_path — this tool links to where the document already
+    lives and cannot upload file contents (that is browser-only in FamilyApp). Use
+    dropbox_zoeken or dropbox_map first to find the exact Dropbox path of a file the family
+    already saved; for a booking that only exists as a web link, pass url. Find trip_id with
+    reizen(), and prefer attaching to an existing trip over creating a new one.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        title: Short Dutch title, e.g. "Vluchtbevestiging KL1234" or "Hotel Barcelona".
+        url: Link to the document. Use this OR dropbox_path, never both.
+        dropbox_path: Full path of the file in the linked Dropbox, e.g.
+            "/Reizen/Barcelona/tickets.pdf" (see dropbox_zoeken). Use this OR url.
+    """
+    payload = {"title": title}
+    if url:
+        payload["url"] = url
+    if dropbox_path:
+        payload["dropbox_path"] = dropbox_path
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/documenten/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_idee_toevoegen(ctx: Context, trip_id: int, text: str) -> dict:
+    """Add a loose idea to a trip — a suggestion or note that is explicitly not a task yet.
+
+    Use this for brainstorm material ("museum met kinderkorting in Barcelona"). Anything that
+    actually has to be done before leaving belongs in the trip's task list instead: call
+    taak_toevoegen with list_name set to the task_list name from reizen(). Ideas added here
+    are marked as created by the agent, so the family can see where they came from.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        text: The idea, in Dutch.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/ideeen/toevoegen/", json={"text": text}))
+
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

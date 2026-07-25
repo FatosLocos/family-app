@@ -13,6 +13,7 @@ from home.models import HomeEntity
 from household.models import Task
 from notifications.models import Notification
 from planning.models import CalendarEvent
+from travel.models import Trip
 
 
 def healthz(request):
@@ -53,7 +54,7 @@ def today(request):
 def search(request):
     household = request.household
     query = request.GET.get("q", "").strip()
-    results = {"tasks": [], "contacts": [], "events": [], "transactions": [], "wishes": [], "devices": [], "notifications": []}
+    results = {"tasks": [], "contacts": [], "events": [], "transactions": [], "wishes": [], "devices": [], "notifications": [], "trips": []}
     if household and len(query) >= 2:
         results = {
             "tasks": Task.objects.for_household(household).filter(Q(title__icontains=query) | Q(notes__icontains=query)).order_by("completed_at", "due_at")[:6],
@@ -63,6 +64,7 @@ def search(request):
             "wishes": WishItem.objects.for_household(household).filter(title__icontains=query).select_related("wishlist")[:6],
             "devices": HomeEntity.objects.for_household(household).filter(Q(name__icontains=query) | Q(domain__icontains=query) | Q(state__icontains=query)).order_by("name")[:6],
             "notifications": Notification.objects.for_household(household).filter(Q(title__icontains=query) | Q(body__icontains=query)).order_by("-created_at")[:6],
+            "trips": Trip.objects.for_household(household).filter(Q(destination__icontains=query) | Q(notes__icontains=query) | Q(stops__name__icontains=query)).distinct()[:6],
         }
     context = {"query": query, **results}
     if request.headers.get("HX-Request"):

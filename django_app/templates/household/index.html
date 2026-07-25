@@ -39,7 +39,7 @@
     {% for group in task_groups %}
       <section class="arena-card task-list-group{% if not group.list %} is-unlisted{% endif %}">
         <div class="task-list-group-header">
-          <h3>{{ group.list.name|default:'Zonder lijst' }}{% if group.list.sync_link %} <span class="arena-badge arena-badge--green" title="Gesynchroniseerd met Microsoft To Do">Gesynced</span>{% endif %}</h3>
+          <h3>{{ group.list.name|default:'Zonder lijst' }}{% if group.list.sync_link %} <span class="arena-badge arena-badge--green" title="Gesynchroniseerd met Microsoft To Do">Gesynced</span>{% endif %}{% if group.list.trip %} <a class="arena-badge arena-badge--accent" href="{% url 'travel:index' %}" title="Hoort bij de reis naar {{ group.list.trip.destination }}">Reis</a>{% endif %}</h3>
           {% if group.list %}<button class="icon-button{% if group.list.sync_link %} is-active{% endif %}" type="button" data-open-dialog="tasklist-sync-{{ group.list.id }}" title="Koppelen met Microsoft To Do" aria-label="{{ group.list.name }} koppelen met Microsoft To Do"><i data-lucide="refresh-cw"></i></button><button class="icon-button destructive" type="button" data-open-dialog="tasklist-delete-{{ group.list.id }}" title="Lijstje verwijderen" aria-label="{{ group.list.name }} verwijderen"><i data-lucide="trash-2"></i></button>{% endif %}
         </div>
         <ul class="task-list task-drop-zone" data-task-drop-zone data-list-id="{{ group.list.id|default:'' }}">

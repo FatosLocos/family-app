@@ -1,0 +1,91 @@
+{% extends 'base.html' %}
+{% block title %}Reizen · Family App{% endblock %}
+{% block content %}
+{% if active_membership.can_manage %}
+  {% include 'components/module_header.html' with title='Reizen' description='Bestemmingen, tussenstops, documenten en ideeën — met een eigen takenlijst per reis.' action_id='trip-add-dialog' action_label='Reis toevoegen' metrics=metrics %}
+{% else %}
+  {% include 'components/module_header.html' with title='Reizen' description='Bestemmingen, tussenstops, documenten en ideeën — met een eigen takenlijst per reis.' metrics=metrics %}
+{% endif %}
+<nav class="module-tabs" aria-label="Reizen onderdelen">
+  <a href="?tab=reizen" class="{% if tab == 'reizen' %}active{% endif %}">Reizen</a>
+  <a href="?tab=documenten" class="{% if tab == 'documenten' %}active{% endif %}">Documenten</a>
+  <a href="?tab=ideeen" class="{% if tab == 'ideeen' %}active{% endif %}">Ideeën</a>
+</nav>
+
+{% if tab == 'documenten' %}
+  <section class="arena-card list-panel">
+    <div class="panel-heading"><div><h2>Reisdocumenten</h2><small>Tickets, boekingen en verzekeringen — geüpload, uit Dropbox of achter een link.</small></div></div>
+    {% for trip in trips %}{% include 'travel/partials/trip_documents.html' %}{% empty %}<p class="empty-copy">Voeg eerst een reis toe; documenten hangen altijd aan een reis.</p>{% endfor %}
+  </section>
+{% elif tab == 'ideeen' %}
+  <section class="arena-card list-panel">
+    <div class="panel-heading"><div><h2>Ideeën</h2><small>Losse aantekeningen die nog geen taak zijn. OpenClaw kan hier ook ideeën bijzetten.</small></div></div>
+    {% for trip in trips %}{% include 'travel/partials/trip_ideas.html' %}{% empty %}<p class="empty-copy">Voeg eerst een reis toe; ideeën hangen altijd aan een reis.</p>{% endfor %}
+  </section>
+{% else %}
+  <section class="arena-card list-panel">
+    <div class="panel-heading">
+      <div><h2>Geplande reizen</h2><small>Elke reis krijgt een eigen lijstje in de Taken-tab, bijvoorbeeld voor de paklijst.</small></div>
+      <span class="status-pill">{{ trips|length }} reizen</span>
+    </div>
+  </section>
+  {% for trip in trips %}{% include 'travel/partials/trip_card.html' %}{% empty %}
+    <section class="arena-card list-panel"><p class="empty-copy">Nog geen reizen vastgelegd.</p></section>
+  {% endfor %}
+{% endif %}
+
+{% if active_membership.can_manage %}
+  <dialog id="trip-add-dialog" class="modal">
+    <form method="post" action="{% url 'travel:add_trip' %}">
+      {% csrf_token %}
+      <div class="dialog-title"><h2>Reis toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+      <p class="form-hint">Er wordt automatisch een takenlijst "Reis: &lt;bestemming&gt;" aangemaakt en gekoppeld, zodat reistaken gewoon in de Taken-tab meelopen.</p>
+      {{ trip_form.as_p }}
+      <button class="button button-primary" type="submit"><i data-lucide="plane"></i>Reis toevoegen</button>
+    </form>
+  </dialog>
+  {% for trip in trips %}
+    <dialog id="trip-edit-{{ trip.id }}" class="modal">
+      <form method="post" action="{% url 'travel:update_trip' trip.id %}">
+        {% csrf_token %}
+        <div class="dialog-title"><h2>Reis aanpassen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+        <label>Bestemming<input name="destination" value="{{ trip.destination }}" maxlength="160" required></label>
+        <div class="field-grid">
+          <label>Vertrek<input type="date" name="start_date" value="{{ trip.start_date|date:'Y-m-d' }}"></label>
+          <label>Terug<input type="date" name="end_date" value="{{ trip.end_date|date:'Y-m-d' }}"></label>
+        </div>
+        <label>Aantekeningen<textarea name="notes" rows="2">{{ trip.notes }}</textarea></label>
+        <button class="button button-primary" type="submit">Opslaan</button>
+      </form>
+      <form class="dialog-danger-form" method="post" action="{% url 'travel:delete_trip' trip.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Reis verwijderen</button></form>
+    </dialog>
+    <dialog id="trip-stop-{{ trip.id }}" class="modal">
+      <form method="post" action="{% url 'travel:add_stop' trip.id %}">
+        {% csrf_token %}
+        <div class="dialog-title"><h2>Tussenstop in {{ trip.destination }}</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+        {{ stop_form.as_p }}
+        <button class="button button-primary" type="submit">Toevoegen</button>
+      </form>
+    </dialog>
+    <dialog id="trip-document-{{ trip.id }}" class="modal">
+      <form method="post" enctype="multipart/form-data" action="{% url 'travel:add_document' trip.id %}">
+        {% csrf_token %}
+        <div class="dialog-title"><h2>Document bij {{ trip.destination }}</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+        <p class="form-hint">Vul precies één bron in: upload een bestand, verwijs naar een pad in de gekoppelde Dropbox, of zet er een link.</p>
+        {{ document_form.as_p }}
+        <button class="button button-primary" type="submit"><i data-lucide="paperclip"></i>Koppelen</button>
+      </form>
+    </dialog>
+  {% endfor %}
+{% endif %}
+{% for trip in trips %}
+  <dialog id="trip-idea-{{ trip.id }}" class="modal">
+    <form method="post" action="{% url 'travel:add_idea' trip.id %}">
+      {% csrf_token %}
+      <div class="dialog-title"><h2>Idee voor {{ trip.destination }}</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+      {{ idea_form.as_p }}
+      <button class="button button-primary" type="submit"><i data-lucide="lightbulb"></i>Idee toevoegen</button>
+    </form>
+  </dialog>
+{% endfor %}
+{% endblock %}

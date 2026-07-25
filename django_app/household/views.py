@@ -90,7 +90,8 @@ def index(request):
         tasks = tasks.filter(completed_at__isnull=False)
     elif task_filter != "alles":
         tasks = tasks.filter(completed_at__isnull=True)
-    task_lists = list(TaskList.objects.for_household(household))
+    # select_related("trip"): the task group header shows a trip badge for a linked trip.
+    task_lists = list(TaskList.objects.for_household(household).select_related("sync_link", "trip"))
     tasks = list(tasks[:300])
     tasks_by_list = defaultdict(list)
     for task in tasks:

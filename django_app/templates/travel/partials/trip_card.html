@@ -1,0 +1,30 @@
+<section class="arena-card list-panel" id="trip-{{ trip.id }}">
+  <div class="panel-heading">
+    <div>
+      <h2>{{ trip.destination }}</h2>
+      <small>{% if trip.start_date %}{{ trip.start_date|date:'d M Y' }}{% if trip.end_date %} – {{ trip.end_date|date:'d M Y' }}{% endif %}{% else %}Nog geen datum{% endif %}</small>
+      {% if trip.notes %}<small>{{ trip.notes }}</small>{% endif %}
+    </div>
+    <div class="button-row">
+      <button class="icon-button" type="button" data-open-dialog="trip-idea-{{ trip.id }}" title="Idee toevoegen" aria-label="Idee toevoegen aan {{ trip.destination }}"><i data-lucide="lightbulb"></i></button>
+      {% if active_membership.can_manage %}
+        <button class="icon-button" type="button" data-open-dialog="trip-stop-{{ trip.id }}" title="Tussenstop toevoegen" aria-label="Tussenstop toevoegen aan {{ trip.destination }}"><i data-lucide="map-pin"></i></button>
+        <button class="icon-button" type="button" data-open-dialog="trip-document-{{ trip.id }}" title="Document koppelen" aria-label="Document koppelen aan {{ trip.destination }}"><i data-lucide="paperclip"></i></button>
+        <button class="icon-button" type="button" data-open-dialog="trip-edit-{{ trip.id }}" title="Reis aanpassen" aria-label="{{ trip.destination }} aanpassen"><i data-lucide="pencil"></i></button>
+      {% endif %}
+    </div>
+  </div>
+  {% if trip.task_list %}
+    <p class="form-hint"><i data-lucide="clipboard-check"></i> Takenlijst <a href="{% url 'household:index' %}?tab=taken">{{ trip.task_list.name }}</a> · {{ trip.open_task_count }} open {% if trip.open_task_count == 1 %}taak{% else %}taken{% endif %}</p>
+  {% else %}
+    <p class="form-hint">Geen takenlijst gekoppeld aan deze reis.</p>
+  {% endif %}
+  <h3>Tussenstops</h3>
+  <ul class="clean-list">
+    {% for stop in trip.stops.all %}
+      <li><i data-lucide="map-pin"></i><div><strong>{{ stop.name }}</strong><small>{% if stop.arrives_on %}Aankomst {{ stop.arrives_on|date:'d M' }}{% endif %}{% if stop.departs_on %} · vertrek {{ stop.departs_on|date:'d M' }}{% endif %}{% if not stop.arrives_on and not stop.departs_on %}Geen datum{% endif %}</small></div>{% if active_membership.can_manage %}<form method="post" action="{% url 'travel:delete_stop' stop.id %}">{% csrf_token %}<button class="icon-button destructive" type="submit" title="Tussenstop verwijderen" aria-label="{{ stop.name }} verwijderen"><i data-lucide="trash-2"></i></button></form>{% endif %}</li>
+    {% empty %}
+      <li class="empty-copy">Geen tussenstops.</li>
+    {% endfor %}
+  </ul>
+</section>

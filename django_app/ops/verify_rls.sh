@@ -79,6 +79,7 @@ BEGIN
       ('notifications_notification'),
       ('home_homeassistantconfig'), ('home_homeentity'), ('home_homeactionaudit'),
       ('home_emergencycontact'), ('home_maintenanceitem'), ('home_room'), ('home_furnishingitem'), ('home_householddocument'), ('home_energyreading'), ('home_evvehicle'), ('home_evchargingsession'),
+      ('travel_trip'), ('travel_tripstop'), ('travel_tripdocument'), ('travel_tripidea'),
       ('households_childprofile')
   ) AS expected(table_name)
   LEFT JOIN pg_class relation ON relation.relname = expected.table_name AND relation.relnamespace = 'public'::regnamespace

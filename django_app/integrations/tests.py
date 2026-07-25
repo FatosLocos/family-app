@@ -1,6 +1,6 @@
 import base64
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from io import BytesIO
 from unittest.mock import MagicMock, call, patch
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +27,8 @@ from integrations.tasks import sync_active_connections, sync_connection_task, sy
 from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource
 from planning.tasks import sync_pending_events_to_remote
+from travel.models import Trip, TripDocument, TripIdea, TripStop
+from travel.services import ensure_trip_task_list
 
 
 class FakeResponse:
@@ -2571,3 +2573,149 @@ class OpenClawCalendarSourceTests(TestCase):
         self.assertEqual(response.status_code, 404)
         other_event.refresh_from_db()
         self.assertEqual(other_event.location, "")
+
+
+class OpenClawTravelTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="reis-ouder@example.com", email="reis-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        self.trip = Trip.objects.create(household=self.household, destination="Barcelona", start_date=date(2026, 8, 1))
+        TripStop.objects.create(household=self.household, trip=self.trip, name="Girona", arrives_on=date(2026, 8, 3))
+        TripDocument.objects.create(household=self.household, trip=self.trip, title="Vluchtbevestiging", url="https://example.com/ticket")
+        TripIdea.objects.create(household=self.household, trip=self.trip, text="Sagrada Familia bezoeken", author=self.user)
+        self.other_trip = Trip.objects.create(household=self.other_household, destination="Reis van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["reizen:read", "reizen:write"])
+
+    def _post(self, name, args, payload, token=None):
+        return self.client.post(
+            reverse(f"integrations:{name}", args=args),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self.token}",
+        )
+
+    def test_trips_carry_their_stops_documents_ideas_and_task_list(self):
+        task_list = ensure_trip_task_list(self.trip)
+        Task.objects.create(household=self.household, list=task_list, title="Koffers pakken")
+
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual(response.status_code, 200)
+        trip = response.json()["trips"][0]
+        self.assertEqual(trip["destination"], "Barcelona")
+        self.assertEqual(trip["start_date"], "2026-08-01")
+        self.assertEqual([stop["name"] for stop in trip["stops"]], ["Girona"])
+        self.assertEqual([document["title"] for document in trip["documents"]], ["Vluchtbevestiging"])
+        self.assertEqual([idea["text"] for idea in trip["ideas"]], ["Sagrada Familia bezoeken"])
+        self.assertEqual(trip["task_list"]["name"], "Reis: Barcelona")
+        self.assertEqual(trip["task_list"]["open_tasks"], 1)
+        self.assertEqual([task["title"] for task in trip["task_list"]["tasks"]], ["Koffers pakken"])
+
+    def test_trips_never_include_a_trip_of_another_household(self):
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual([trip["destination"] for trip in response.json()["trips"]], ["Barcelona"])
+
+    def test_new_trip_gets_a_linked_task_list_and_its_stops(self):
+        response = self._post("api_openclaw_add_trip", [], {
+            "destination": "Ardennen",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-05",
+            "stops": [{"name": "Namen", "arrives_on": "2026-10-02"}, "Dinant"],
+        })
+
+        self.assertEqual(response.status_code, 201)
+        trip = Trip.objects.get(household=self.household, destination="Ardennen")
+        self.assertEqual(trip.task_list.name, "Reis: Ardennen")
+        self.assertTrue(response.json()["task_list_created"])
+        self.assertEqual([stop.name for stop in trip.stops.all()], ["Namen", "Dinant"])
+        self.assertEqual(response.json()["task_list"]["name"], "Reis: Ardennen")
+
+    def test_trip_without_a_destination_is_refused(self):
+        response = self._post("api_openclaw_add_trip", [], {"start_date": "2026-10-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'destination' is verplicht.")
+
+    def test_update_only_touches_the_keys_it_was_given(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {"end_date": "2026-08-12", "notes": "Vlucht bevestigd, KL1234"})
+
+        self.assertEqual(response.status_code, 200)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.destination, "Barcelona")
+        self.assertEqual(self.trip.start_date, date(2026, 8, 1))
+        self.assertEqual(self.trip.end_date, date(2026, 8, 12))
+        self.assertEqual(self.trip.notes, "Vlucht bevestigd, KL1234")
+
+    def test_update_without_any_field_is_refused(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Geef minstens één veld op om te wijzigen.")
+
+    def test_update_with_a_return_before_departure_is_refused(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {"end_date": "2026-07-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.trip.refresh_from_db()
+        self.assertIsNone(self.trip.end_date)
+
+    def test_document_is_attached_by_dropbox_path(self):
+        response = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Hotelboeking", "dropbox_path": "/Reizen/Barcelona/hotel.pdf"})
+
+        self.assertEqual(response.status_code, 201)
+        document = TripDocument.objects.get(household=self.household, title="Hotelboeking")
+        self.assertEqual(document.dropbox_path, "/Reizen/Barcelona/hotel.pdf")
+        self.assertEqual(document.url, "")
+        self.assertEqual(document.uploaded_by, self.user)
+
+    def test_document_needs_exactly_one_source(self):
+        both = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Twee bronnen", "url": "https://example.com/a", "dropbox_path": "/Reizen/a.pdf"})
+        neither = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Geen bron"})
+
+        self.assertEqual(both.status_code, 400)
+        self.assertEqual(neither.status_code, 400)
+        self.assertEqual(both.json()["error"], "Geef precies één bron op: 'url' of 'dropbox_path'.")
+        self.assertEqual(TripDocument.objects.filter(household=self.household).count(), 1)
+
+    def test_agent_idea_is_marked_as_created_by_the_agent(self):
+        response = self._post("api_openclaw_add_trip_idea", [self.trip.id], {"text": "Museum met kinderkorting"})
+
+        self.assertEqual(response.status_code, 201)
+        idea = TripIdea.objects.get(household=self.household, text="Museum met kinderkorting")
+        self.assertTrue(idea.created_by_agent)
+        self.assertEqual(idea.author, self.user)
+
+    def test_writing_needs_the_reizen_write_scope(self):
+        _, read_only_token = create_token(self.household, self.user, scopes=["reizen:read"])
+
+        response = self._post("api_openclaw_add_trip", [], {"destination": "Mag niet"}, token=read_only_token)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Trip.objects.filter(destination="Mag niet").exists())
+
+    def test_reading_needs_the_reizen_read_scope(self):
+        _, write_only_token = create_token(self.household, self.user, scopes=["reizen:write"])
+
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {write_only_token}")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_every_mutating_endpoint_refuses_a_trip_of_another_household(self):
+        endpoints = [
+            ("api_openclaw_update_trip", {"destination": "Overgenomen"}),
+            ("api_openclaw_add_trip_document", {"title": "Ongewenst", "url": "https://example.com/x"}),
+            ("api_openclaw_add_trip_idea", {"text": "Ongewenst idee"}),
+        ]
+
+        for name, payload in endpoints:
+            with self.subTest(endpoint=name):
+                response = self._post(name, [self.other_trip.id], payload)
+                self.assertEqual(response.status_code, 404)
+
+        self.other_trip.refresh_from_db()
+        self.assertEqual(self.other_trip.destination, "Reis van de buren")
+        self.assertFalse(TripDocument.objects.filter(trip=self.other_trip).exists())
+        self.assertFalse(TripIdea.objects.filter(trip=self.other_trip).exists())

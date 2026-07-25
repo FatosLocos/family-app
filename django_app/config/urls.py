@@ -17,6 +17,7 @@ urlpatterns = [
     path("planning/", include("planning.urls")),
     path("geld/", include("finance.urls")),
     path("huis/", include("home.urls")),
+    path("reizen/", include("travel.urls")),
     path("instellingen/", include("integrations.urls")),
     path("meldingen/", include("notifications.urls")),
 ]
