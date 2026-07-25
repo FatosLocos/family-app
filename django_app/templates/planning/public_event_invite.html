@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block title %}{{ event.title }}{% endblock %}
+{% block content %}
+<section class="public-invite">
+  <header><p class="eyebrow">Uitnodiging</p><h1>{{ event.title }}</h1>
+    <p class="public-invite-when"><i data-lucide="calendar-days"></i>{% if event.is_all_day %}{{ event.starts_at|date:'l j F Y' }} · hele dag{% else %}{{ event.starts_at|date:'l j F Y · H:i' }} – {{ event.ends_at|date:'H:i' }}{% endif %}</p>
+    {% if invite.venue %}<p class="public-invite-where"><i data-lucide="map-pin"></i><strong>{{ invite.venue.name }}</strong>{% if invite.venue.full_address %} · {{ invite.venue.full_address }}{% endif %}</p>{% elif event.location %}<p class="public-invite-where"><i data-lucide="map-pin"></i>{{ event.location }}</p>{% endif %}
+    {% if invite.rsvp_deadline %}<p class="public-invite-deadline"><i data-lucide="clock"></i>Aanmelden kan tot {{ invite.rsvp_deadline|date:'j F Y · H:i' }}.</p>{% endif %}
+  </header>
+
+  {% if messages %}{% for message in messages %}<p class="public-message">{{ message }}</p>{% endfor %}{% endif %}
+
+  {% if invite.intro %}<div class="public-invite-intro">{{ invite.intro|linebreaks }}</div>{% endif %}
+
+  {% if program_items %}
+    <section class="public-invite-block">
+      <h2>Programma</h2>
+      <ol class="clean-list public-invite-program">{% for item in program_items %}<li>{% if item.starts_at %}<strong>{{ item.starts_at }}</strong>{% endif %}<span>{{ item.description }}</span></li>{% endfor %}</ol>
+    </section>
+  {% endif %}
+
+  {% if wishlist %}
+    <section class="public-invite-block">
+      <h2>{{ wishlist.title }}</h2>
+      <p class="empty-copy">Op zoek naar een cadeau-idee? Dit staat er op het wenslijstje.</p>
+      <ul class="clean-list public-invite-wishes">{% for item in wish_items %}<li><span>{{ item.title }}</span>{% if item.price %}<small>€ {{ item.price }}</small>{% endif %}{% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noreferrer">Bekijken <i data-lucide="external-link"></i></a>{% endif %}</li>{% empty %}<li class="empty-copy">Het wenslijstje is nog leeg.</li>{% endfor %}</ul>
+      {% if wishlist.share_token %}<a class="button button-secondary" href="{% url 'family:public_wishlist' wishlist.share_token %}">Naar het wenslijstje</a>{% endif %}
+    </section>
+  {% endif %}
+
+  <section class="public-invite-block">
+    <h2>Kom je?</h2>
+    <p class="empty-copy">{% if attending_count %}Er hebben zich al {{ attending_count }} mensen aangemeld.{% else %}Jij kunt de eerste zijn die zich aanmeldt.{% endif %}</p>
+    {% if rsvp_closed %}
+      <p class="public-message">De aanmeldtermijn is verstreken. Neem contact op met de organisator.</p>
+    {% else %}
+      <form method="post" action="{% url 'planning:rsvp_event' invite.share_token %}">
+        {% csrf_token %}
+        <label>Jouw naam<input name="name" required maxlength="160" placeholder="Naam"></label>
+        <fieldset class="public-invite-rsvp"><legend>Kom je?</legend>
+          <label class="check-label"><input type="radio" name="rsvp" value="yes" required>Ja, ik kom</label>
+          <label class="check-label"><input type="radio" name="rsvp" value="maybe">Misschien</label>
+          <label class="check-label"><input type="radio" name="rsvp" value="no">Nee, ik kan niet</label>
+        </fieldset>
+        <label>Met hoeveel personen kom je?<input type="number" name="party_size" value="1" min="1" max="50"></label>
+        {% for question in questions %}
+          {% if question.kind == 'yesno' %}
+            <fieldset class="public-invite-rsvp"><legend>{{ question.label }}{% if question.is_required %} *{% endif %}</legend>
+              <label class="check-label"><input type="radio" name="vraag-{{ question.id }}" value="ja" {% if question.is_required %}required{% endif %}>Ja</label>
+              <label class="check-label"><input type="radio" name="vraag-{{ question.id }}" value="nee">Nee</label>
+            </fieldset>
+          {% elif question.kind == 'number' %}
+            <label>{{ question.label }}{% if question.is_required %} *{% endif %}<input type="number" name="vraag-{{ question.id }}" min="0" {% if question.is_required %}required{% endif %}></label>
+          {% else %}
+            <label>{{ question.label }}{% if question.is_required %} *{% endif %}<input name="vraag-{{ question.id }}" maxlength="2000" {% if question.is_required %}required{% endif %}></label>
+          {% endif %}
+        {% endfor %}
+        <label>Wil je nog iets kwijt?<textarea name="note" rows="2"></textarea></label>
+        <button class="button button-primary" type="submit">Aanmelden</button>
+      </form>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

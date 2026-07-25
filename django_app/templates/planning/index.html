@@ -48,8 +48,64 @@
   {% endif %}
 </section>
 
+<section class="arena-card list-panel">
+  <div class="panel-heading">
+    <div><h2>Uitnodigingen</h2><small>Deel een afspraak als publieke link met programma, eigen vragen, wenslijst en locatie.</small></div>
+    <button class="button button-secondary" type="button" data-open-dialog="venue-dialog"><i data-lucide="map-pin"></i>Locatie toevoegen</button>
+  </div>
+  <ul class="clean-list">
+    {% for event in events %}
+      {% if not event.source or event.source.provider == 'local' %}
+        <li class="invite-row">
+          <div>
+            <strong>{{ event.title }}</strong>
+            <small>{{ event.starts_at|date:'j F H:i' }}{% if event.event_invite.venue %} · {{ event.event_invite.venue.name }}{% endif %}</small>
+            {% if event.event_invite.is_shared %}<span class="arena-badge arena-badge--green">Gedeeld · {{ event.event_invite.guests.all|length }} aanmeldingen</span>{% elif event.event_invite %}<span class="arena-badge">Nog niet gedeeld</span>{% endif %}
+          </div>
+          <button class="button button-secondary" type="button" data-open-dialog="invite-{{ event.id }}"><i data-lucide="mail"></i>Uitnodiging</button>
+        </li>
+      {% endif %}
+    {% empty %}
+      <li class="empty-copy">Geen afspraken in deze periode om een uitnodiging voor te maken.</li>
+    {% endfor %}
+  </ul>
+</section>
+
 {% for event in events %}
   {% if not event.source or event.source.provider == 'local' %}
+    <dialog id="invite-{{ event.id }}" class="modal">
+      <div class="dialog-title"><h2>Uitnodiging · {{ event.title }}</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+      <div class="invite-panel">
+        <form method="post" action="{% url 'planning:toggle_event_share' event.id %}">{% csrf_token %}<button class="button {% if event.event_invite.is_shared %}button-secondary{% else %}button-primary{% endif %}" type="submit"><i data-lucide="{% if event.event_invite.is_shared %}link-2-off{% else %}share-2{% endif %}"></i>{% if event.event_invite.is_shared %}Publieke link uitschakelen{% else %}Publieke link aanzetten{% endif %}</button></form>
+        {% if event.event_invite.public_url %}<p class="invite-share-link"><i data-lucide="link"></i><code>{{ event.event_invite.public_url }}</code><small>Deel deze link bijvoorbeeld via WhatsApp. Iedereen met de link kan zich aanmelden.</small></p>{% endif %}
+
+        <form class="invite-subform" method="post" action="{% url 'planning:update_event_invite' event.id %}">{% csrf_token %}
+          <label>Introductie<textarea name="intro" rows="3">{{ event.event_invite.intro|default:'' }}</textarea></label>
+          <label>Locatie<select name="venue"><option value="">Geen locatie</option>{% for venue in venues %}<option value="{{ venue.id }}" {% if event.event_invite.venue_id == venue.id %}selected{% endif %}>{{ venue.name }}{% if venue.city %} · {{ venue.city }}{% endif %}</option>{% endfor %}</select></label>
+          <label>Wenslijst<select name="wishlist"><option value="">Geen wenslijst</option>{% for wishlist in wishlists %}<option value="{{ wishlist.id }}" {% if event.event_invite.wishlist_id == wishlist.id %}selected{% endif %}>{{ wishlist.title }}{% if not wishlist.is_shared %} (nog niet gedeeld){% endif %}</option>{% endfor %}</select></label>
+          <label>Aanmelden kan tot<input type="datetime-local" name="rsvp_deadline" value="{{ event.event_invite.rsvp_deadline|date:'Y-m-d\TH:i' }}"></label>
+          <small class="empty-copy">Een gekoppelde wenslijst is pas zichtbaar op de uitnodiging als die wenslijst zelf gedeeld is.</small>
+          <button class="button button-primary" type="submit">Uitnodiging opslaan</button>
+        </form>
+
+        <div>
+          <h3>Programma</h3>
+          <ul class="clean-list">{% for item in event.event_invite.program_items.all %}<li class="invite-row"><span>{% if item.starts_at %}<strong>{{ item.starts_at }}</strong> {% endif %}{{ item.description }}</span><form method="post" action="{% url 'planning:delete_event_program_item' item.id %}">{% csrf_token %}<button class="icon-button" title="Programma-onderdeel verwijderen"><i data-lucide="trash-2"></i></button></form></li>{% empty %}<li class="empty-copy">Nog geen programma.</li>{% endfor %}</ul>
+          <form class="invite-subform" method="post" action="{% url 'planning:add_event_program_item' event.id %}">{% csrf_token %}<div class="field-grid"><label>Tijd<input name="starts_at" maxlength="40" placeholder="14:00"></label><label>Omschrijving<input name="description" maxlength="240" required></label><label>Volgorde<input type="number" name="sort_order" value="0" min="0"></label></div><button class="button button-secondary" type="submit">Programma-onderdeel toevoegen</button></form>
+        </div>
+
+        <div>
+          <h3>Vragen aan de gasten</h3>
+          <ul class="clean-list">{% for question in event.event_invite.questions.all %}<li class="invite-row"><span>{{ question.label }} <small>{{ question.get_kind_display }}{% if question.is_required %} · verplicht{% endif %}</small></span><form method="post" action="{% url 'planning:delete_event_question' question.id %}">{% csrf_token %}<button class="icon-button" title="Vraag verwijderen"><i data-lucide="trash-2"></i></button></form></li>{% empty %}<li class="empty-copy">Nog geen vragen.</li>{% endfor %}</ul>
+          <form class="invite-subform" method="post" action="{% url 'planning:add_event_question' event.id %}">{% csrf_token %}<label>Vraag<input name="label" maxlength="200" placeholder="Eet je mee?" required></label><div class="field-grid"><label>Soort antwoord<select name="kind">{% for value, label in question_kinds %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label>Volgorde<input type="number" name="sort_order" value="0" min="0"></label></div><label class="check-label"><input type="checkbox" name="is_required">Verplicht</label><button class="button button-secondary" type="submit">Vraag toevoegen</button></form>
+        </div>
+
+        <div>
+          <h3>Aanmeldingen</h3>
+          <ul class="clean-list">{% for guest in event.event_invite.guests.all %}<li><strong>{{ guest.name }}</strong> <span class="arena-badge {% if guest.rsvp == 'yes' %}arena-badge--green{% elif guest.rsvp == 'no' %}arena-badge--red{% else %}arena-badge--amber{% endif %}">{{ guest.get_rsvp_display }}</span> <small>{{ guest.party_size }} p.</small>{% if guest.note %}<small>{{ guest.note }}</small>{% endif %}{% if guest.answers.all %}<small class="invite-guest-answers">{% for answer in guest.answers.all %}{{ answer.question.label }}: {{ answer.value }}{% if not forloop.last %} · {% endif %}{% endfor %}</small>{% endif %}</li>{% empty %}<li class="empty-copy">Nog niemand aangemeld.</li>{% endfor %}</ul>
+        </div>
+      </div>
+    </dialog>
     <dialog id="event-edit-{{ event.id }}" class="modal">
       <form method="post" action="{% url 'planning:update_event' event.id %}">
         {% csrf_token %}
@@ -69,5 +125,6 @@
 
 <dialog id="event-dialog" class="modal"><form method="post" action="{% url 'planning:add_event' %}">{% csrf_token %}<div class="dialog-title"><h2>Afspraak toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Titel{{ event_form.title }}</label><div class="field-grid"><label>Begint{{ event_form.starts_at }}</label><label>Eindigt{{ event_form.ends_at }}</label></div><label class="check-label">{{ event_form.is_all_day }}Hele dag</label><label>Locatie{{ event_form.location }}</label><label>Wie zijn erbij?{{ event_form.participants }}</label><label>Notitie{{ event_form.notes }}</label><button class="button button-primary">Opslaan</button></form></dialog>
 <dialog id="ics-dialog" class="modal"><div class="dialog-title"><h2>ICS toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><div class="modal-sections"><form method="post" action="{% url 'planning:add_ics_subscription' %}">{% csrf_token %}<h3>Abonnement</h3><label>Naam{{ ics_form.name }}</label><label>ICS-link{{ ics_form.url }}</label><button class="button button-primary">Toevoegen</button></form><form method="post" enctype="multipart/form-data" action="{% url 'planning:import_ics_file' %}">{% csrf_token %}<h3>Bestand importeren</h3><label>Naam{{ ics_file_form.name }}</label><label>ICS-bestand{{ ics_file_form.calendar_file }}</label><button class="button button-secondary">Importeren</button></form></div></dialog>
+<dialog id="venue-dialog" class="modal"><form method="post" action="{% url 'planning:add_event_venue' %}">{% csrf_token %}<div class="dialog-title"><h2>Locatie toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Naam{{ venue_form.name }}</label><label>Adres{{ venue_form.address }}</label><div class="field-grid"><label>Postcode{{ venue_form.postal_code }}</label><label>Plaats{{ venue_form.city }}</label></div><label>Notitie{{ venue_form.notes }}</label><ul class="clean-list">{% for venue in venues %}<li><strong>{{ venue.name }}</strong>{% if venue.full_address %}<small>{{ venue.full_address }}</small>{% endif %}</li>{% empty %}<li class="empty-copy">Nog geen standaardlocaties.</li>{% endfor %}</ul><button class="button button-primary" type="submit">Locatie opslaan</button></form></dialog>
 <dialog id="event-detail-dialog" class="modal event-detail"><form method="dialog"><div class="dialog-title"><h2 data-event-detail-title>Afspraak</h2><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><p data-event-detail-meta></p><p data-event-detail-notes></p><button class="button button-secondary" type="button" data-event-detail-edit hidden><i data-lucide="pencil"></i>Aanpassen</button></form></dialog>
 {% endblock %}

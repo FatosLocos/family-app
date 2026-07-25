@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from common.scoping import HouseholdManager, HouseholdQuerySet
 from households.models import Household
@@ -145,3 +146,124 @@ class IcsSubscription(PlanningRecord):
     url = models.URLField()
     source = models.OneToOneField(CalendarSource, on_delete=models.CASCADE, related_name="ics_subscription")
     last_error = models.TextField(blank=True)
+
+
+class EventVenue(PlanningRecord):
+    """A reusable address the household holds events at ("standaardlocatie").
+
+    home.Room is about rooms inside the house and carries no address, and family.Contact
+    describes a person or organisation rather than a place, so an invitation gets its own
+    light model instead of bending either of those.
+    """
+
+    name = models.CharField(max_length=160)
+    address = models.CharField(max_length=240, blank=True)
+    postal_code = models.CharField(max_length=24, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("name", "id")
+        constraints = [models.UniqueConstraint(fields=("household", "name"), name="unique_event_venue_name_per_household")]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def full_address(self) -> str:
+        return " ".join(part for part in (self.address, self.postal_code, self.city) if part)
+
+
+class EventInvite(PlanningRecord):
+    """The public, shareable invitation that hangs off one calendar event.
+
+    Mirrors family.WishList: is_shared plus an unguessable share_token is the whole public
+    contract. The token is the authorisation (in Python), the Postgres policy only proves
+    containment — two independent layers, exactly like the public wishlist.
+    """
+
+    event = models.OneToOneField(CalendarEvent, on_delete=models.CASCADE, related_name="invite")
+    is_shared = models.BooleanField(default=False)
+    share_token = models.CharField(max_length=48, null=True, blank=True, unique=True)
+    intro = models.TextField(blank=True)
+    # SET_NULL on both: removing a wishlist or a venue must never take the invitation with it.
+    wishlist = models.ForeignKey("family.WishList", null=True, blank=True, on_delete=models.SET_NULL, related_name="event_invites")
+    venue = models.ForeignKey(EventVenue, null=True, blank=True, on_delete=models.SET_NULL, related_name="invites")
+    rsvp_deadline = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Uitnodiging voor {self.event_id}"
+
+    @property
+    def rsvp_closed(self) -> bool:
+        return bool(self.rsvp_deadline and timezone.now() > self.rsvp_deadline)
+
+    @property
+    def attending_count(self) -> int:
+        """Total number of people coming, guests plus the extras they brought along."""
+        return self.guests.filter(rsvp=EventGuest.Rsvp.YES).aggregate(total=models.Sum("party_size"))["total"] or 0
+
+
+class EventProgramItem(PlanningRecord):
+    invite = models.ForeignKey(EventInvite, on_delete=models.CASCADE, related_name="program_items")
+    # Free text rather than a TimeField: an organiser writes "14:00", "rond 15u" or
+    # "na het eten", and none of those has to be a real clock time.
+    starts_at = models.CharField(max_length=40, blank=True)
+    description = models.CharField(max_length=240)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("sort_order", "id")
+
+    def __str__(self):
+        return self.description
+
+
+class EventQuestion(PlanningRecord):
+    class Kind(models.TextChoices):
+        TEXT = "text", "Tekst"
+        YESNO = "yesno", "Ja of nee"
+        NUMBER = "number", "Aantal"
+
+    invite = models.ForeignKey(EventInvite, on_delete=models.CASCADE, related_name="questions")
+    label = models.CharField(max_length=200)
+    kind = models.CharField(max_length=16, choices=Kind.choices, default=Kind.TEXT)
+    is_required = models.BooleanField(default=False)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("sort_order", "id")
+
+    def __str__(self):
+        return self.label
+
+
+class EventGuest(PlanningRecord):
+    """One anonymous RSVP. Written by a visitor without an account, so household is set
+    explicitly from the invitation and never from a request the visitor controls."""
+
+    class Rsvp(models.TextChoices):
+        YES = "yes", "Komt"
+        NO = "no", "Komt niet"
+        MAYBE = "maybe", "Misschien"
+
+    invite = models.ForeignKey(EventInvite, on_delete=models.CASCADE, related_name="guests")
+    name = models.CharField(max_length=160)
+    rsvp = models.CharField(max_length=8, choices=Rsvp.choices, default=Rsvp.YES)
+    party_size = models.PositiveSmallIntegerField(default=1)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("created_at", "id")
+
+    def __str__(self):
+        return self.name
+
+
+class EventAnswer(PlanningRecord):
+    guest = models.ForeignKey(EventGuest, on_delete=models.CASCADE, related_name="answers")
+    question = models.ForeignKey(EventQuestion, on_delete=models.CASCADE, related_name="answers")
+    value = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("question__sort_order", "id")
