@@ -2,7 +2,7 @@ import base64
 import json
 from datetime import timedelta
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 from urllib.parse import parse_qs, urlparse
 from zipfile import ZipFile
 
@@ -29,10 +29,12 @@ from planning.models import CalendarEvent, CalendarSource
 
 
 class FakeResponse:
-    def __init__(self, payload, ok=True):
+    def __init__(self, payload, ok=True, status_code=None):
         self.payload = payload
         self.ok = ok
         self.content = b"{}"
+        self.status_code = status_code if status_code is not None else (200 if ok else 400)
+        self.headers = {}
 
     def json(self):
         return self.payload
@@ -2056,3 +2058,292 @@ class OutlookTodoSyncTests(TestCase):
         self.assertIsNone(task.completed_at)
         self.assertEqual(task.completion_reason, "")
         self.assertFalse(update.called)
+
+
+class OpenClawMailFolderTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="mail-ouder@example.com", email="mail-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Maileerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.outlook = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.OUTLOOK,
+            display_name="Outlook",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        self.imap = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.IMAP,
+            display_name="Privémail",
+            external_account="ouder@voorbeeld.nl",
+            secret_encrypted=encrypt("app-wachtwoord"),
+            settings={"host": "imap.voorbeeld.nl", "port": 993, "use_ssl": True},
+        )
+        # A second token for the same user would revoke the first, so the read-only token
+        # belongs to the other parent in this household.
+        self.reader = User.objects.create_user(username="mail-partner@example.com", email="mail-partner@example.com", password="safe-password-123", display_name="Partner")
+        Membership.objects.create(household=self.household, user=self.reader, role=Membership.Role.PARENT)
+        _, self.token = create_token(self.household, self.user, scopes=["outlook_mail:read", "outlook_mail:write", "imap_mail:read", "imap_mail:write"])
+        _, self.read_token = create_token(self.household, self.reader, scopes=["outlook_mail:read", "imap_mail:read"])
+
+    def _get(self, name, token=None, args=None, **params):
+        return self.client.get(reverse(f"integrations:{name}", args=args or []), params, HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def _post(self, name, payload, token=None, args=None):
+        return self.client.post(
+            reverse(f"integrations:{name}", args=args or []),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self.token}",
+        )
+
+    def _imap_client(self, capabilities=("IMAP4REV1", "MOVE", "UIDPLUS"), list_data=None, found_uid=b"77", message_id="<nieuwsbrief@voorbeeld.nl>"):
+        """A stand-in for imaplib. `capabilities` is what the server reports *after* logging in;
+        client.capabilities keeps the poorer greeting list on purpose, because that is the trap
+        real servers set — imaplib never refreshes it.
+        """
+        client = MagicMock()
+        client.capabilities = ("IMAP4REV1",)
+        client.capability.return_value = ("OK", [" ".join(capabilities).encode()])
+        client.list.return_value = ("OK", list_data if list_data is not None else [b'(\\HasNoChildren) "/" "INBOX"'])
+        client.create.return_value = ("OK", [b"Create completed."])
+        client.subscribe.return_value = ("OK", [b"Subscribe completed."])
+        client.select.return_value = ("OK", [b"3"])
+        client.imap_calls = []
+
+        def uid(command, *args):
+            client.imap_calls.append((command.upper(), *args))
+            if command.upper() == "FETCH":
+                return ("OK", [(b"1 (UID 12 BODY[HEADER.FIELDS (MESSAGE-ID)] {40}", f"Message-ID: {message_id}\r\n\r\n".encode()), b")"])
+            if command.upper() == "SEARCH":
+                return ("OK", [found_uid])
+            return ("OK", [None])
+
+        client.uid.side_effect = uid
+        return client
+
+    def test_outlook_folders_are_listed_across_pages(self):
+        responses = [
+            FakeResponse({"value": [{"id": "map-1", "displayName": "Postvak IN", "parentFolderId": "hoofdmap", "unreadItemCount": 3, "totalItemCount": 12}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=100"}),
+            FakeResponse({"value": [{"id": "map-2", "displayName": "Nieuwsbrieven", "parentFolderId": "hoofdmap", "unreadItemCount": 0, "totalItemCount": 4}]}),
+        ]
+
+        with patch("integrations.providers.requests.request", side_effect=responses) as request:
+            response = self._get("api_openclaw_mail_folders", account="outlook")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["account"], "outlook")
+        self.assertEqual([folder["name"] for folder in payload["folders"]], ["Postvak IN", "Nieuwsbrieven"])
+        self.assertEqual(payload["folders"][0], {"id": "map-1", "name": "Postvak IN", "parent_id": "hoofdmap", "unread": 3, "total": 12})
+        self.assertEqual(request.call_args_list[1].args[1], "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=100")
+
+    def test_outlook_folders_include_the_ones_nested_under_another_folder(self):
+        responses = [
+            FakeResponse({"value": [{"id": "map-1", "displayName": "Archief", "parentFolderId": "hoofdmap", "childFolderCount": 1, "unreadItemCount": 0, "totalItemCount": 2}]}),
+            FakeResponse({"value": [{"id": "map-2", "displayName": "Nieuwsbrieven", "parentFolderId": "map-1", "childFolderCount": 0, "unreadItemCount": 1, "totalItemCount": 5}]}),
+        ]
+
+        with patch("integrations.providers.requests.request", side_effect=responses) as request:
+            response = self._get("api_openclaw_mail_folders", account="outlook")
+
+        self.assertEqual(response.status_code, 200)
+        folders = response.json()["folders"]
+        self.assertEqual([folder["name"] for folder in folders], ["Archief", "Nieuwsbrieven"])
+        self.assertEqual(folders[1]["parent_id"], "map-1")
+        self.assertEqual(request.call_args_list[1].args[1], "https://graph.microsoft.com/v1.0/me/mailFolders/map-1/childFolders")
+
+    def test_imap_folders_are_listed_with_decoded_names_and_hierarchy(self):
+        client = self._imap_client(list_data=[
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasChildren) "/" "Archief"',
+            b'(\\HasNoChildren) "/" "Archief/Caf&AOk-"',
+        ])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_folders", account="ouder@voorbeeld.nl")
+
+        self.assertEqual(response.status_code, 200)
+        folders = response.json()["folders"]
+        self.assertEqual([folder["id"] for folder in folders], ["INBOX", "Archief", "Archief/Café"])
+        self.assertEqual(folders[2]["name"], "Café")
+        self.assertEqual(folders[2]["parent_id"], "Archief")
+        self.assertIsNone(folders[0]["parent_id"])
+        client.logout.assert_called_once_with()
+
+    def test_outlook_folder_is_created_under_its_parent(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"id": "map-9", "displayName": "Nieuwsbrieven", "parentFolderId": "map-1", "unreadItemCount": 0, "totalItemCount": 0})) as request:
+            response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "Nieuwsbrieven", "parent": "map-1"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["folder"]["id"], "map-9")
+        self.assertEqual(request.call_args.args, ("POST", "https://graph.microsoft.com/v1.0/me/mailFolders/map-1/childFolders"))
+        self.assertEqual(request.call_args.kwargs["json"], {"displayName": "Nieuwsbrieven"})
+
+    def test_imap_folder_is_created_under_its_parent(self):
+        client = self._imap_client(list_data=[b'(\\HasChildren) "." "Archief"'])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_create_folder", {"account": "ouder@voorbeeld.nl", "name": "Nieuwsbrieven", "parent": "Archief"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["folder"], {"id": "Archief.Nieuwsbrieven", "name": "Nieuwsbrieven", "parent_id": "Archief", "unread": None, "total": None})
+        client.create.assert_called_once_with('"Archief.Nieuwsbrieven"')
+        client.subscribe.assert_called_once_with('"Archief.Nieuwsbrieven"')
+
+    def test_folder_name_is_required(self):
+        with patch("integrations.providers.requests.request") as request:
+            response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "   "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'name' is verplicht.")
+        self.assertFalse(request.called)
+
+    def test_creating_a_folder_on_an_unknown_account_is_refused(self):
+        response = self._post("api_openclaw_mail_create_folder", {"account": "buurman@voorbeeld.nl", "name": "Nieuwsbrieven"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Onbekend account", response.json()["error"])
+
+    def test_creating_a_folder_needs_a_write_scope(self):
+        response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "Nieuwsbrieven"}, token=self.read_token)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_outlook_message_is_moved_and_reports_its_new_id(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"id": "bericht-nieuw", "parentFolderId": "map-2"})) as request:
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"account": "outlook", "moved": True, "id": "bericht-nieuw", "folder": "map-2"})
+        self.assertEqual(request.call_args.args, ("POST", "https://graph.microsoft.com/v1.0/me/messages/bericht-oud/move"))
+        self.assertEqual(request.call_args.kwargs["json"], {"destinationId": "map-2"})
+
+    def test_imap_move_uses_the_capabilities_the_server_reports_after_logging_in(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"account": "ouder@voorbeeld.nl", "moved": True, "id": "Archief:77", "folder": "Archief"})
+        self.assertNotIn("MOVE", client.capabilities)
+        self.assertEqual(client.select.call_args_list, [call('"INBOX"'), call('"Archief"', readonly=True)])
+        self.assertEqual(client.imap_calls, [
+            ("FETCH", "12", "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"),
+            ("MOVE", "12", '"Archief"'),
+            ("SEARCH", None, "HEADER", "Message-ID", '"<nieuwsbrief@voorbeeld.nl>"'),
+        ])
+        self.assertFalse(client.expunge.called)
+
+    def test_imap_move_falls_back_to_copy_and_a_targeted_uid_expunge(self):
+        client = self._imap_client(capabilities=("IMAP4REV1", "UIDPLUS"))
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "Archief:77")
+        self.assertEqual(client.imap_calls, [
+            ("FETCH", "12", "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"),
+            ("COPY", "12", '"Archief"'),
+            ("STORE", "12", "+FLAGS", "(\\Deleted)"),
+            ("EXPUNGE", "12"),
+            ("SEARCH", None, "HEADER", "Message-ID", '"<nieuwsbrief@voorbeeld.nl>"'),
+        ])
+        self.assertFalse(client.expunge.called)
+
+    def test_imap_move_never_expunges_the_whole_folder_without_uidplus(self):
+        client = self._imap_client(capabilities=("IMAP4REV1",))
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "Archief:77")
+        self.assertFalse(client.expunge.called)
+        self.assertNotIn("EXPUNGE", [call_args[0] for call_args in client.imap_calls])
+
+    def test_imap_move_reports_no_new_id_when_the_message_cannot_be_found_back(self):
+        client = self._imap_client(found_uid=b"")
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["id"])
+        self.assertEqual(response.json()["folder"], "Archief")
+
+    def test_a_message_in_a_nested_imap_folder_can_be_moved_and_read(self):
+        client = self._imap_client()
+        move_url = reverse("integrations:api_openclaw_mail_move", args=["Archief/Nieuwsbrieven:77"])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "INBOX"}, args=["Archief/Nieuwsbrieven:77"])
+
+        self.assertIn("mail/Archief/Nieuwsbrieven:77/verplaatsen/", move_url)
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_any_call('"Archief/Nieuwsbrieven"')
+
+    def test_imap_overview_selects_a_folder_by_its_encoded_name(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_overview", account="ouder@voorbeeld.nl", folder="Privé")
+
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_called_once_with('"Priv&AOk-"', readonly=True)
+        self.assertEqual(client.imap_calls[0], ("SEARCH", None, "UNDELETED"))
+        self.assertEqual(response.json()["messages"][0]["id"], "Privé:77")
+
+    def test_imap_read_selects_a_folder_by_its_encoded_name(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_read", account="ouder@voorbeeld.nl", args=["Privé:77"])
+
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_called_once_with('"Priv&AOk-"', readonly=True)
+
+    def test_moving_a_message_without_a_destination_is_refused(self):
+        with patch("integrations.providers.requests.request") as request:
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": " "}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'destination' is verplicht.")
+        self.assertFalse(request.called)
+
+    def test_moving_a_message_on_an_unknown_account_is_refused(self):
+        response = self._post("api_openclaw_mail_move", {"account": "buurman@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Onbekend account", response.json()["error"])
+
+    def test_moving_a_message_needs_a_write_scope(self):
+        response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, token=self.read_token, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_token_from_another_household_reaches_no_mail_account(self):
+        other_household = Household.objects.create(name="Tweede gezin")
+        other_user = User.objects.create_user(username="buurman@example.com", email="buurman@example.com", password="safe-password-123")
+        Membership.objects.create(household=other_household, user=other_user, role=Membership.Role.PARENT)
+        _, other_token = create_token(other_household, other_user, scopes=["outlook_mail:read", "outlook_mail:write", "imap_mail:read", "imap_mail:write"])
+
+        folders = self._get("api_openclaw_mail_folders", token=other_token, account="ouder@voorbeeld.nl")
+        move = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, token=other_token, args=["INBOX:12"])
+        create = self._post("api_openclaw_mail_create_folder", {"account": "ouder@voorbeeld.nl", "name": "Nieuwsbrieven"}, token=other_token)
+
+        for response in (folders, move, create):
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["error"], "Je hebt geen e-mailaccount gekoppeld in Instellingen.")
+
+    def test_a_provider_failure_is_reported_as_a_readable_error(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"error": {"code": "ErrorAccessDenied", "message": "Toegang geweigerd."}}, ok=False)):
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Toegang geweigerd.")

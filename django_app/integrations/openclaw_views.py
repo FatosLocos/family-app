@@ -30,10 +30,16 @@ from integrations.providers import (
     dropbox_overview,
     dropbox_read_file_text,
     dropbox_search,
+    imap_mail_create_folder,
+    imap_mail_folders,
+    imap_mail_move,
     imap_mail_overview,
     imap_mail_read,
     imap_mail_reply,
     imap_mail_send,
+    outlook_mail_create_folder,
+    outlook_mail_folders,
+    outlook_mail_move,
     outlook_mail_overview,
     outlook_mail_read,
     outlook_mail_reply,
@@ -1032,6 +1038,81 @@ def api_mail_reply(request, message_id):
         return JsonResponse({"error": str(error)}, status=400)
     log_openclaw_action(request.household, action, "E-mail beantwoord", user=request.openclaw_user)
     return JsonResponse({"sent": True, "account": account})
+
+
+@require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
+@require_GET
+def api_mail_folders(request):
+    try:
+        account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_mappen" if is_outlook else "imap_mail_mappen"
+    try:
+        folders = outlook_mail_folders(connection) if is_outlook else imap_mail_folders(connection)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, "Mailmappen opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"Mailmappen opgevraagd ({len(folders)})", user=request.openclaw_user)
+    return JsonResponse({"account": account, "folders": folders})
+
+
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
+@require_POST
+def api_mail_create_folder(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    name = str(payload.get("name") or "").strip()
+    parent = str(payload.get("parent") or "").strip()
+    if not name:
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_map_aanmaken" if is_outlook else "imap_mail_map_aanmaken"
+    try:
+        if is_outlook:
+            folder = outlook_mail_create_folder(connection, name, parent_folder_id=parent or None)
+        else:
+            folder = imap_mail_create_folder(connection, name, parent_folder=parent or None)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, f"Mailmap '{name}' aanmaken mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"Mailmap '{name}' aangemaakt", user=request.openclaw_user)
+    return JsonResponse({"account": account, "folder": folder}, status=201)
+
+
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
+@require_POST
+def api_mail_move(request, message_id):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    destination = str(payload.get("destination") or "").strip()
+    if not destination:
+        return JsonResponse({"error": "Veld 'destination' is verplicht."}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_verplaatsen" if is_outlook else "imap_mail_verplaatsen"
+    try:
+        if is_outlook:
+            moved = outlook_mail_move(connection, message_id, destination)
+        else:
+            moved = imap_mail_move(connection, message_id, destination)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, "E-mail verplaatsen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"E-mail verplaatst naar map '{destination}'", user=request.openclaw_user)
+    return JsonResponse({"account": account, "moved": True, **moved})
 
 
 @require_openclaw_token("outlook_todo:read")

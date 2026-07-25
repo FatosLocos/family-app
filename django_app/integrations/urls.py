@@ -39,8 +39,14 @@ urlpatterns = [
     path("api/openclaw/mail/accounts/", openclaw_views.api_mail_accounts, name="api_openclaw_mail_accounts"),
     path("api/openclaw/mail/", openclaw_views.api_mail_overview, name="api_openclaw_mail_overview"),
     path("api/openclaw/mail/versturen/", openclaw_views.api_mail_send, name="api_openclaw_mail_send"),
-    path("api/openclaw/mail/<str:message_id>/beantwoorden/", openclaw_views.api_mail_reply, name="api_openclaw_mail_reply"),
-    path("api/openclaw/mail/<str:message_id>/", openclaw_views.api_mail_read, name="api_openclaw_mail_read"),
+    path("api/openclaw/mail/mappen/", openclaw_views.api_mail_folders, name="api_openclaw_mail_folders"),
+    path("api/openclaw/mail/mappen/aanmaken/", openclaw_views.api_mail_create_folder, name="api_openclaw_mail_create_folder"),
+    # <path:...>, not <str:...>: an IMAP message id is "map:uid", and a mailbox inside another
+    # one carries the server's hierarchy separator ("Archief/Nieuwsbrieven:77"), which the str
+    # converter refuses. The literal routes above are registered first, so they still win.
+    path("api/openclaw/mail/<path:message_id>/beantwoorden/", openclaw_views.api_mail_reply, name="api_openclaw_mail_reply"),
+    path("api/openclaw/mail/<path:message_id>/verplaatsen/", openclaw_views.api_mail_move, name="api_openclaw_mail_move"),
+    path("api/openclaw/mail/<path:message_id>/", openclaw_views.api_mail_read, name="api_openclaw_mail_read"),
     path("api/openclaw/outlook/todo/lijsten/", openclaw_views.api_outlook_todo_lists, name="api_openclaw_outlook_todo_lists"),
     path("api/openclaw/outlook/todo/<str:list_id>/", openclaw_views.api_outlook_todo_tasks, name="api_openclaw_outlook_todo_tasks"),
     path("api/openclaw/outlook/todo/<str:list_id>/toevoegen/", openclaw_views.api_outlook_todo_add, name="api_openclaw_outlook_todo_add"),
