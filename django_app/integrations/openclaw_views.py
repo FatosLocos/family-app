@@ -581,11 +581,33 @@ def _parse_agenda_bound(value):
     return parsed
 
 
+def _resolve_target_calendar(household, name):
+    """Resolve a calendar name to a source that can really receive events, or raise a Dutch error."""
+    candidates = CalendarSource.receiving(household)
+    name = str(name or "").strip()
+    if not name:
+        # name__icontains="" matches every calendar, so a blank name would silently pick one and
+        # write the appointment into a real mailbox nobody asked for.
+        raise ValueError("Geef de naam van de agenda op waar de afspraak naartoe moet, of laat target_calendar leeg om hem alleen in FamilyApp te houden.")
+    exact = candidates.filter(name__iexact=name).first()
+    if exact:
+        return exact
+    matches = list(candidates.filter(name__icontains=name))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        names = ", ".join(candidates.values_list("name", flat=True))
+        if not names:
+            raise ValueError(f"Geen agenda gevonden met naam '{name}' die afspraken kan ontvangen. Er is nu geen enkele agenda die dat kan; laat de afspraak weg uit een externe agenda of zet het terugsturen aan in de Agenda-tab.")
+        raise ValueError(f"Geen agenda gevonden met naam '{name}' die afspraken kan ontvangen. Deze agenda's kunnen dat wel: {names}. Gebruik agenda_bronnen() om de exacte namen te zien.")
+    raise ValueError(f"Meerdere agenda's komen overeen met '{name}': {', '.join(match.name for match in matches)}. Wees specifieker.")
+
+
 @require_openclaw_token("agenda:read")
 @require_GET
 def api_agenda(request):
     """No date filter by default — the whole calendar is returned unless start/end narrow it."""
-    events = CalendarEvent.objects.for_household(request.household).order_by("starts_at")
+    events = CalendarEvent.objects.for_household(request.household).select_related("target_source").order_by("starts_at")
     start = _parse_agenda_bound(request.GET.get("start"))
     end = _parse_agenda_bound(request.GET.get("end"))
     if start:
@@ -603,6 +625,8 @@ def api_agenda(request):
                 "is_all_day": event.is_all_day,
                 "location": event.location,
                 "notes": event.notes,
+                "target_calendar": event.target_source.name if event.target_source else None,
+                "sync_status": event.sync_status,
             }
             for event in events
         ],
@@ -643,14 +667,31 @@ def api_add_event(request):
     if not form.is_valid():
         log_openclaw_action(request.household, "afspraak_toevoegen", "Afspraak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
         return JsonResponse({"error": "Ongeldige afspraakvelden.", "details": form.errors}, status=400)
+    target = None
+    # Whitespace is no calendar name: an agent passing " " means "no external calendar", the same
+    # as leaving the argument out, and must never be resolved to whichever calendar happens to be
+    # the only one that can receive events.
+    if str(payload.get("target_calendar") or "").strip():
+        try:
+            target = _resolve_target_calendar(request.household, payload["target_calendar"])
+        except ValueError as error:
+            log_openclaw_action(request.household, "afspraak_toevoegen", "Afspraak toevoegen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+            return JsonResponse({"error": str(error)}, status=400)
     event = form.save(commit=False)
     event.household = request.household
     event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+    event.target_source = target
     event.mark_pending()
     event.save()
     form.save_m2m()
     log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
-    return JsonResponse({"id": event.id, "title": event.title, "starts_at": event.starts_at.isoformat()}, status=201)
+    return JsonResponse({
+        "id": event.id,
+        "title": event.title,
+        "starts_at": event.starts_at.isoformat(),
+        "target_calendar": target.name if target else None,
+        "sync_status": event.sync_status,
+    }, status=201)
 
 
 @require_openclaw_token("agenda:write")
@@ -703,6 +744,24 @@ def api_update_event(request, event_id):
         event.notes = str(payload["notes"] or "")
         update_fields.append("notes")
 
+    left_behind_in = None
+    if "target_calendar" in payload:
+        target = None
+        # Whitespace clears the target just like the documented "": resolving it would match every
+        # calendar on name__icontains and could move the appointment into a real mailbox instead.
+        if str(payload["target_calendar"] or "").strip():
+            try:
+                target = _resolve_target_calendar(request.household, payload["target_calendar"])
+            except ValueError as error:
+                log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' bijwerken mislukt", status="error", detail=str(error), user=request.openclaw_user)
+                return JsonResponse({"error": str(error)}, status=400)
+        previous_target = event.target_source
+        if event.retarget(target):
+            # There is no delete-sync, so the copy in the old calendar stays behind; the agent has
+            # to be able to pass that warning on instead of promising the appointment moved.
+            left_behind_in = previous_target.name if previous_target else "de vorige agenda"
+        update_fields.extend(["target_source", "external_id", "abandoned_external_ids", "remote_updated_at"])
+
     if len(update_fields) == 1:
         return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
 
@@ -718,6 +777,9 @@ def api_update_event(request, event_id):
         "is_all_day": event.is_all_day,
         "location": event.location,
         "notes": event.notes,
+        "target_calendar": event.target_source.name if event.target_source else None,
+        "sync_status": event.sync_status,
+        "warning": f"De kopie in {left_behind_in} blijft daar staan; die moet je zelf verwijderen." if left_behind_in else None,
     })
 
 

@@ -2148,6 +2148,13 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
     calendars_response = _request_with_retry("GET", "https://graph.microsoft.com/v1.0/me/calendars?$select=id,name", headers=headers, timeout=20)
     calendars = _safe_response_json(calendars_response, "Outlook").get("value", [])
     start, end = timezone.now() - timedelta(days=14), timezone.now() + timedelta(days=120)
+    # The copies that appointments left behind when they were sent to another calendar. Collected
+    # once instead of per remote event: a first sync of a busy mailbox walks hundreds of events.
+    abandoned_ids = {
+        external_id
+        for ids in CalendarEvent.objects.for_household(connection.household).exclude(abandoned_external_ids=[]).values_list("abandoned_external_ids", flat=True)
+        for external_id in ids
+    }
     total, synced_calendars = 0, 0
     for calendar in calendars:
         calendar_id = calendar.get("id")
@@ -2188,10 +2195,21 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
             for event in payload.get("value", []):
                 if not event.get("id"):
                     continue
-                # Matching on external_id alone (Graph ids are unique) finds a locally created
-                # event that was already pushed to this calendar too — that one keeps its LOCAL
-                # source so it stays editable in the app, and must not be duplicated here.
-                local_event = CalendarEvent.objects.pushable_to(source).filter(external_id=event["id"]).first()
+                # Match on external_id across the whole household first, and only prefer this
+                # calendar's own row when several carry the same id: Graph ids are unique, and a
+                # locally created event that was pushed here keeps its LOCAL source (so it stays
+                # editable in the app) while carrying the Graph id. Matching on
+                # (source, external_id) alone would miss that row and file the appointment a
+                # second time, which is exactly how the user ends up seeing it twice.
+                known = CalendarEvent.objects.for_household(connection.household).filter(external_id=event["id"])
+                local_event = known.filter(source=source).first() or known.first()
+                if local_event is None and event["id"] in abandoned_ids:
+                    # An appointment that was sent to another calendar left this copy behind here:
+                    # there is no delete-sync, so the user was told to delete it in this calendar
+                    # itself. Importing it would show the same appointment twice in FamilyApp, and
+                    # the copy would not even be deletable there because it is not a local event.
+                    total += 1
+                    continue
                 if local_event is None:
                     local_event = CalendarEvent(household=connection.household, source=source, external_id=event["id"])
                 elif local_event.sync_status in {CalendarEvent.SyncStatus.PENDING, CalendarEvent.SyncStatus.ERROR}:

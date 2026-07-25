@@ -2525,12 +2525,13 @@ class OpenClawCalendarSourceTests(TestCase):
 
         response = self.client.post(
             reverse("integrations:api_openclaw_add_event"),
-            data=json.dumps({"title": "Tandarts", "starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat()}),
+            data=json.dumps({"title": "Tandarts", "starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat(), "target_calendar": "Werkagenda"}),
             content_type="application/json",
             HTTP_AUTHORIZATION=f"Bearer {write_token}",
         )
 
         self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["target_calendar"], "Werkagenda")
 
         with patch("integrations.providers.requests.request", side_effect=graph_request):
             sync_pending_events_to_remote()
@@ -2573,6 +2574,165 @@ class OpenClawCalendarSourceTests(TestCase):
         self.assertEqual(response.status_code, 404)
         other_event.refresh_from_db()
         self.assertEqual(other_event.location, "")
+
+    # --- doelagenda per afspraak ------------------------------------------------------
+
+    def _write_token(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        return write_token
+
+    def _add_event(self, payload, token=None):
+        return self.client.post(
+            reverse("integrations:api_openclaw_add_event"),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self._write_token()}",
+        )
+
+    def _update_event(self, event_id, payload, token=None):
+        return self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[event_id]),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self._write_token()}",
+        )
+
+    def _event_payload(self, **overrides):
+        start = timezone.now().replace(second=0, microsecond=0)
+        payload = {"title": "Tandarts", "starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat()}
+        payload.update(overrides)
+        return payload
+
+    def test_an_unknown_target_calendar_names_the_calendars_that_do_work(self):
+        response = self._add_event(self._event_payload(target_calendar="Sportagenda"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Geen agenda gevonden met naam 'Sportagenda'", response.json()["error"])
+        self.assertIn("Werkagenda", response.json()["error"])
+        self.assertFalse(CalendarEvent.objects.for_household(self.household).exists())
+
+    def test_a_calendar_that_cannot_receive_events_is_refused_as_a_target(self):
+        response = self._add_event(self._event_payload(target_calendar="Feestdagen"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Werkagenda", response.json()["error"])
+        self.assertFalse(CalendarEvent.objects.for_household(self.household).exists())
+
+    def test_a_blank_target_calendar_never_picks_a_calendar_by_itself(self):
+        """A name of nothing but spaces matches every calendar on name__icontains, so with one
+        receiving calendar in the household the appointment would land in a real mailbox that the
+        agent never named."""
+        response = self._add_event(self._event_payload(target_calendar="   "))
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.json()["target_calendar"])
+        self.assertIsNone(CalendarEvent.objects.get(household=self.household, title="Tandarts").target_source_id)
+
+    def test_a_blank_target_calendar_clears_the_target_of_an_existing_event(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self._update_event(event.id, {"target_calendar": " "})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["target_calendar"])
+        self.assertIn("Werkagenda", response.json()["warning"])
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+        self.assertEqual(event.abandoned_external_ids, ["graph-event-7"])
+
+    def test_an_event_added_without_a_target_calendar_stays_in_the_app(self):
+        response = self._add_event(self._event_payload())
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.json()["target_calendar"])
+        self.assertIsNone(CalendarEvent.objects.get(household=self.household, title="Tandarts").target_source_id)
+
+    def test_the_agenda_reports_the_target_calendar_and_the_sync_status(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self.client.get(reverse("integrations:api_openclaw_agenda"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual(response.status_code, 200)
+        event = response.json()["events"][0]
+        self.assertEqual(event["target_calendar"], "Werkagenda")
+        self.assertEqual(event["sync_status"], "synced")
+
+    def test_changing_the_target_calendar_queues_the_event_again_and_warns(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        private_source = CalendarSource.objects.create(
+            household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Privéagenda", external_id="calendar-2",
+            connection=self.connection, is_read_only=False, sync_local_events=True,
+        )
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self._update_event(event.id, {"target_calendar": "Privéagenda"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["target_calendar"], "Privéagenda")
+        self.assertEqual(response.json()["sync_status"], "pending")
+        self.assertIn("Werkagenda", response.json()["warning"])
+        event.refresh_from_db()
+        self.assertEqual(event.target_source_id, private_source.pk)
+        self.assertEqual(event.external_id, "")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_clearing_the_target_calendar_keeps_the_event_in_the_app(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self._update_event(event.id, {"target_calendar": ""})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["target_calendar"])
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+
+    def test_an_unknown_target_calendar_leaves_an_existing_event_untouched(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self._update_event(event.id, {"target_calendar": "Sportagenda"})
+
+        self.assertEqual(response.status_code, 400)
+        event.refresh_from_db()
+        self.assertEqual(event.target_source_id, self.work_source.pk)
+        self.assertEqual(event.external_id, "graph-event-7")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+
+    def test_a_token_of_another_household_reaches_neither_the_calendar_nor_the_event(self):
+        other_user = User.objects.create_user(username="buurman@example.com", email="buurman@example.com", password="safe-password-123")
+        Membership.objects.create(household=self.other_household, user=other_user, role=Membership.Role.PARENT)
+        _, other_token = create_token(self.other_household, other_user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, title="Tandarts", starts_at=start, ends_at=start + timedelta(hours=1),
+        )
+
+        added = self._add_event(self._event_payload(target_calendar="Werkagenda"), token=other_token)
+        updated = self._update_event(event.id, {"target_calendar": "Werkagenda"}, token=other_token)
+
+        self.assertEqual(added.status_code, 400)
+        self.assertIn("Geen agenda gevonden met naam 'Werkagenda'", added.json()["error"])
+        self.assertEqual(updated.status_code, 404)
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
 
 
 class OpenClawTravelTests(TestCase):

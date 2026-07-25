@@ -1,7 +1,11 @@
 from datetime import datetime, time, timedelta
+from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from django.test import TestCase
+from django.apps import apps
+from django.db import connection
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -10,6 +14,7 @@ from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
 from integrations.models import IntegrationConnection
+from integrations.providers import sync_outlook
 from planning.models import CalendarEvent, CalendarSource, EventGuest, EventInvite, EventProgramItem, EventQuestion, EventVenue, IcsSubscription
 from planning.ics import parse_ics
 from planning.tasks import sync_ics_subscriptions, sync_pending_events_to_remote
@@ -165,7 +170,8 @@ class OutlookCalendarWriteBackTests(TestCase):
 
     def test_an_event_added_in_the_agenda_tab_is_created_in_outlook(self):
         """The whole point of issue #45: add_event files every new event under the local
-        "Gezinsagenda", so the push task has to pick those up too or nothing ever leaves the app.
+        "Gezinsagenda", so the push task has to reach it through the chosen target calendar or
+        nothing ever leaves the app.
         """
         local_start = timezone.localtime(self.start)
         calls = []
@@ -176,6 +182,7 @@ class OutlookCalendarWriteBackTests(TestCase):
 
         response = self.client.post(reverse("planning:add_event"), {
             "title": "Tandarts", "starts_at": local_start.strftime("%Y-%m-%dT%H:%M"), "ends_at": (local_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+            "target_source": self.source.pk,
         })
 
         self.assertEqual(response.status_code, 302)
@@ -199,7 +206,7 @@ class OutlookCalendarWriteBackTests(TestCase):
         self.source.is_read_only = True
         self.source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
         local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
-        event = CalendarEvent.objects.create(household=self.household, source=local_source, title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1))
+        event = CalendarEvent.objects.create(household=self.household, source=local_source, target_source=self.source, title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1))
 
         with patch("integrations.providers.requests.request") as graph_request:
             sync_pending_events_to_remote()
@@ -210,7 +217,7 @@ class OutlookCalendarWriteBackTests(TestCase):
 
     def test_deleting_a_pushed_event_warns_that_outlook_still_has_it(self):
         local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
-        event = CalendarEvent.objects.create(household=self.household, source=local_source, external_id="graph-event-1", title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED)
+        event = CalendarEvent.objects.create(household=self.household, source=local_source, target_source=self.source, external_id="graph-event-1", title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED)
 
         response = self.client.post(reverse("planning:delete_event", args=[event.pk]), follow=True)
 
@@ -364,7 +371,9 @@ class OutlookCalendarWriteBackTests(TestCase):
         self.assertTrue(self.source.sync_local_events)
         self.assertFalse(self.source.is_read_only)
 
-    def test_only_one_calendar_can_receive_the_write_back(self):
+    def test_more_than_one_calendar_can_receive_the_write_back(self):
+        """Every appointment picks its own target, so switching a second calendar on may not
+        switch the first one off — that would leave the picker with a single option again."""
         second_source = CalendarSource.objects.create(
             household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Privéagenda", external_id="calendar-2",
             connection=self.connection, is_read_only=True, sync_local_events=False,
@@ -372,12 +381,13 @@ class OutlookCalendarWriteBackTests(TestCase):
 
         response = self.client.post(reverse("planning:toggle_source_write_back", args=[second_source.pk]), follow=True)
 
-        self.assertContains(response, "maar één tegelijk")
+        self.assertContains(response, "kan voortaan afspraken ontvangen")
         second_source.refresh_from_db()
         self.source.refresh_from_db()
         self.assertTrue(second_source.sync_local_events)
-        self.assertFalse(self.source.sync_local_events)
-        self.assertTrue(self.source.is_read_only)
+        self.assertTrue(self.source.sync_local_events)
+        self.assertFalse(self.source.is_read_only)
+        self.assertEqual([source.name for source in CalendarSource.receiving(self.household)], ["Privéagenda", "Werkagenda"])
 
     def test_write_back_toggle_is_refused_for_an_ics_source(self):
         ics_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.ICS, name="Feestdagen", is_read_only=True, sync_local_events=False)
@@ -416,6 +426,389 @@ class OutlookCalendarWriteBackTests(TestCase):
 
         self.assertNotContains(response, "Terugsturen aan")
         self.assertContains(response, "Terugsturen wacht op koppeling")
+
+
+class CalendarEventTargetTests(TestCase):
+    """Choosing the calendar one appointment is written back to ("Terugsturen naar")."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(user=self.user, household=self.household, role=Membership.Role.PARENT)
+        self.client.force_login(self.user)
+        self.connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        self.work_source = CalendarSource.objects.create(
+            household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1",
+            connection=self.connection, is_read_only=False, sync_local_events=True,
+        )
+        self.private_source = CalendarSource.objects.create(
+            household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Privéagenda", external_id="calendar-2",
+            connection=self.connection, is_read_only=False, sync_local_events=True,
+        )
+        self.family_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        self.start = timezone.now().replace(second=0, microsecond=0)
+
+    def _local_event(self, **overrides):
+        fields = {"household": self.household, "source": self.family_source, "title": "Tandarts", "starts_at": self.start, "ends_at": self.start + timedelta(hours=1)}
+        fields.update(overrides)
+        return CalendarEvent.objects.create(**fields)
+
+    def _form_data(self, **overrides):
+        local_start = timezone.localtime(self.start)
+        data = {
+            "title": "Tandarts",
+            "starts_at": local_start.strftime("%Y-%m-%dT%H:%M"),
+            "ends_at": (local_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+        }
+        data.update(overrides)
+        return data
+
+    # --- push ----------------------------------------------------------------------
+
+    def test_an_event_is_pushed_to_the_calendar_it_was_addressed_to(self):
+        event = self._local_event(target_source=self.private_source)
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append((method, url))
+            return FakeGraphResponse({"id": "graph-event-42"}, status_code=201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual(calls, [("POST", "https://graph.microsoft.com/v1.0/me/calendars/calendar-2/events")])
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+        self.assertEqual(event.external_id, "graph-event-42")
+        # It stays on the family calendar, so the app keeps letting a parent edit and delete it.
+        self.assertEqual(event.source_id, self.family_source.pk)
+
+    def test_an_event_without_a_target_calendar_never_leaves_the_app(self):
+        event = self._local_event()
+
+        with patch("integrations.providers.requests.request") as graph_request:
+            sync_pending_events_to_remote()
+
+        graph_request.assert_not_called()
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+        self.assertEqual(event.external_id, "")
+
+    def test_a_calendar_that_no_longer_receives_events_is_never_written_to(self):
+        self.private_source.sync_local_events = False
+        self.private_source.save(update_fields=["sync_local_events", "updated_at"])
+        event = self._local_event(target_source=self.private_source)
+
+        with patch("integrations.providers.requests.request") as graph_request:
+            sync_pending_events_to_remote()
+
+        graph_request.assert_not_called()
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_an_event_is_pushed_to_its_target_and_not_to_the_calendar_it_came_from(self):
+        """Both routes of pushable_to apply at once here: without the target winning, the same
+        appointment would be sent to two calendars in one run."""
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.work_source, target_source=self.private_source,
+            title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1),
+        )
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append((method, url))
+            return FakeGraphResponse({"id": "graph-event-43"}, status_code=201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual(calls, [("POST", "https://graph.microsoft.com/v1.0/me/calendars/calendar-2/events")])
+        event.refresh_from_db()
+        self.assertEqual(event.external_id, "graph-event-43")
+
+    def test_a_pushed_event_is_not_duplicated_when_outlook_is_pulled_back_in(self):
+        """The trap issue #45 left open: after the push the event carries the Graph id but keeps
+        its LOCAL source, so a pull that only matched on (source, external_id) filed it a second
+        time and the family saw the appointment twice."""
+        event = self._local_event(target_source=self.work_source)
+
+        def graph_request(method, url, **_kwargs):
+            if method == "POST":
+                return FakeGraphResponse({"id": "graph-event-7"}, status_code=201)
+            if url.endswith("me/calendars?$select=id,name"):
+                return FakeGraphResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}]})
+            return FakeGraphResponse({"value": [{
+                "id": "graph-event-7", "subject": "Tandarts", "start": {"dateTime": "2026-07-13T09:00:00"},
+                "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Praktijk"},
+            }]})
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+            sync_outlook(self.connection)
+
+        self.assertEqual(CalendarEvent.objects.for_household(self.household).count(), 1)
+        event.refresh_from_db()
+        self.assertEqual(event.external_id, "graph-event-7")
+        self.assertEqual(event.target_source_id, self.work_source.pk)
+        self.assertEqual(event.source_id, self.family_source.pk)
+        self.assertEqual(self.work_source.events.count(), 0)
+
+    # --- de doelagenda kiezen en wijzigen -------------------------------------------
+
+    def test_the_agenda_tab_offers_only_calendars_that_can_receive_events(self):
+        self.private_source.is_read_only = True
+        self.private_source.sync_local_events = False
+        self.private_source.save(update_fields=["is_read_only", "sync_local_events", "updated_at"])
+        self._local_event(target_source=self.work_source, sync_status=CalendarEvent.SyncStatus.SYNCED, external_id="graph-event-7")
+
+        response = self.client.get(reverse("planning:index"), {"view": "week", "date": self.start.date().isoformat()})
+
+        self.assertContains(response, "Terugsturen naar")
+        self.assertContains(response, "Alleen in FamilyApp")
+        self.assertContains(response, f'<option value="{self.work_source.pk}"')
+        # The private calendar is still listed as a source, but it may not be offered as a target.
+        self.assertNotContains(response, f'<option value="{self.private_source.pk}"')
+        self.assertContains(response, "Naar Werkagenda · Teruggestuurd")
+
+    def test_an_event_gets_the_target_calendar_chosen_in_the_dialog(self):
+        response = self.client.post(reverse("planning:add_event"), self._form_data(target_source=self.work_source.pk), follow=True)
+
+        self.assertContains(response, "wordt binnen enkele minuten naar Werkagenda teruggestuurd")
+        event = CalendarEvent.objects.get(household=self.household, title="Tandarts")
+        self.assertEqual(event.target_source_id, self.work_source.pk)
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_a_target_calendar_of_another_household_is_refused(self):
+        other_household = Household.objects.create(name="Tweede gezin")
+        other_source = CalendarSource.objects.create(
+            household=other_household, provider=CalendarSource.Provider.OUTLOOK, name="Andermans agenda",
+            external_id="calendar-9", connection=self.connection, is_read_only=False, sync_local_events=True,
+        )
+
+        response = self.client.post(reverse("planning:add_event"), self._form_data(target_source=other_source.pk), follow=True)
+
+        self.assertContains(response, "Controleer de afspraakvelden.")
+        self.assertFalse(CalendarEvent.objects.for_household(self.household).exists())
+
+    def test_changing_the_target_calendar_queues_the_event_again_and_warns(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        response = self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(target_source=self.private_source.pk), follow=True)
+
+        self.assertContains(response, "de kopie in Werkagenda blijft daar staan")
+        event.refresh_from_db()
+        self.assertEqual(event.target_source_id, self.private_source.pk)
+        # A fresh appointment has to be created in the new calendar, so the old id has to go.
+        self.assertEqual(event.external_id, "")
+        self.assertIsNone(event.remote_updated_at)
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_clearing_the_target_calendar_keeps_the_event_inside_the_app(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(target_source=""))
+
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+        self.assertEqual(event.external_id, "")
+
+        with patch("integrations.providers.requests.request") as graph_request:
+            sync_pending_events_to_remote()
+
+        graph_request.assert_not_called()
+
+    def test_editing_an_event_without_touching_its_target_keeps_the_remote_copy_linked(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(title="Tandarts verzet", target_source=self.work_source.pk))
+
+        event.refresh_from_db()
+        self.assertEqual(event.title, "Tandarts verzet")
+        self.assertEqual(event.external_id, "graph-event-7")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_a_target_that_stopped_receiving_stays_selectable_in_the_dialog(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+        self.work_source.sync_local_events = False
+        self.work_source.is_read_only = True
+        self.work_source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
+
+        response = self.client.get(reverse("planning:index"), {"view": "week", "date": self.start.date().isoformat()})
+        self.assertContains(response, "ontvangt nu niets")
+
+        self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(title="Tandarts verzet", target_source=self.work_source.pk))
+
+        event.refresh_from_db()
+        self.assertEqual(event.target_source_id, self.work_source.pk)
+        self.assertEqual(event.external_id, "graph-event-7")
+
+    def test_a_failed_push_is_shown_on_the_appointment(self):
+        self._local_event(target_source=self.work_source, sync_status=CalendarEvent.SyncStatus.ERROR, last_sync_error="Access is denied.")
+
+        response = self.client.get(reverse("planning:index"), {"view": "week", "date": self.start.date().isoformat()})
+
+        self.assertContains(response, "Naar Werkagenda · Terugsturen mislukt")
+        self.assertContains(response, "Access is denied.")
+
+    # --- de kopie die in de oude agenda achterblijft --------------------------------
+
+    def _graph_calendars(self):
+        return FakeGraphResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}, {"id": "calendar-2", "name": "Privéagenda"}]})
+
+    def _graph_view(self, external_id):
+        return FakeGraphResponse({"value": [{
+            "id": external_id, "subject": "Tandarts", "start": {"dateTime": "2026-07-13T09:00:00"},
+            "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Praktijk"},
+        }]})
+
+    def test_the_copy_left_behind_by_a_retarget_is_not_imported_as_a_second_appointment(self):
+        """Retargeting drops external_id, so the copy in the old calendar is no longer recognised
+        by its id: without abandoned_external_ids the next pull files it as a second appointment
+        that the family cannot even delete, because an Outlook event is read-only in the app."""
+        event = self._local_event(target_source=self.work_source)
+        created = iter(["graph-work-7", "graph-prive-9"])
+
+        def graph_request(method, url, **_kwargs):
+            if method == "POST":
+                return FakeGraphResponse({"id": next(created)}, status_code=201)
+            if url.endswith("me/calendars?$select=id,name"):
+                return self._graph_calendars()
+            return self._graph_view("graph-work-7" if "calendar-1" in url else "graph-prive-9")
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+            self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(target_source=self.private_source.pk))
+            sync_pending_events_to_remote()
+            sync_outlook(self.connection)
+
+        event.refresh_from_db()
+        self.assertEqual(event.external_id, "graph-prive-9")
+        self.assertEqual(event.abandoned_external_ids, ["graph-work-7"])
+        self.assertEqual(CalendarEvent.objects.for_household(self.household).count(), 1)
+
+    def test_the_copy_left_behind_when_the_target_is_cleared_stays_out_of_the_app(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-work-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        def graph_request(method, url, **_kwargs):
+            if url.endswith("me/calendars?$select=id,name"):
+                return self._graph_calendars()
+            return self._graph_view("graph-work-7") if "calendar-1" in url else FakeGraphResponse({"value": []})
+
+        self.client.post(reverse("planning:update_event", args=[event.pk]), self._form_data(target_source=""))
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_outlook(self.connection)
+
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+        self.assertEqual(event.abandoned_external_ids, ["graph-work-7"])
+        self.assertEqual(CalendarEvent.objects.for_household(self.household).count(), 1)
+
+    def test_a_retarget_during_a_push_is_not_overwritten_by_the_result_of_that_push(self):
+        """The push spends an HTTP call outside the database. Storing its result on the object it
+        started with would put the id of the copy in the old calendar back and mark the
+        appointment synced, while the calendar the user just picked never receives anything."""
+        event = self._local_event(target_source=self.work_source)
+
+        def graph_request(method, url, **_kwargs):
+            # The parent picks another calendar while Graph is still creating the appointment.
+            CalendarEvent.objects.filter(pk=event.pk).update(
+                target_source=self.private_source, external_id="", remote_updated_at=None, sync_status=CalendarEvent.SyncStatus.PENDING
+            )
+            return FakeGraphResponse({"id": "graph-work-7"}, status_code=201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        event.refresh_from_db()
+        self.assertEqual(event.target_source_id, self.private_source.pk)
+        self.assertEqual(event.external_id, "")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+        # The copy that push did create in the old calendar is remembered, or the next pull would
+        # import an appointment nobody in FamilyApp knows about.
+        self.assertEqual(event.abandoned_external_ids, ["graph-work-7"])
+
+    def test_removing_a_calendar_keeps_the_appointments_that_pointed_at_it_inside_the_app(self):
+        event = self._local_event(target_source=self.work_source, external_id="graph-work-7", sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        response = self.client.post(reverse("planning:remove_source", args=[self.work_source.pk]), follow=True)
+
+        self.assertContains(response, "Eén afspraak stond ook in Werkagenda")
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+        self.assertEqual(event.external_id, "")
+        self.assertEqual(event.abandoned_external_ids, ["graph-work-7"])
+
+    # --- cross-household -------------------------------------------------------------
+
+    def test_an_appointment_of_another_household_cannot_be_retargeted_or_deleted(self):
+        other_household = Household.objects.create(name="Tweede gezin")
+        other_event = CalendarEvent.objects.create(household=other_household, title="Andermans afspraak", starts_at=self.start, ends_at=self.start + timedelta(hours=1))
+
+        update = self.client.post(reverse("planning:update_event", args=[other_event.pk]), self._form_data(target_source=self.work_source.pk))
+        delete = self.client.post(reverse("planning:delete_event", args=[other_event.pk]))
+
+        self.assertEqual(update.status_code, 404)
+        self.assertEqual(delete.status_code, 404)
+        other_event.refresh_from_db()
+        self.assertIsNone(other_event.target_source_id)
+        self.assertEqual(other_event.title, "Andermans afspraak")
+
+
+class CalendarEventTargetBackfillTests(TransactionTestCase):
+    """Migration 0013, run against real rows.
+
+    A TransactionTestCase because the backfill lifts FORCE ROW LEVEL SECURITY, and PostgreSQL
+    refuses to ALTER a table that still has pending trigger events inside an open transaction.
+    """
+
+    def test_the_backfill_hands_existing_events_the_calendar_they_were_already_pushed_to(self):
+        """Before the target calendar became a per-event choice every local event went to the one
+        calendar that had write-back switched on. Without this backfill those events keep an empty
+        target: the push task no longer finds them and the pull skips them because they are
+        pending, so they freeze in both directions without ever saying so."""
+        migration = import_module("planning.migrations.0013_backfill_calendarevent_target_source")
+        user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        household = Household.objects.create(name="Eerste gezin")
+        connection_row = IntegrationConnection.objects.create(
+            household=household, user=user, provider="outlook", display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        work_source = CalendarSource.objects.create(
+            household=household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1",
+            connection=connection_row, is_read_only=False, sync_local_events=True,
+        )
+        # Switched off, so it never received anything and may not collect the events either.
+        CalendarSource.objects.create(
+            household=household, provider=CalendarSource.Provider.OUTLOOK, name="Privéagenda", external_id="calendar-2",
+            connection=connection_row, is_read_only=True, sync_local_events=False,
+        )
+        family_source = CalendarSource.objects.create(household=household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        start = timezone.now().replace(second=0, microsecond=0)
+        legacy = CalendarEvent.objects.create(
+            household=household, source=family_source, external_id="graph-work-7", title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+        pulled = CalendarEvent.objects.create(
+            household=household, source=work_source, external_id="graph-work-8", title="Overleg",
+            starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        migration.backfill_target_source(apps, SimpleNamespace(connection=connection))
+
+        legacy.refresh_from_db()
+        pulled.refresh_from_db()
+        self.assertEqual(legacy.target_source_id, work_source.pk)
+        # An event that came out of an external calendar already reaches that calendar through the
+        # second route of pushable_to, so it keeps its empty target.
+        self.assertIsNone(pulled.target_source_id)
 
 
 class EventInviteTests(TestCase):

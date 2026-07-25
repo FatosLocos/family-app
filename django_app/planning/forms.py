@@ -1,10 +1,15 @@
 from django import forms
 
 from family.models import WishList
-from planning.models import CalendarEvent, EventInvite, EventProgramItem, EventQuestion, EventVenue, IcsSubscription
+from planning.models import CalendarEvent, CalendarSource, EventInvite, EventProgramItem, EventQuestion, EventVenue, IcsSubscription
 
 
 class CalendarEventForm(forms.ModelForm):
+    # Declared outside Meta.fields on purpose: changing the target calendar has consequences for
+    # external_id that only the view knows how to explain, so CalendarEvent.retarget makes that
+    # move instead of letting the form write the field silently.
+    target_source = forms.ModelChoiceField(queryset=CalendarSource.objects.none(), required=False, empty_label="Alleen in FamilyApp")
+
     class Meta:
         model = CalendarEvent
         fields = ("title", "starts_at", "ends_at", "is_all_day", "location", "notes", "participants")
@@ -13,6 +18,18 @@ class CalendarEventForm(forms.ModelForm):
             "ends_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             "notes": forms.Textarea(attrs={"rows": 2}),
         }
+
+    def __init__(self, *args, household=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if household is not None:
+            allowed = list(CalendarSource.receiving(household).values_list("pk", flat=True))
+            if self.instance.target_source_id and self.instance.target_source_id not in allowed:
+                # A target that was switched off in the meantime stays selectable: dropping it
+                # here would silently orphan the copy that calendar already has.
+                allowed.append(self.instance.target_source_id)
+            self.fields["target_source"].queryset = CalendarSource.objects.for_household(household).filter(pk__in=allowed).order_by("name", "pk")
+        if self.instance.pk:
+            self.fields["target_source"].initial = self.instance.target_source_id
 
 
 class IcsSubscriptionForm(forms.ModelForm):
