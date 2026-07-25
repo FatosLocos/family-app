@@ -10,7 +10,7 @@ from django.views.decorators.http import require_POST
 from households.decorators import owner_required, parent_required
 from households.forms import InviteForm, ChildProfileForm
 from households.models import HouseholdInvite, Membership, ChildProfile
-from households.code_utils import hash_invite_code, verify_invite_code
+from households.code_utils import hash_invite_code
 
 
 def _open_invite(code):

@@ -1175,7 +1175,6 @@ def sync_google_home(connection: IntegrationConnection) -> dict:
         resource_name = str(device["name"])
         device_id = resource_name.rsplit("/", 1)[-1]
         traits = device.get("traits") if isinstance(device.get("traits"), dict) else {}
-        info = traits.get("sdm.devices.traits.Info", {}) if isinstance(traits.get("sdm.devices.traits.Info"), dict) else {}
         is_climate = any(key in traits for key in ("sdm.devices.traits.Temperature", "sdm.devices.traits.ThermostatTemperatureSetpoint", "sdm.devices.traits.ThermostatMode"))
         entity_id = f"google_home.{connection.id}.{device_id}"
         entity, _ = HomeEntity.objects.update_or_create(

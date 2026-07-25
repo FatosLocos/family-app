@@ -21,7 +21,7 @@ from identity.forms import ProfileForm
 from integrations.forms import BunqConfigForm, DropboxConfigForm, GoogleHomeConfigForm, HomeConnectConfigForm, HueConfigForm, ImapConfigForm, LgThinQConfigForm, OutlookConfigForm, SmartcarConfigForm, SonosConfigForm, SpotifyConfigForm
 from integrations.audit import log_integration_event
 from integrations.data_export import household_export
-from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawActionLog, OpenClawNotificationPreference, OpenClawToken, SyncRun
+from integrations.models import IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, OpenClawActionLog, OpenClawNotificationPreference, OpenClawToken, SyncRun
 from integrations.local_probe import ProbeError, _discovery_identity, create_pairing, expire_stale_probes, pair_probe, revoke_probe, send_probe_system_command
 from integrations.openclaw_api import ALL_SCOPES, NOTIFICATION_CATEGORIES, SCOPE_LABELS
 from planning.models import CalendarSource

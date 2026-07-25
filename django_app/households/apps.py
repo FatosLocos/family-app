@@ -6,4 +6,6 @@ class HouseholdsConfig(AppConfig):
     name = "households"
 
     def ready(self):
-        import households.signals
+        # Import puur om het neveneffect: households.signals registreert de
+        # signal-handlers. Weghalen laat de registratie stil wegvallen.
+        import households.signals  # noqa: F401

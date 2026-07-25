@@ -1,5 +1,4 @@
 """Google Home event cache to reduce polling frequency."""
-from datetime import timedelta
 from django.core.cache import cache
 from django.utils import timezone
 

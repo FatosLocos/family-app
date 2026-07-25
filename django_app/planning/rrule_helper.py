@@ -1,7 +1,6 @@
 """Helper for expanding recurring events using RRULE."""
 from datetime import datetime, timedelta
 from typing import Generator
-import re
 
 
 def expand_rrule_dates(rrule_string: str, start_date: datetime, num_occurrences: int = 52) -> Generator[datetime, None, None]:

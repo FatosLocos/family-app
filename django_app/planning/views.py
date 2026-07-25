@@ -14,7 +14,7 @@ from family.models import WishItem, WishList
 from households.decorators import household_required, parent_required
 from planning.forms import CalendarEventForm, EventInviteForm, EventProgramItemForm, EventQuestionForm, EventVenueForm, IcsFileForm, IcsSubscriptionForm
 from planning.ics import parse_ics
-from planning.models import CalendarEvent, CalendarSource, EventGuest, EventInvite, EventProgramItem, EventQuestion, EventVenue, IcsSubscription
+from planning.models import CalendarEvent, CalendarSource, EventGuest, EventInvite, EventProgramItem, EventQuestion, EventVenue
 
 
 def calendar_range(anchor, view):
