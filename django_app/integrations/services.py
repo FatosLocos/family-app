@@ -13,7 +13,12 @@ from django.utils import timezone
 from integrations.crypto import decrypt, encrypt
 from integrations.models import IntegrationAppConfig, IntegrationConnection
 
-OUTLOOK_SCOPES = "offline_access User.Read Calendars.Read Mail.Read Mail.Send Tasks.ReadWrite"
+# Mail.ReadWrite (instead of Mail.Read) is what lets FamilyApp create mail folders and move a
+# message into one; Microsoft Graph refuses both with a read-only mail scope. Calendars.ReadWrite
+# (instead of Calendars.Read) is what lets a linked calendar receive locally created events.
+# Connections authorised before these widened scopes keep their old, narrower consent until the
+# household member signs in with Outlook again.
+OUTLOOK_SCOPES = "offline_access User.Read Calendars.ReadWrite Mail.ReadWrite Mail.Send Tasks.ReadWrite"
 HUE_OAUTH_AUTHORIZE_URL = "https://api.meethue.com/v2/oauth2/authorize"
 HUE_OAUTH_TOKEN_URL = "https://api.meethue.com/v2/oauth2/token"
 SONOS_OAUTH_AUTHORIZE_URL = "https://api.sonos.com/login/v3/oauth"

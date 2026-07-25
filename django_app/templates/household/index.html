@@ -39,7 +39,7 @@
     {% for group in task_groups %}
       <section class="arena-card task-list-group{% if not group.list %} is-unlisted{% endif %}">
         <div class="task-list-group-header">
-          <h3>{{ group.list.name|default:'Zonder lijst' }}{% if group.list.sync_link %} <span class="arena-badge arena-badge--green" title="Gesynchroniseerd met Microsoft To Do">Gesynced</span>{% endif %}</h3>
+          <h3>{{ group.list.name|default:'Zonder lijst' }}{% if group.list.sync_link %} <span class="arena-badge arena-badge--green" title="Gesynchroniseerd met Microsoft To Do">Gesynced</span>{% endif %}{% if group.list.trip %} <a class="arena-badge arena-badge--accent" href="{% url 'travel:index' %}" title="Hoort bij de reis naar {{ group.list.trip.destination }}">Reis</a>{% endif %}</h3>
           {% if group.list %}<button class="icon-button{% if group.list.sync_link %} is-active{% endif %}" type="button" data-open-dialog="tasklist-sync-{{ group.list.id }}" title="Koppelen met Microsoft To Do" aria-label="{{ group.list.name }} koppelen met Microsoft To Do"><i data-lucide="refresh-cw"></i></button><button class="icon-button destructive" type="button" data-open-dialog="tasklist-delete-{{ group.list.id }}" title="Lijstje verwijderen" aria-label="{{ group.list.name }} verwijderen"><i data-lucide="trash-2"></i></button>{% endif %}
         </div>
         <ul class="task-list task-drop-zone" data-task-drop-zone data-list-id="{{ group.list.id|default:'' }}">
@@ -62,6 +62,20 @@
         <label>Notitie<textarea name="notes" rows="2">{{ task.notes }}</textarea></label>
         <button class="button button-primary" type="submit">Opslaan</button>
       </form>
+      {% if task.completed_at and task.completion_reason %}<p class="modal-inline-section task-completion-reason"><strong>Afgerond:</strong> {{ task.completion_reason }} · {{ task.completed_at|date:'D j M H:i' }}</p>{% endif %}
+      <div class="modal-inline-section task-timeline">
+        <h3>Tijdlijn</h3>
+        {% for note in task.timeline_notes.all %}
+          <p class="task-timeline-note"><small>{{ note.created_at|date:'D j M H:i' }} · {% if note.created_by_agent %}OpenClaw{% elif note.author %}{{ note.author }}{% else %}Onbekend{% endif %}</small>{{ note.text }}</p>
+        {% empty %}
+          <p class="empty-copy">Nog geen aantekeningen bij deze taak.</p>
+        {% endfor %}
+        <form method="post" action="{% url 'household:add_task_note' task.id %}">
+          {% csrf_token %}
+          <label>Notitie toevoegen<textarea name="text" rows="2" placeholder="Bijv. gebeld met de school, wachten op antwoord…" required></textarea></label>
+          <button class="button button-secondary" type="submit"><i data-lucide="message-square-plus"></i>Toevoegen aan tijdlijn</button>
+        </form>
+      </div>
       <form class="dialog-danger-form" method="post" action="{% url 'household:delete_task' task.id %}">{% csrf_token %}<button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Taak verwijderen</button></form>
     </dialog>
     <dialog id="task-complete-{{ task.id }}" class="modal">
@@ -79,6 +93,7 @@
         {% csrf_token %}
         <div class="dialog-title"><h2>Lijstje verwijderen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
         <p>De taken in "{{ task_list.name }}" worden niet verwijderd, maar verplaatst naar Zonder lijst.</p>
+        {% if task_list.trip %}<p class="form-hint">Let op: dit lijstje hoort bij de reis naar {{ task_list.trip.destination }}. Die reis blijft bestaan, maar raakt haar takenlijst kwijt — in Reizen kun je er dan een nieuwe aan koppelen.</p>{% endif %}
         <button class="button button-danger" type="submit"><i data-lucide="trash-2"></i>Lijstje verwijderen</button>
       </form>
     </dialog>

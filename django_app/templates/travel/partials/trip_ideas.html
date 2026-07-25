@@ -1,0 +1,12 @@
+<h3>{{ trip.destination }} <button class="icon-button" type="button" data-open-dialog="trip-idea-{{ trip.id }}" title="Idee toevoegen" aria-label="Idee toevoegen aan {{ trip.destination }}"><i data-lucide="lightbulb"></i></button></h3>
+<ul class="clean-list">
+  {% for idea in trip.ideas.all %}
+    <li>
+      <i data-lucide="lightbulb"></i>
+      <div><strong>{{ idea.text }}</strong><small>{{ idea.created_at|date:'d M H:i' }} · {% if idea.created_by_agent %}OpenClaw{% elif idea.author %}{{ idea.author }}{% else %}Onbekend{% endif %}</small></div>
+      <form method="post" action="{% url 'travel:delete_idea' idea.id %}">{% csrf_token %}<button class="icon-button destructive" type="submit" title="Idee verwijderen" aria-label="Idee verwijderen"><i data-lucide="trash-2"></i></button></form>
+    </li>
+  {% empty %}
+    <li class="empty-copy">Nog geen ideeën bij deze reis.</li>
+  {% endfor %}
+</ul>

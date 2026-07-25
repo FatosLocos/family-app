@@ -1,8 +1,8 @@
 import base64
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 from urllib.parse import parse_qs, urlparse
 from zipfile import ZipFile
 
@@ -12,26 +12,32 @@ from django.utils import timezone
 
 from finance.models import BankAccount, Transaction
 from home.models import HomeActionAudit, HomeEntity
-from household.models import Task
+from household.models import TASK_NOTE_MAX_LENGTH, Task, TaskList, TaskListSync, TaskNote
 from households.models import Household, Membership
 from identity.models import User
 from integrations.crypto import encrypt
 from integrations.home_connect_events import listen_home_connect_events_once, parse_sse_events
 from integrations.local_probe import ProbeError, apply_discovery, apply_inventory, authenticate_probe, create_pairing, expire_stale_probes, mark_probe_offline, mark_probe_seen, pair_probe, record_probe_command_result, revoke_probe, send_probe_command, send_probe_system_command
+from integrations.openclaw_api import create_token
 from integrations.models import IntegrationAppConfig, IntegrationAudit, IntegrationConnection, LocalDiscovery, LocalProbe, SyncRun
-from integrations.providers import HueProviderError, ProviderError, _home_connect_appliance_meta, _home_connect_display_name, _home_connect_label, _home_connect_program_forecasts, _home_connect_start_status, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, google_home_thermostat_attributes, start_google_home_live_stream, sync_bunq, sync_google_home, sync_home_connect, sync_hue, sync_lg_thinq, sync_outlook, sync_smartcar, sync_sonos, sync_spotify
+from integrations.providers import HueProviderError, ProviderError, _home_connect_appliance_meta, _home_connect_display_name, _home_connect_label, _home_connect_program_forecasts, _home_connect_start_status, _hue_hex_from_xy, _hue_optional_resource, _hue_supports_color, _hue_xy_from_hex, arm_hue_bridge_link, control_connected_home_entity, control_hue_light, finish_hue_bridge_link, google_home_thermostat_attributes, start_google_home_live_stream, sync_bunq, sync_google_home, sync_home_connect, sync_hue, sync_lg_thinq, sync_outlook, sync_smartcar, sync_sonos, sync_spotify, sync_task_list_link
 from integrations.services import get_sonos_event_callback_token, save_app_config, save_sonos_config
 from integrations.sonos_events import sonos_event_signature
 from integrations.tasks import sync_active_connections, sync_connection_task, sync_home_connect_connections
 from notifications.models import Notification
-from planning.models import CalendarEvent, CalendarSource
+from planning.models import CalendarEvent, CalendarSource, EventAnswer, EventGuest, EventInvite, EventQuestion
+from planning.tasks import sync_pending_events_to_remote
+from travel.models import Trip, TripDocument, TripIdea, TripStop
+from travel.services import ensure_trip_task_list
 
 
 class FakeResponse:
-    def __init__(self, payload, ok=True):
+    def __init__(self, payload, ok=True, status_code=None):
         self.payload = payload
         self.ok = ok
         self.content = b"{}"
+        self.status_code = status_code if status_code is not None else (200 if ok else 400)
+        self.headers = {}
 
     def json(self):
         return self.payload
@@ -1241,12 +1247,14 @@ class ProviderSyncTests(TestCase):
             settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
         )
 
-        def outlook_get(url, **_kwargs):
+        # sync_outlook goes through _request_with_retry, which calls requests.request - patching
+        # requests.get here used to let the call escape to the real Graph endpoint.
+        def outlook_request(_method, url, **_kwargs):
             if url.endswith("me/calendars?$select=id,name"):
                 return FakeResponse({"value": [{"id": "calendar-1", "name": "Gezin"}]})
-            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}, "body": {"contentType": "text", "content": "Meenemen: sporttas"}}]})
 
-        with patch("integrations.providers.requests.get", side_effect=outlook_get):
+        with patch("integrations.providers.requests.request", side_effect=outlook_request):
             result = sync_outlook(connection)
 
         self.assertEqual(result, {"calendars": 1, "events": 1})
@@ -1255,6 +1263,85 @@ class ProviderSyncTests(TestCase):
         self.assertEqual(source.name, "Gezin")
         self.assertTrue(timezone.is_aware(event.starts_at))
         self.assertEqual(event.location, "Hal")
+        # Writable, linked to the connection that produced it, but not pushing anything yet.
+        self.assertFalse(source.is_read_only)
+        self.assertFalse(source.sync_local_events)
+        self.assertEqual(source.connection_id, connection.pk)
+        # A freshly pulled event must never look like an unsent local change.
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+        self.assertIsNotNone(event.remote_updated_at)
+        self.assertEqual(event.notes, "Meenemen: sporttas")
+
+    def _outlook_calendar_connection(self):
+        return IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+
+    def _outlook_calendar_pull(self):
+        def outlook_request(_method, url, **_kwargs):
+            if url.endswith("me/calendars?$select=id,name"):
+                return FakeResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}, "body": {"contentType": "text", "content": "Van Outlook"}}]})
+
+        return outlook_request
+
+    def test_outlook_sync_never_duplicates_or_overwrites_a_locally_created_event(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection, is_read_only=False, sync_local_events=True)
+        local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        start = timezone.now()
+        # This is what a local event looks like right after the push task created it in Outlook:
+        # it keeps the family calendar as its source but carries the Graph id.
+        pushed = CalendarEvent.objects.create(household=self.household, source=local_source, external_id="event-1", title="Tandarts", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.PENDING, notes="Halfjaarlijkse controle")
+
+        with patch("integrations.providers.requests.request", side_effect=self._outlook_calendar_pull()):
+            sync_outlook(connection)
+
+        self.assertEqual(CalendarEvent.objects.filter(household=self.household, external_id="event-1").count(), 1)
+        pushed.refresh_from_db()
+        # The edit has not been sent yet, so the pull may not throw it away either.
+        self.assertEqual(pushed.title, "Tandarts")
+        self.assertEqual(pushed.notes, "Halfjaarlijkse controle")
+        self.assertEqual(pushed.sync_status, CalendarEvent.SyncStatus.PENDING)
+        self.assertEqual(pushed.source_id, local_source.pk)
+        self.assertEqual(source.events.count(), 0)
+
+    def test_outlook_sync_keeps_a_failed_push_visible_instead_of_clearing_it(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection, is_read_only=False, sync_local_events=True)
+        start = timezone.now()
+        event = CalendarEvent.objects.create(household=self.household, source=source, external_id="event-1", title="Teamoverleg", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.ERROR, last_sync_error="Access is denied.")
+
+        with patch("integrations.providers.requests.request", side_effect=self._outlook_calendar_pull()):
+            sync_outlook(connection)
+
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.ERROR)
+        self.assertEqual(event.last_sync_error, "Access is denied.")
+        self.assertEqual(event.title, "Teamoverleg")
+
+    def test_outlook_sync_skips_a_remote_event_that_is_older_than_the_last_sync(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection)
+        start = timezone.now()
+        event = CalendarEvent.objects.create(household=self.household, source=source, external_id="event-1", title="Al bijgewerkt", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED, remote_updated_at=timezone.now())
+
+        def outlook_request(_method, url, **_kwargs):
+            if url.endswith("me/calendars?$select=id,name"):
+                return FakeResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "lastModifiedDateTime": "2020-01-01T10:00:00Z"}]})
+
+        with patch("integrations.providers.requests.request", side_effect=outlook_request):
+            result = sync_outlook(connection)
+
+        self.assertEqual(result, {"calendars": 1, "events": 1})
+        event.refresh_from_db()
+        self.assertEqual(event.title, "Al bijgewerkt")
 
     def test_bunq_sync_falls_back_to_user_endpoint_and_discovers_multiple_accounts(self):
         connection = IntegrationConnection.objects.create(
@@ -1884,7 +1971,858 @@ class HouseholdDataExportTests(TestCase):
         self.assertNotIn("gevoelig-token", response.content.decode())
         self.assertNotIn("secret_encrypted", response.content.decode())
 
+    def test_export_contains_the_task_note_timeline(self):
+        task = Task.objects.get(household=self.household, title="Eigen taak")
+        TaskNote.objects.create(household=self.household, task=task, author=self.owner, text="Gebeld met de gemeente.")
+        TaskNote.objects.create(household=self.other_household, task=Task.objects.get(household=self.other_household, title="Andere taak"), text="Van de buren.")
+        self.client.force_login(self.owner)
+
+        payload = json.loads(self.client.get(reverse("integrations:export_household_data")).content)
+
+        notes = payload["household_data"]["task_notes"]
+        self.assertEqual([note["text"] for note in notes], ["Gebeld met de gemeente."])
+        self.assertEqual(notes[0]["task__title"], "Eigen taak")
+
     def test_child_cannot_export_household_data(self):
         self.client.force_login(self.child)
 
         self.assertEqual(self.client.get(reverse("integrations:export_household_data")).status_code, 403)
+
+
+class OpenClawTaskTimelineTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        self.task = Task.objects.create(household=self.household, title="Rijbewijs verlengen")
+        self.other_task = Task.objects.create(household=self.other_household, title="Taak van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["vandaag:read", "taken:write"])
+
+    def _get(self, name, token=None, **params):
+        return self.client.get(reverse(f"integrations:{name}"), params, HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def test_all_tasks_exposes_the_note_timeline_and_completion_reason(self):
+        TaskNote.objects.create(household=self.household, task=self.task, author=self.user, text="Gebeld met de gemeente.")
+        TaskNote.objects.create(household=self.household, task=self.task, text="E-mail verwerkt, geen actie nodig.", created_by_agent=True)
+
+        response = self._get("api_openclaw_all_tasks")
+
+        self.assertEqual(response.status_code, 200)
+        task = response.json()["tasks"][0]
+        self.assertIsNone(task["completed_at"])
+        self.assertIsNone(task["completion_reason"])
+        self.assertEqual([note["text"] for note in task["notes_timeline"]], ["Gebeld met de gemeente.", "E-mail verwerkt, geen actie nodig."])
+        self.assertEqual(task["notes_timeline"][0]["author"], str(self.user))
+        self.assertFalse(task["notes_timeline"][0]["created_by_agent"])
+        self.assertIsNone(task["notes_timeline"][1]["author"])
+        self.assertTrue(task["notes_timeline"][1]["created_by_agent"])
+
+    def test_include_completed_adds_recently_finished_tasks_with_their_reason(self):
+        recent = Task.objects.create(household=self.household, title="Cadeau kopen", completed_at=timezone.now() - timedelta(days=3), completion_reason="Al geregeld door oma")
+        Task.objects.create(household=self.household, title="Oude klus", completed_at=timezone.now() - timedelta(days=45), completion_reason="Lang geleden gedaan")
+
+        default_titles = [task["title"] for task in self._get("api_openclaw_all_tasks").json()["tasks"]]
+        payload = self._get("api_openclaw_all_tasks", include_completed="true").json()
+
+        self.assertEqual(default_titles, ["Rijbewijs verlengen"])
+        self.assertEqual(sorted(task["title"] for task in payload["tasks"]), ["Cadeau kopen", "Rijbewijs verlengen"])
+        completed = next(task for task in payload["tasks"] if task["id"] == recent.id)
+        self.assertEqual(completed["completion_reason"], "Al geregeld door oma")
+        self.assertIsNotNone(completed["completed_at"])
+
+    def test_agent_note_is_appended_to_the_timeline(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "E-mail van de gemeente verwerkt, geen actie nodig."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        note = TaskNote.objects.get(task=self.task)
+        self.assertEqual(note.text, "E-mail van de gemeente verwerkt, geen actie nodig.")
+        self.assertTrue(note.created_by_agent)
+        self.assertEqual(note.author, self.user)
+        self.assertEqual(note.household, self.household)
+        self.assertEqual(response.json()["id"], note.id)
+
+    def test_empty_note_is_refused(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "   "}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(TaskNote.objects.filter(task=self.task).exists())
+
+    def test_note_needs_the_taken_write_scope(self):
+        _, read_only_token = create_token(self.household, self.user, scopes=["vandaag:read"])
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "Mag niet."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {read_only_token}",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(TaskNote.objects.filter(task=self.task).exists())
+
+    def test_note_on_a_task_from_another_household_is_not_found(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.other_task.id]),
+            data=json.dumps({"text": "Niet van dit gezin."}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(TaskNote.objects.filter(task=self.other_task).exists())
+
+    def test_reopened_task_no_longer_reports_a_completion_reason(self):
+        Task.objects.filter(pk=self.task.pk).update(completion_reason="Al geregeld door oma")
+
+        response = self._get("api_openclaw_all_tasks")
+
+        task = response.json()["tasks"][0]
+        self.assertIsNone(task["completed_at"])
+        self.assertIsNone(task["completion_reason"])
+
+    def test_timeline_only_carries_the_most_recent_notes_with_the_full_count(self):
+        for number in range(1, 8):
+            TaskNote.objects.create(household=self.household, task=self.task, author=self.user, text=f"Notitie {number}")
+
+        response = self._get("api_openclaw_all_tasks")
+
+        task = response.json()["tasks"][0]
+        self.assertEqual([note["text"] for note in task["notes_timeline"]], ["Notitie 3", "Notitie 4", "Notitie 5", "Notitie 6", "Notitie 7"])
+        self.assertEqual(task["notes_total"], 7)
+
+    def test_overly_long_agent_note_is_truncated(self):
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_task_note", args=[self.task.id]),
+            data=json.dumps({"text": "Heel lang verhaal. " * 300}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(TaskNote.objects.get(task=self.task).text), TASK_NOTE_MAX_LENGTH)
+
+
+class OutlookTodoSyncTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="todo-ouder@example.com", email="todo-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Takengezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.connection = IntegrationConnection.objects.create(household=self.household, user=self.user, provider="outlook", display_name="Outlook")
+        self.task_list = TaskList.objects.create(household=self.household, name="Klussen")
+        self.link = TaskListSync.objects.create(household=self.household, task_list=self.task_list, connection=self.connection, provider=TaskListSync.Provider.OUTLOOK_TODO, external_list_id="lijst-1")
+
+    def test_reopening_a_task_in_microsoft_to_do_clears_the_completion_reason(self):
+        task = Task.objects.create(
+            household=self.household,
+            list=self.task_list,
+            title="Rijbewijs verlengen",
+            external_provider=TaskListSync.Provider.OUTLOOK_TODO,
+            external_id="remote-1",
+            completed_at=timezone.now() - timedelta(days=2),
+            completion_reason="Al geregeld door oma",
+        )
+        Task.objects.filter(pk=task.pk).update(remote_updated_at=timezone.now() - timedelta(days=2))
+        remote = {"id": "remote-1", "list_id": "lijst-1", "title": "Rijbewijs verlengen", "status": "notStarted", "due_at": None, "notes": "", "last_modified": timezone.now().isoformat(), "completed_at": None}
+
+        with patch("integrations.providers.outlook_todo_tasks", return_value=[remote]), patch("integrations.providers.outlook_todo_task_update") as update:
+            sync_task_list_link(self.link)
+
+        task.refresh_from_db()
+        self.assertIsNone(task.completed_at)
+        self.assertEqual(task.completion_reason, "")
+        self.assertFalse(update.called)
+
+
+class OpenClawMailFolderTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="mail-ouder@example.com", email="mail-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Maileerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.outlook = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.OUTLOOK,
+            display_name="Outlook",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        self.imap = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider=IntegrationConnection.Provider.IMAP,
+            display_name="Privémail",
+            external_account="ouder@voorbeeld.nl",
+            secret_encrypted=encrypt("app-wachtwoord"),
+            settings={"host": "imap.voorbeeld.nl", "port": 993, "use_ssl": True},
+        )
+        # A second token for the same user would revoke the first, so the read-only token
+        # belongs to the other parent in this household.
+        self.reader = User.objects.create_user(username="mail-partner@example.com", email="mail-partner@example.com", password="safe-password-123", display_name="Partner")
+        Membership.objects.create(household=self.household, user=self.reader, role=Membership.Role.PARENT)
+        _, self.token = create_token(self.household, self.user, scopes=["outlook_mail:read", "outlook_mail:write", "imap_mail:read", "imap_mail:write"])
+        _, self.read_token = create_token(self.household, self.reader, scopes=["outlook_mail:read", "imap_mail:read"])
+
+    def _get(self, name, token=None, args=None, **params):
+        return self.client.get(reverse(f"integrations:{name}", args=args or []), params, HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def _post(self, name, payload, token=None, args=None):
+        return self.client.post(
+            reverse(f"integrations:{name}", args=args or []),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self.token}",
+        )
+
+    def _imap_client(self, capabilities=("IMAP4REV1", "MOVE", "UIDPLUS"), list_data=None, found_uid=b"77", message_id="<nieuwsbrief@voorbeeld.nl>"):
+        """A stand-in for imaplib. `capabilities` is what the server reports *after* logging in;
+        client.capabilities keeps the poorer greeting list on purpose, because that is the trap
+        real servers set — imaplib never refreshes it.
+        """
+        client = MagicMock()
+        client.capabilities = ("IMAP4REV1",)
+        client.capability.return_value = ("OK", [" ".join(capabilities).encode()])
+        client.list.return_value = ("OK", list_data if list_data is not None else [b'(\\HasNoChildren) "/" "INBOX"'])
+        client.create.return_value = ("OK", [b"Create completed."])
+        client.subscribe.return_value = ("OK", [b"Subscribe completed."])
+        client.select.return_value = ("OK", [b"3"])
+        client.imap_calls = []
+
+        def uid(command, *args):
+            client.imap_calls.append((command.upper(), *args))
+            if command.upper() == "FETCH":
+                return ("OK", [(b"1 (UID 12 BODY[HEADER.FIELDS (MESSAGE-ID)] {40}", f"Message-ID: {message_id}\r\n\r\n".encode()), b")"])
+            if command.upper() == "SEARCH":
+                return ("OK", [found_uid])
+            return ("OK", [None])
+
+        client.uid.side_effect = uid
+        return client
+
+    def test_outlook_folders_are_listed_across_pages(self):
+        responses = [
+            FakeResponse({"value": [{"id": "map-1", "displayName": "Postvak IN", "parentFolderId": "hoofdmap", "unreadItemCount": 3, "totalItemCount": 12}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=100"}),
+            FakeResponse({"value": [{"id": "map-2", "displayName": "Nieuwsbrieven", "parentFolderId": "hoofdmap", "unreadItemCount": 0, "totalItemCount": 4}]}),
+        ]
+
+        with patch("integrations.providers.requests.request", side_effect=responses) as request:
+            response = self._get("api_openclaw_mail_folders", account="outlook")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["account"], "outlook")
+        self.assertEqual([folder["name"] for folder in payload["folders"]], ["Postvak IN", "Nieuwsbrieven"])
+        self.assertEqual(payload["folders"][0], {"id": "map-1", "name": "Postvak IN", "parent_id": "hoofdmap", "unread": 3, "total": 12})
+        self.assertEqual(request.call_args_list[1].args[1], "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=100")
+
+    def test_outlook_folders_include_the_ones_nested_under_another_folder(self):
+        responses = [
+            FakeResponse({"value": [{"id": "map-1", "displayName": "Archief", "parentFolderId": "hoofdmap", "childFolderCount": 1, "unreadItemCount": 0, "totalItemCount": 2}]}),
+            FakeResponse({"value": [{"id": "map-2", "displayName": "Nieuwsbrieven", "parentFolderId": "map-1", "childFolderCount": 0, "unreadItemCount": 1, "totalItemCount": 5}]}),
+        ]
+
+        with patch("integrations.providers.requests.request", side_effect=responses) as request:
+            response = self._get("api_openclaw_mail_folders", account="outlook")
+
+        self.assertEqual(response.status_code, 200)
+        folders = response.json()["folders"]
+        self.assertEqual([folder["name"] for folder in folders], ["Archief", "Nieuwsbrieven"])
+        self.assertEqual(folders[1]["parent_id"], "map-1")
+        self.assertEqual(request.call_args_list[1].args[1], "https://graph.microsoft.com/v1.0/me/mailFolders/map-1/childFolders")
+
+    def test_imap_folders_are_listed_with_decoded_names_and_hierarchy(self):
+        client = self._imap_client(list_data=[
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasChildren) "/" "Archief"',
+            b'(\\HasNoChildren) "/" "Archief/Caf&AOk-"',
+        ])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_folders", account="ouder@voorbeeld.nl")
+
+        self.assertEqual(response.status_code, 200)
+        folders = response.json()["folders"]
+        self.assertEqual([folder["id"] for folder in folders], ["INBOX", "Archief", "Archief/Café"])
+        self.assertEqual(folders[2]["name"], "Café")
+        self.assertEqual(folders[2]["parent_id"], "Archief")
+        self.assertIsNone(folders[0]["parent_id"])
+        client.logout.assert_called_once_with()
+
+    def test_outlook_folder_is_created_under_its_parent(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"id": "map-9", "displayName": "Nieuwsbrieven", "parentFolderId": "map-1", "unreadItemCount": 0, "totalItemCount": 0})) as request:
+            response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "Nieuwsbrieven", "parent": "map-1"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["folder"]["id"], "map-9")
+        self.assertEqual(request.call_args.args, ("POST", "https://graph.microsoft.com/v1.0/me/mailFolders/map-1/childFolders"))
+        self.assertEqual(request.call_args.kwargs["json"], {"displayName": "Nieuwsbrieven"})
+
+    def test_imap_folder_is_created_under_its_parent(self):
+        client = self._imap_client(list_data=[b'(\\HasChildren) "." "Archief"'])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_create_folder", {"account": "ouder@voorbeeld.nl", "name": "Nieuwsbrieven", "parent": "Archief"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["folder"], {"id": "Archief.Nieuwsbrieven", "name": "Nieuwsbrieven", "parent_id": "Archief", "unread": None, "total": None})
+        client.create.assert_called_once_with('"Archief.Nieuwsbrieven"')
+        client.subscribe.assert_called_once_with('"Archief.Nieuwsbrieven"')
+
+    def test_folder_name_is_required(self):
+        with patch("integrations.providers.requests.request") as request:
+            response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "   "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'name' is verplicht.")
+        self.assertFalse(request.called)
+
+    def test_creating_a_folder_on_an_unknown_account_is_refused(self):
+        response = self._post("api_openclaw_mail_create_folder", {"account": "buurman@voorbeeld.nl", "name": "Nieuwsbrieven"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Onbekend account", response.json()["error"])
+
+    def test_creating_a_folder_needs_a_write_scope(self):
+        response = self._post("api_openclaw_mail_create_folder", {"account": "outlook", "name": "Nieuwsbrieven"}, token=self.read_token)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_outlook_message_is_moved_and_reports_its_new_id(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"id": "bericht-nieuw", "parentFolderId": "map-2"})) as request:
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"account": "outlook", "moved": True, "id": "bericht-nieuw", "folder": "map-2"})
+        self.assertEqual(request.call_args.args, ("POST", "https://graph.microsoft.com/v1.0/me/messages/bericht-oud/move"))
+        self.assertEqual(request.call_args.kwargs["json"], {"destinationId": "map-2"})
+
+    def test_imap_move_uses_the_capabilities_the_server_reports_after_logging_in(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"account": "ouder@voorbeeld.nl", "moved": True, "id": "Archief:77", "folder": "Archief"})
+        self.assertNotIn("MOVE", client.capabilities)
+        self.assertEqual(client.select.call_args_list, [call('"INBOX"'), call('"Archief"', readonly=True)])
+        self.assertEqual(client.imap_calls, [
+            ("FETCH", "12", "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"),
+            ("MOVE", "12", '"Archief"'),
+            ("SEARCH", None, "HEADER", "Message-ID", '"<nieuwsbrief@voorbeeld.nl>"'),
+        ])
+        self.assertFalse(client.expunge.called)
+
+    def test_imap_move_falls_back_to_copy_and_a_targeted_uid_expunge(self):
+        client = self._imap_client(capabilities=("IMAP4REV1", "UIDPLUS"))
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "Archief:77")
+        self.assertEqual(client.imap_calls, [
+            ("FETCH", "12", "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"),
+            ("COPY", "12", '"Archief"'),
+            ("STORE", "12", "+FLAGS", "(\\Deleted)"),
+            ("EXPUNGE", "12"),
+            ("SEARCH", None, "HEADER", "Message-ID", '"<nieuwsbrief@voorbeeld.nl>"'),
+        ])
+        self.assertFalse(client.expunge.called)
+
+    def test_imap_move_never_expunges_the_whole_folder_without_uidplus(self):
+        client = self._imap_client(capabilities=("IMAP4REV1",))
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "Archief:77")
+        self.assertFalse(client.expunge.called)
+        self.assertNotIn("EXPUNGE", [call_args[0] for call_args in client.imap_calls])
+
+    def test_imap_move_reports_no_new_id_when_the_message_cannot_be_found_back(self):
+        client = self._imap_client(found_uid=b"")
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["id"])
+        self.assertEqual(response.json()["folder"], "Archief")
+
+    def test_a_message_in_a_nested_imap_folder_can_be_moved_and_read(self):
+        client = self._imap_client()
+        move_url = reverse("integrations:api_openclaw_mail_move", args=["Archief/Nieuwsbrieven:77"])
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "INBOX"}, args=["Archief/Nieuwsbrieven:77"])
+
+        self.assertIn("mail/Archief/Nieuwsbrieven:77/verplaatsen/", move_url)
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_any_call('"Archief/Nieuwsbrieven"')
+
+    def test_imap_overview_selects_a_folder_by_its_encoded_name(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_overview", account="ouder@voorbeeld.nl", folder="Privé")
+
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_called_once_with('"Priv&AOk-"', readonly=True)
+        self.assertEqual(client.imap_calls[0], ("SEARCH", None, "UNDELETED"))
+        self.assertEqual(response.json()["messages"][0]["id"], "Privé:77")
+
+    def test_imap_read_selects_a_folder_by_its_encoded_name(self):
+        client = self._imap_client()
+
+        with patch("integrations.providers._imap_client", return_value=client):
+            response = self._get("api_openclaw_mail_read", account="ouder@voorbeeld.nl", args=["Privé:77"])
+
+        self.assertEqual(response.status_code, 200)
+        client.select.assert_called_once_with('"Priv&AOk-"', readonly=True)
+
+    def test_moving_a_message_without_a_destination_is_refused(self):
+        with patch("integrations.providers.requests.request") as request:
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": " "}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'destination' is verplicht.")
+        self.assertFalse(request.called)
+
+    def test_moving_a_message_on_an_unknown_account_is_refused(self):
+        response = self._post("api_openclaw_mail_move", {"account": "buurman@voorbeeld.nl", "destination": "Archief"}, args=["INBOX:12"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Onbekend account", response.json()["error"])
+
+    def test_moving_a_message_needs_a_write_scope(self):
+        response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, token=self.read_token, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_token_from_another_household_reaches_no_mail_account(self):
+        other_household = Household.objects.create(name="Tweede gezin")
+        other_user = User.objects.create_user(username="buurman@example.com", email="buurman@example.com", password="safe-password-123")
+        Membership.objects.create(household=other_household, user=other_user, role=Membership.Role.PARENT)
+        _, other_token = create_token(other_household, other_user, scopes=["outlook_mail:read", "outlook_mail:write", "imap_mail:read", "imap_mail:write"])
+
+        folders = self._get("api_openclaw_mail_folders", token=other_token, account="ouder@voorbeeld.nl")
+        move = self._post("api_openclaw_mail_move", {"account": "ouder@voorbeeld.nl", "destination": "Archief"}, token=other_token, args=["INBOX:12"])
+        create = self._post("api_openclaw_mail_create_folder", {"account": "ouder@voorbeeld.nl", "name": "Nieuwsbrieven"}, token=other_token)
+
+        for response in (folders, move, create):
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["error"], "Je hebt geen e-mailaccount gekoppeld in Instellingen.")
+
+    def test_a_provider_failure_is_reported_as_a_readable_error(self):
+        with patch("integrations.providers.requests.request", return_value=FakeResponse({"error": {"code": "ErrorAccessDenied", "message": "Toegang geweigerd."}}, ok=False)):
+            response = self._post("api_openclaw_mail_move", {"account": "outlook", "destination": "map-2"}, args=["bericht-oud"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Toegang geweigerd.")
+
+
+class OpenClawCalendarSourceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="agenda-ouder@example.com", email="agenda-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        self.connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        self.local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        self.work_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=self.connection, is_read_only=False, sync_local_events=True)
+        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.ICS, name="Feestdagen", is_read_only=True, sync_local_events=False)
+        CalendarSource.objects.create(household=self.other_household, provider=CalendarSource.Provider.OUTLOOK, name="Agenda van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["agenda:read"])
+
+    def _sources(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        return {source["name"]: source for source in response.json()["sources"]}
+
+    def test_sources_report_where_a_local_event_ends_up(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual(response.status_code, 200)
+        sources = {source["name"]: source for source in response.json()["sources"]}
+        self.assertEqual(sorted(sources), ["Feestdagen", "Gezinsagenda", "Werkagenda"])
+        self.assertTrue(sources["Werkagenda"]["sends_local_events"])
+        self.assertTrue(sources["Werkagenda"]["supports_write_back"])
+        self.assertFalse(sources["Feestdagen"]["sends_local_events"])
+        self.assertFalse(sources["Feestdagen"]["supports_write_back"])
+        self.assertFalse(sources["Gezinsagenda"]["supports_write_back"])
+        # The family calendar has nowhere to push to, so it must never claim it does.
+        self.assertFalse(sources["Gezinsagenda"]["sends_local_events"])
+
+    def test_a_hidden_calendar_does_not_claim_to_receive_events(self):
+        self.work_source.is_enabled = False
+        self.work_source.save(update_fields=["is_enabled", "updated_at"])
+
+        self.assertFalse(self._sources()["Werkagenda"]["sends_local_events"])
+
+    def test_a_calendar_without_its_outlook_connection_does_not_claim_to_receive_events(self):
+        self.connection.delete()
+
+        self.work_source.refresh_from_db()
+        self.assertTrue(self.work_source.sync_local_events)
+        self.assertFalse(self._sources()["Werkagenda"]["sends_local_events"])
+
+    def test_another_households_calendars_are_never_returned(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertNotIn("Agenda van de buren", [source["name"] for source in response.json()["sources"]])
+
+    def test_sources_need_the_agenda_read_scope(self):
+        _, other_token = create_token(self.household, self.user, scopes=["vandaag:read"])
+
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {other_token}")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_updating_an_event_queues_it_for_the_next_push(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(household=self.household, title="Tandarts", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED, last_sync_error="oude fout")
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[event.id]),
+            data=json.dumps({"location": "Praktijk"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.location, "Praktijk")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+        self.assertEqual(event.last_sync_error, "")
+
+    def test_an_event_added_by_openclaw_is_pushed_to_the_linked_outlook_calendar(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        calls = []
+
+        def graph_request(method, url, **_kwargs):
+            calls.append((method, url))
+            return FakeResponse({"id": "graph-event-3"}, status_code=201)
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_event"),
+            data=json.dumps({"title": "Tandarts", "starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat()}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual(calls, [("POST", "https://graph.microsoft.com/v1.0/me/calendars/calendar-1/events")])
+        event = CalendarEvent.objects.get(household=self.household, title="Tandarts")
+        self.assertEqual(event.external_id, "graph-event-3")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+
+    def test_an_event_from_an_outlook_calendar_cannot_be_rewritten(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(household=self.household, source=self.work_source, external_id="graph-event-9", title="Teamoverleg", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[event.id]),
+            data=json.dumps({"title": "Gekaapt via OpenClaw"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "Externe agenda-afspraken zijn alleen-lezen.")
+        event.refresh_from_db()
+        self.assertEqual(event.title, "Teamoverleg")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+
+    def test_updating_an_event_from_another_household_is_not_found(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        other_event = CalendarEvent.objects.create(household=self.other_household, title="Afspraak van de buren", starts_at=start, ends_at=start + timedelta(hours=1))
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[other_event.id]),
+            data=json.dumps({"location": "Niet van dit gezin"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        other_event.refresh_from_db()
+        self.assertEqual(other_event.location, "")
+
+
+class OpenClawTravelTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="reis-ouder@example.com", email="reis-ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        self.trip = Trip.objects.create(household=self.household, destination="Barcelona", start_date=date(2026, 8, 1))
+        TripStop.objects.create(household=self.household, trip=self.trip, name="Girona", arrives_on=date(2026, 8, 3))
+        TripDocument.objects.create(household=self.household, trip=self.trip, title="Vluchtbevestiging", url="https://example.com/ticket")
+        TripIdea.objects.create(household=self.household, trip=self.trip, text="Sagrada Familia bezoeken", author=self.user)
+        self.other_trip = Trip.objects.create(household=self.other_household, destination="Reis van de buren")
+        _, self.token = create_token(self.household, self.user, scopes=["reizen:read", "reizen:write"])
+
+    def _post(self, name, args, payload, token=None):
+        return self.client.post(
+            reverse(f"integrations:{name}", args=args),
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self.token}",
+        )
+
+    def test_trips_carry_their_stops_documents_ideas_and_task_list(self):
+        task_list = ensure_trip_task_list(self.trip)
+        Task.objects.create(household=self.household, list=task_list, title="Koffers pakken")
+
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual(response.status_code, 200)
+        trip = response.json()["trips"][0]
+        self.assertEqual(trip["destination"], "Barcelona")
+        self.assertEqual(trip["start_date"], "2026-08-01")
+        self.assertEqual([stop["name"] for stop in trip["stops"]], ["Girona"])
+        self.assertEqual([document["title"] for document in trip["documents"]], ["Vluchtbevestiging"])
+        self.assertEqual([idea["text"] for idea in trip["ideas"]], ["Sagrada Familia bezoeken"])
+        self.assertEqual(trip["task_list"]["name"], "Reis: Barcelona")
+        self.assertEqual(trip["task_list"]["open_tasks"], 1)
+        self.assertEqual([task["title"] for task in trip["task_list"]["tasks"]], ["Koffers pakken"])
+
+    def test_trips_never_include_a_trip_of_another_household(self):
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+        self.assertEqual([trip["destination"] for trip in response.json()["trips"]], ["Barcelona"])
+
+    def test_new_trip_gets_a_linked_task_list_and_its_stops(self):
+        response = self._post("api_openclaw_add_trip", [], {
+            "destination": "Ardennen",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-05",
+            "stops": [{"name": "Namen", "arrives_on": "2026-10-02"}, "Dinant"],
+        })
+
+        self.assertEqual(response.status_code, 201)
+        trip = Trip.objects.get(household=self.household, destination="Ardennen")
+        self.assertEqual(trip.task_list.name, "Reis: Ardennen")
+        self.assertTrue(response.json()["task_list_created"])
+        self.assertEqual([stop.name for stop in trip.stops.all()], ["Namen", "Dinant"])
+        self.assertEqual(response.json()["task_list"]["name"], "Reis: Ardennen")
+
+    def test_trip_without_a_destination_is_refused(self):
+        response = self._post("api_openclaw_add_trip", [], {"start_date": "2026-10-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'destination' is verplicht.")
+
+    def test_a_refused_stop_leaves_no_half_created_trip_behind(self):
+        wrong_type = self._post("api_openclaw_add_trip", [], {"destination": "Rome", "stops": "Florence"})
+        wrong_date = self._post("api_openclaw_add_trip", [], {"destination": "Wenen", "stops": [{"name": "Praag"}, {"name": "Linz", "arrives_on": "morgen"}]})
+
+        self.assertEqual(wrong_type.status_code, 400)
+        self.assertEqual(wrong_type.json()["error"], "Veld 'stops' moet een lijst zijn.")
+        self.assertEqual(wrong_date.status_code, 400)
+        self.assertFalse(Trip.objects.filter(household=self.household, destination__in=["Rome", "Wenen"]).exists())
+        self.assertFalse(TripStop.objects.filter(household=self.household, name="Praag").exists())
+
+    def test_an_impossible_date_gets_a_dutch_hint(self):
+        response = self._post("api_openclaw_add_trip", [], {"destination": "Ardennen", "start_date": "2026-02-30"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "'2026-02-30' is geen geldige datum voor 'start_date' (gebruik JJJJ-MM-DD).")
+        self.assertFalse(Trip.objects.filter(household=self.household, destination="Ardennen").exists())
+
+    def test_a_stop_can_be_added_to_an_existing_trip(self):
+        response = self._post("api_openclaw_add_trip_stop", [self.trip.id], {"name": "Figueres", "arrives_on": "2026-08-05", "departs_on": "2026-08-06"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["arrives_on"], "2026-08-05")
+        stops = list(TripStop.objects.for_household(self.household).filter(trip=self.trip))
+        self.assertEqual([stop.name for stop in stops], ["Girona", "Figueres"])
+        self.assertEqual(stops[-1].sort_order, 1)
+
+    def test_a_stop_without_a_name_is_refused(self):
+        response = self._post("api_openclaw_add_trip_stop", [self.trip.id], {"arrives_on": "2026-08-05"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Veld 'name' is verplicht.")
+        self.assertEqual(TripStop.objects.for_household(self.household).filter(trip=self.trip).count(), 1)
+
+    def test_a_trip_that_lost_its_task_list_can_be_linked_again(self):
+        task_list = ensure_trip_task_list(self.trip)
+        task_list.delete()
+        self.trip.refresh_from_db()
+        self.assertIsNone(self.trip.task_list)
+
+        response = self._post("api_openclaw_link_trip_task_list", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["task_list"]["name"], "Reis: Barcelona")
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.task_list.name, "Reis: Barcelona")
+
+    def test_linking_a_task_list_twice_is_refused(self):
+        ensure_trip_task_list(self.trip)
+
+        response = self._post("api_openclaw_link_trip_task_list", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Deze reis heeft al een gekoppelde takenlijst.")
+
+    def test_update_only_touches_the_keys_it_was_given(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {"end_date": "2026-08-12", "notes": "Vlucht bevestigd, KL1234"})
+
+        self.assertEqual(response.status_code, 200)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.destination, "Barcelona")
+        self.assertEqual(self.trip.start_date, date(2026, 8, 1))
+        self.assertEqual(self.trip.end_date, date(2026, 8, 12))
+        self.assertEqual(self.trip.notes, "Vlucht bevestigd, KL1234")
+
+    def test_update_without_any_field_is_refused(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Geef minstens één veld op om te wijzigen.")
+
+    def test_update_with_a_return_before_departure_is_refused(self):
+        response = self._post("api_openclaw_update_trip", [self.trip.id], {"end_date": "2026-07-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.trip.refresh_from_db()
+        self.assertIsNone(self.trip.end_date)
+
+    def test_document_is_attached_by_dropbox_path(self):
+        response = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Hotelboeking", "dropbox_path": "/Reizen/Barcelona/hotel.pdf"})
+
+        self.assertEqual(response.status_code, 201)
+        document = TripDocument.objects.get(household=self.household, title="Hotelboeking")
+        self.assertEqual(document.dropbox_path, "/Reizen/Barcelona/hotel.pdf")
+        self.assertEqual(document.url, "")
+        self.assertEqual(document.uploaded_by, self.user)
+
+    def test_document_needs_exactly_one_source(self):
+        both = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Twee bronnen", "url": "https://example.com/a", "dropbox_path": "/Reizen/a.pdf"})
+        neither = self._post("api_openclaw_add_trip_document", [self.trip.id], {"title": "Geen bron"})
+
+        self.assertEqual(both.status_code, 400)
+        self.assertEqual(neither.status_code, 400)
+        self.assertEqual(both.json()["error"], "Geef precies één bron op: 'url' of 'dropbox_path'.")
+        self.assertEqual(TripDocument.objects.filter(household=self.household).count(), 1)
+
+    def test_agent_idea_is_marked_as_created_by_the_agent(self):
+        response = self._post("api_openclaw_add_trip_idea", [self.trip.id], {"text": "Museum met kinderkorting"})
+
+        self.assertEqual(response.status_code, 201)
+        idea = TripIdea.objects.get(household=self.household, text="Museum met kinderkorting")
+        self.assertTrue(idea.created_by_agent)
+        self.assertEqual(idea.author, self.user)
+
+    def test_writing_needs_the_reizen_write_scope(self):
+        _, read_only_token = create_token(self.household, self.user, scopes=["reizen:read"])
+
+        response = self._post("api_openclaw_add_trip", [], {"destination": "Mag niet"}, token=read_only_token)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Trip.objects.filter(destination="Mag niet").exists())
+
+    def test_reading_needs_the_reizen_read_scope(self):
+        _, write_only_token = create_token(self.household, self.user, scopes=["reizen:write"])
+
+        response = self.client.get(reverse("integrations:api_openclaw_trips"), HTTP_AUTHORIZATION=f"Bearer {write_only_token}")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_every_mutating_endpoint_refuses_a_trip_of_another_household(self):
+        endpoints = [
+            ("api_openclaw_update_trip", {"destination": "Overgenomen"}),
+            ("api_openclaw_add_trip_stop", {"name": "Ongewenst"}),
+            ("api_openclaw_link_trip_task_list", {}),
+            ("api_openclaw_add_trip_document", {"title": "Ongewenst", "url": "https://example.com/x"}),
+            ("api_openclaw_add_trip_idea", {"text": "Ongewenst idee"}),
+        ]
+
+        for name, payload in endpoints:
+            with self.subTest(endpoint=name):
+                response = self._post(name, [self.other_trip.id], payload)
+                self.assertEqual(response.status_code, 404)
+
+        self.other_trip.refresh_from_db()
+        self.assertEqual(self.other_trip.destination, "Reis van de buren")
+        self.assertIsNone(self.other_trip.task_list)
+        self.assertFalse(TripStop.objects.filter(trip=self.other_trip).exists())
+        self.assertFalse(TripDocument.objects.filter(trip=self.other_trip).exists())
+        self.assertFalse(TripIdea.objects.filter(trip=self.other_trip).exists())
+
+
+class OpenClawEventRsvpTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        start = timezone.now().replace(second=0, microsecond=0) + timedelta(days=7)
+        self.event = CalendarEvent.objects.create(household=self.household, title="Verjaardag Sanne", starts_at=start, ends_at=start + timedelta(hours=3))
+        self.other_event = CalendarEvent.objects.create(household=self.other_household, title="Feest van de buren", starts_at=start, ends_at=start + timedelta(hours=1))
+        _, self.token = create_token(self.household, self.user, scopes=["uitnodigingen:read"])
+
+    def _get(self, event_id, token=None):
+        return self.client.get(reverse("integrations:api_openclaw_event_rsvps", args=[event_id]), HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def test_rsvps_report_who_is_coming_and_what_they_answered(self):
+        invite = EventInvite.objects.create(household=self.household, event=self.event, is_shared=True, share_token="deel-token-verjaardag")
+        question = EventQuestion.objects.create(household=self.household, invite=invite, label="Eet je mee?", kind=EventQuestion.Kind.YESNO)
+        guest = EventGuest.objects.create(household=self.household, invite=invite, name="Oma Riet", rsvp=EventGuest.Rsvp.YES, party_size=2)
+        EventAnswer.objects.create(household=self.household, guest=guest, question=question, value="ja")
+
+        response = self._get(self.event.id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["has_invite"])
+        self.assertTrue(payload["is_shared"])
+        self.assertEqual(payload["attending_count"], 2)
+        self.assertEqual(payload["guests"][0]["name"], "Oma Riet")
+        self.assertEqual(payload["guests"][0]["answers"], [{"question": "Eet je mee?", "value": "ja"}])
+
+    def test_event_without_an_invite_reports_that_honestly(self):
+        payload = self._get(self.event.id).json()
+
+        self.assertFalse(payload["has_invite"])
+        self.assertEqual(payload["guests"], [])
+
+    def test_rsvps_need_their_own_scope_and_not_merely_agenda_read(self):
+        # Guest names, notes and answers are personal details of people outside the household,
+        # so an existing agenda:read token must not reach them without being re-issued.
+        _, agenda_token = create_token(self.household, self.user, scopes=["agenda:read"])
+
+        self.assertEqual(self._get(self.event.id, token=agenda_token).status_code, 403)
+
+    def test_rsvps_of_another_household_are_not_found(self):
+        EventInvite.objects.create(household=self.other_household, event=self.other_event, is_shared=True, share_token="andermans-token")
+
+        self.assertEqual(self._get(self.other_event.id).status_code, 404)

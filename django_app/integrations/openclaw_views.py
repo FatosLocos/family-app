@@ -1,10 +1,11 @@
 """Browser-side token management plus the bearer-token API surface for OpenClaw."""
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
+from django.db import transaction
 from django.db.models import Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -17,7 +18,7 @@ from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
-from household.models import ShoppingItem, ShoppingList, Task, TaskList, TaskListSync
+from household.models import TASK_NOTE_MAX_LENGTH, ShoppingItem, ShoppingList, Task, TaskList, TaskListSync, TaskNote
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
@@ -30,10 +31,16 @@ from integrations.providers import (
     dropbox_overview,
     dropbox_read_file_text,
     dropbox_search,
+    imap_mail_create_folder,
+    imap_mail_folders,
+    imap_mail_move,
     imap_mail_overview,
     imap_mail_read,
     imap_mail_reply,
     imap_mail_send,
+    outlook_mail_create_folder,
+    outlook_mail_folders,
+    outlook_mail_move,
     outlook_mail_overview,
     outlook_mail_read,
     outlook_mail_reply,
@@ -45,7 +52,9 @@ from integrations.providers import (
 )
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
-from planning.models import CalendarEvent, CalendarSource
+from planning.models import CalendarEvent, CalendarSource, EventInvite
+from travel.models import Trip, TripDocument, TripIdea, TripStop
+from travel.services import ensure_trip_task_list, trip_payload, trips_for_reading
 
 
 @parent_required
@@ -74,6 +83,8 @@ def api_today(request):
     log_openclaw_action(request.household, "vandaag", "Dagoverzicht opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "today": summary["today"].isoformat(),
+        # Only open tasks live here (build_today_summary filters on completed_at__isnull=True),
+        # so completion state deliberately isn't repeated: api_all_tasks answers that question.
         "tasks_open": [
             {"id": task.id, "title": task.title, "due_at": task.due_at.isoformat() if task.due_at else None, "priority": task.priority}
             for task in summary["tasks"]
@@ -323,11 +334,48 @@ def api_update_task(request, task_id):
     })
 
 
+COMPLETED_TASK_WINDOW_DAYS = 30
+TASK_TIMELINE_NOTE_LIMIT = 5
+
+
+def _task_timeline(task):
+    """The most recent TASK_TIMELINE_NOTE_LIMIT notes of a task, oldest first.
+
+    Capped on purpose: a long-running task collects notes forever, and api_all_tasks
+    serialises the timeline of every task in one response. The cap keeps that payload
+    bounded the same way COMPLETED_TASK_WINDOW_DAYS bounds the completed tasks; the
+    accompanying notes_total tells OpenClaw when older notes exist.
+    """
+    return [
+        {
+            "created_at": note.created_at.isoformat(),
+            "author": str(note.author) if note.author else None,
+            "text": note.text,
+            "created_by_agent": note.created_by_agent,
+        }
+        for note in list(task.timeline_notes.all())[-TASK_TIMELINE_NOTE_LIMIT:]
+    ]
+
+
 @require_openclaw_token("vandaag:read")
 @require_GET
 def api_all_tasks(request):
-    """Every open task (not capped to a handful like api_today's preview), with list membership."""
-    tasks = Task.objects.for_household(request.household).filter(completed_at__isnull=True).select_related("list", "assigned_to").order_by("list_id", "position", "created_at")
+    """Every open task (not capped to a handful like api_today's preview), with list membership.
+
+    Each task carries its completion state and its note timeline, so OpenClaw can tell
+    whether something was already handled. include_completed=true widens the result with
+    tasks finished in the last COMPLETED_TASK_WINDOW_DAYS days; the default stays open-only
+    to keep the payload small. The timeline itself is capped at the last
+    TASK_TIMELINE_NOTE_LIMIT notes per task, with notes_total as the full count.
+    """
+    include_completed = request.GET.get("include_completed") == "true"
+    tasks = Task.objects.for_household(request.household).select_related("list", "assigned_to").prefetch_related("timeline_notes__author")
+    if include_completed:
+        cutoff = timezone.now() - timedelta(days=COMPLETED_TASK_WINDOW_DAYS)
+        tasks = tasks.filter(Q(completed_at__isnull=True) | Q(completed_at__gte=cutoff))
+    else:
+        tasks = tasks.filter(completed_at__isnull=True)
+    tasks = tasks.order_by("list_id", "position", "created_at")
     log_openclaw_action(request.household, "taken", "Volledige takenlijst opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "tasks": [
@@ -342,10 +390,44 @@ def api_all_tasks(request):
                 "created_by_agent": task.created_by_agent,
                 "source_label": task.source_label or None,
                 "source_url": task.source_url or None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                # A reason only means anything while the task is done; a task that was
+                # reopened elsewhere must not look handled (see providers._apply_remote_outlook_todo_task).
+                "completion_reason": (task.completion_reason or None) if task.completed_at else None,
+                "notes_timeline": _task_timeline(task),
+                "notes_total": len(task.timeline_notes.all()),
             }
             for task in tasks
         ],
     })
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_add_task_note(request, task_id):
+    """Append a note to an existing task's timeline, without touching the task itself.
+
+    The text is capped at TASK_NOTE_MAX_LENGTH characters so one verbose agent run can't
+    blow up the timeline that every api_all_tasks response carries.
+    """
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    text = str(payload.get("text") or "").strip()[:TASK_NOTE_MAX_LENGTH]
+    if not text:
+        return JsonResponse({"error": "Veld 'text' is verplicht."}, status=400)
+    note = TaskNote.objects.create(household=request.household, task=task, author=request.openclaw_user, text=text, created_by_agent=True)
+    log_openclaw_action(request.household, "taak_notitie_toevoegen", f"Notitie toegevoegd aan taak '{task.title}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": note.id,
+        "task_id": task.id,
+        "created_at": note.created_at.isoformat(),
+        "author": str(note.author) if note.author else None,
+        "text": note.text,
+        "created_by_agent": note.created_by_agent,
+    }, status=201)
 
 
 @require_openclaw_token("taken:write")
@@ -527,6 +609,28 @@ def api_agenda(request):
     })
 
 
+@require_openclaw_token("agenda:read")
+@require_GET
+def api_calendar_sources(request):
+    """Which calendars this household has, and where a locally added event ends up."""
+    sources = CalendarSource.objects.for_household(request.household).order_by("provider", "name")
+    log_openclaw_action(request.household, "agenda_bronnen", "Agendabronnen opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "sources": [
+            {
+                "id": source.id,
+                "name": source.name,
+                "provider": source.provider,
+                "is_enabled": source.is_enabled,
+                "sends_local_events": source.accepts_local_events,
+                "supports_write_back": source.supports_write_back,
+                "last_sync_at": source.last_sync_at.isoformat() if source.last_sync_at else None,
+            }
+            for source in sources
+        ],
+    })
+
+
 @require_openclaw_token("agenda:write")
 @require_POST
 def api_add_event(request):
@@ -542,6 +646,7 @@ def api_add_event(request):
     event = form.save(commit=False)
     event.household = request.household
     event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+    event.mark_pending()
     event.save()
     form.save_m2m()
     log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
@@ -552,7 +657,13 @@ def api_add_event(request):
 @require_POST
 def api_update_event(request, event_id):
     """Partial update of any field on an existing calendar event."""
-    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household).select_related("source"), pk=event_id)
+    if event.source_id and event.source.provider != CalendarSource.Provider.LOCAL:
+        # The same rule as planning.views._local_event_or_404: an event that came out of someone's
+        # Outlook or ICS calendar is read-only here. Without this the write-back push would turn
+        # an agenda:write token into a licence to rewrite a real mailbox calendar.
+        log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' is alleen-lezen", status="error", detail=f"bron: {event.source.provider}", user=request.openclaw_user)
+        return JsonResponse({"error": "Externe agenda-afspraken zijn alleen-lezen."}, status=404)
     try:
         payload = json.loads(request.body) if request.body else {}
     except (TypeError, ValueError):
@@ -595,6 +706,8 @@ def api_update_event(request, event_id):
     if len(update_fields) == 1:
         return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
 
+    event.mark_pending()
+    update_fields.extend(["sync_status", "last_sync_error"])
     event.save(update_fields=update_fields)
     log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' bijgewerkt", user=request.openclaw_user)
     return JsonResponse({
@@ -605,6 +718,52 @@ def api_update_event(request, event_id):
         "is_all_day": event.is_all_day,
         "location": event.location,
         "notes": event.notes,
+    })
+
+
+@require_openclaw_token("uitnodigingen:read")
+@require_GET
+def api_event_rsvps(request, event_id):
+    """Who signed up for one event's public invitation, plus the answers they gave.
+
+    Its own scope rather than agenda:read: a guest list holds names, free-text notes and
+    answers of people outside the household, so reading the agenda must not silently hand
+    those personal details over as well.
+
+    Read-only on purpose: the public link itself is managed in the Agenda tab, never here, so
+    this token can report on an invitation but never publish or unpublish one.
+    """
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    invite = EventInvite.objects.for_household(request.household).filter(event=event).select_related("venue", "wishlist").first()
+    log_openclaw_action(request.household, "evenement_aanmeldingen", f"Aanmeldingen voor '{event.title}' opgevraagd", user=request.openclaw_user)
+    if invite is None:
+        return JsonResponse({"event_id": event.id, "title": event.title, "has_invite": False, "is_shared": False, "guests": []})
+    guests = invite.guests.prefetch_related("answers__question")
+    return JsonResponse({
+        "event_id": event.id,
+        "title": event.title,
+        "starts_at": event.starts_at.isoformat(),
+        "has_invite": True,
+        "is_shared": invite.is_shared,
+        "intro": invite.intro,
+        "venue": invite.venue.name if invite.venue else None,
+        "wishlist": invite.wishlist.title if invite.wishlist else None,
+        "rsvp_deadline": invite.rsvp_deadline.isoformat() if invite.rsvp_deadline else None,
+        "attending_count": invite.attending_count,
+        "program": [{"starts_at": item.starts_at, "description": item.description} for item in invite.program_items.all()],
+        "questions": [{"id": question.id, "label": question.label, "kind": question.kind, "is_required": question.is_required} for question in invite.questions.all()],
+        "guests": [
+            {
+                "id": guest.id,
+                "name": guest.name,
+                "rsvp": guest.rsvp,
+                "party_size": guest.party_size,
+                "note": guest.note,
+                "answered_at": guest.created_at.isoformat(),
+                "answers": [{"question": answer.question.label, "value": answer.value} for answer in guest.answers.all()],
+            }
+            for guest in guests
+        ],
     })
 
 
@@ -961,6 +1120,81 @@ def api_mail_reply(request, message_id):
     return JsonResponse({"sent": True, "account": account})
 
 
+@require_openclaw_token_any(["outlook_mail:read", "imap_mail:read"])
+@require_GET
+def api_mail_folders(request):
+    try:
+        account, connection = _resolve_mail_account(request, request.GET.get("account"), write=False)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_mappen" if is_outlook else "imap_mail_mappen"
+    try:
+        folders = outlook_mail_folders(connection) if is_outlook else imap_mail_folders(connection)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, "Mailmappen opvragen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"Mailmappen opgevraagd ({len(folders)})", user=request.openclaw_user)
+    return JsonResponse({"account": account, "folders": folders})
+
+
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
+@require_POST
+def api_mail_create_folder(request):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    name = str(payload.get("name") or "").strip()
+    parent = str(payload.get("parent") or "").strip()
+    if not name:
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_map_aanmaken" if is_outlook else "imap_mail_map_aanmaken"
+    try:
+        if is_outlook:
+            folder = outlook_mail_create_folder(connection, name, parent_folder_id=parent or None)
+        else:
+            folder = imap_mail_create_folder(connection, name, parent_folder=parent or None)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, f"Mailmap '{name}' aanmaken mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"Mailmap '{name}' aangemaakt", user=request.openclaw_user)
+    return JsonResponse({"account": account, "folder": folder}, status=201)
+
+
+@require_openclaw_token_any(["outlook_mail:write", "imap_mail:write"])
+@require_POST
+def api_mail_move(request, message_id):
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    try:
+        account, connection = _resolve_mail_account(request, payload.get("account"), write=True)
+    except _MailAccountError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    destination = str(payload.get("destination") or "").strip()
+    if not destination:
+        return JsonResponse({"error": "Veld 'destination' is verplicht."}, status=400)
+    is_outlook = connection.provider == IntegrationConnection.Provider.OUTLOOK
+    action = "outlook_mail_verplaatsen" if is_outlook else "imap_mail_verplaatsen"
+    try:
+        if is_outlook:
+            moved = outlook_mail_move(connection, message_id, destination)
+        else:
+            moved = imap_mail_move(connection, message_id, destination)
+    except ProviderError as error:
+        log_openclaw_action(request.household, action, "E-mail verplaatsen mislukt", status="error", detail=str(error), user=request.openclaw_user)
+        return JsonResponse({"error": str(error)}, status=400)
+    log_openclaw_action(request.household, action, f"E-mail verplaatst naar map '{destination}'", user=request.openclaw_user)
+    return JsonResponse({"account": account, "moved": True, **moved})
+
+
 @require_openclaw_token("outlook_todo:read")
 @require_GET
 def api_outlook_todo_lists(request):
@@ -1041,3 +1275,236 @@ def api_outlook_todo_update(request, list_id, task_id):
         return JsonResponse({"error": str(error)}, status=400)
     log_openclaw_action(request.household, "outlook_todo_bijwerken", f"To-do '{task.get('title')}' bijgewerkt", user=request.openclaw_user)
     return JsonResponse(task)
+
+
+def _parse_trip_date(value, field: str):
+    """Parse an optional ISO 8601 date; raise ValueError with a Dutch hint like the agenda helpers."""
+    if value in (None, ""):
+        return None
+    try:
+        # parse_date itself raises ValueError (in English) for a well-formed but impossible
+        # date like "2026-02-30", so catch that and give the agent the same Dutch hint.
+        parsed = parse_date(str(value))
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        raise ValueError(f"'{value}' is geen geldige datum voor '{field}' (gebruik JJJJ-MM-DD).")
+    return parsed
+
+
+def _parse_trip_stops(raw_stops):
+    """Validate the whole 'stops' payload up front; raise ValueError with a Dutch hint."""
+    if not isinstance(raw_stops, list):
+        raise ValueError("Veld 'stops' moet een lijst zijn.")
+    stops = []
+    for raw_stop in raw_stops:
+        stop = raw_stop if isinstance(raw_stop, dict) else {"name": raw_stop}
+        name = str(stop.get("name") or "").strip()[:160]
+        if not name:
+            continue
+        stops.append({
+            "name": name,
+            "arrives_on": _parse_trip_date(stop.get("arrives_on"), "arrives_on"),
+            "departs_on": _parse_trip_date(stop.get("departs_on"), "departs_on"),
+        })
+    return stops
+
+
+@require_openclaw_token("reizen:read")
+@require_GET
+def api_trips(request):
+    """Every trip of this household, with its stops, documents, ideas and linked task list.
+
+    Read this before writing anything travel-related: a flight confirmation or hotel
+    booking almost always belongs to a trip that already exists.
+    """
+    trips = trips_for_reading(request.household)
+    log_openclaw_action(request.household, "reizen", "Reizen opgevraagd", user=request.openclaw_user)
+    return JsonResponse({"trips": [trip_payload(trip) for trip in trips]})
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_add_trip(request):
+    """Create a trip, with optional stops, and give it its own list in the normal Taken tab."""
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    destination = str(payload.get("destination") or "").strip()[:160]
+    if not destination:
+        return JsonResponse({"error": "Veld 'destination' is verplicht."}, status=400)
+    # Everything is validated before the first write: a 400 on a stop used to leave a
+    # half-created trip behind, which the agent then duplicated on its retry.
+    try:
+        start_date = _parse_trip_date(payload.get("start_date"), "start_date")
+        end_date = _parse_trip_date(payload.get("end_date"), "end_date")
+        stops = _parse_trip_stops(payload.get("stops") or [])
+    except ValueError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    if start_date and end_date and end_date < start_date:
+        return JsonResponse({"error": "De terugreis mag niet vóór het vertrek liggen."}, status=400)
+    with transaction.atomic():
+        trip = Trip.objects.create(
+            household=request.household,
+            destination=destination,
+            start_date=start_date,
+            end_date=end_date,
+            notes=str(payload.get("notes") or ""),
+        )
+        for index, stop in enumerate(stops):
+            TripStop.objects.create(household=request.household, trip=trip, sort_order=index, **stop)
+        task_list = ensure_trip_task_list(trip)
+    log_openclaw_action(request.household, "reis_toevoegen", f"Reis naar '{trip.destination}' toegevoegd", user=request.openclaw_user)
+    trip.refresh_from_db()
+    return JsonResponse({**trip_payload(trip), "task_list_created": task_list is not None}, status=201)
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_update_trip(request, trip_id):
+    """Partial update of an existing trip — only the keys present in the payload change."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    try:
+        payload = json.loads(request.body) if request.body else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+
+    update_fields = ["updated_at"]
+
+    if "destination" in payload:
+        destination = str(payload["destination"] or "").strip()[:160]
+        if not destination:
+            return JsonResponse({"error": "Bestemming mag niet leeg zijn."}, status=400)
+        trip.destination = destination
+        update_fields.append("destination")
+
+    for field in ("start_date", "end_date"):
+        if field in payload:
+            try:
+                setattr(trip, field, _parse_trip_date(payload[field], field))
+            except ValueError as error:
+                return JsonResponse({"error": str(error)}, status=400)
+            update_fields.append(field)
+
+    if "notes" in payload:
+        trip.notes = str(payload["notes"] or "")
+        update_fields.append("notes")
+
+    if len(update_fields) == 1:
+        return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
+    if trip.start_date and trip.end_date and trip.end_date < trip.start_date:
+        return JsonResponse({"error": "De terugreis mag niet vóór het vertrek liggen."}, status=400)
+
+    trip.save(update_fields=update_fields)
+    log_openclaw_action(request.household, "reis_bijwerken", f"Reis naar '{trip.destination}' bijgewerkt", user=request.openclaw_user)
+    return JsonResponse(trip_payload(trip))
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_add_trip_stop(request, trip_id):
+    """Add one intermediate stop to an existing trip, at the end of the route."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    name = str(payload.get("name") or "").strip()[:160]
+    if not name:
+        return JsonResponse({"error": "Veld 'name' is verplicht."}, status=400)
+    try:
+        arrives_on = _parse_trip_date(payload.get("arrives_on"), "arrives_on")
+        departs_on = _parse_trip_date(payload.get("departs_on"), "departs_on")
+    except ValueError as error:
+        return JsonResponse({"error": str(error)}, status=400)
+    if arrives_on and departs_on and departs_on < arrives_on:
+        return JsonResponse({"error": "Het vertrek uit een tussenstop mag niet vóór de aankomst liggen."}, status=400)
+    highest = trip.stops.aggregate(Max("sort_order"))["sort_order__max"]
+    stop = TripStop.objects.create(
+        household=request.household,
+        trip=trip,
+        name=name,
+        arrives_on=arrives_on,
+        departs_on=departs_on,
+        sort_order=(highest + 1) if highest is not None else 0,
+    )
+    log_openclaw_action(request.household, "reis_tussenstop_toevoegen", f"Tussenstop '{stop.name}' toegevoegd aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": stop.id,
+        "trip_id": trip.id,
+        "name": stop.name,
+        "arrives_on": stop.arrives_on.isoformat() if stop.arrives_on else None,
+        "departs_on": stop.departs_on.isoformat() if stop.departs_on else None,
+    }, status=201)
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_link_trip_task_list(request, trip_id):
+    """Give a trip a list in the normal Taken tab again after the old one was deleted."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    if trip.task_list_id:
+        return JsonResponse({"error": "Deze reis heeft al een gekoppelde takenlijst."}, status=400)
+    task_list = ensure_trip_task_list(trip)
+    if task_list is None:
+        return JsonResponse({"error": "Er kon geen takenlijst worden gekoppeld omdat er al lijstjes met deze naam bestaan."}, status=400)
+    log_openclaw_action(request.household, "reis_takenlijst_koppelen", f"Takenlijst '{task_list.name}' gekoppeld aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({"trip_id": trip.id, "task_list": {"id": task_list.id, "name": task_list.name}}, status=201)
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_add_trip_document(request, trip_id):
+    """Attach a document to a trip by link or Dropbox path — no binary upload over MCP."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    title = str(payload.get("title") or "").strip()[:180]
+    if not title:
+        return JsonResponse({"error": "Veld 'title' is verplicht."}, status=400)
+    dropbox_path = str(payload.get("dropbox_path") or "").strip()[:500]
+    url = str(payload.get("url") or "").strip()[:500]
+    # Mirrors TripDocument.clean(): exactly one source. Uploading a file is deliberately
+    # browser-only, so OpenClaw links to where the document already lives.
+    if bool(dropbox_path) == bool(url):
+        return JsonResponse({"error": "Geef precies één bron op: 'url' of 'dropbox_path'."}, status=400)
+    if url:
+        try:
+            URLValidator()(url)
+        except ValidationError:
+            return JsonResponse({"error": f"'{url}' is geen geldige URL."}, status=400)
+    document = TripDocument.objects.create(household=request.household, trip=trip, title=title, dropbox_path=dropbox_path, url=url, uploaded_by=request.openclaw_user)
+    log_openclaw_action(request.household, "reis_document_toevoegen", f"Document '{document.title}' gekoppeld aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": document.id,
+        "trip_id": trip.id,
+        "title": document.title,
+        "dropbox_path": document.dropbox_path or None,
+        "url": document.url or None,
+    }, status=201)
+
+
+@require_openclaw_token("reizen:write")
+@require_POST
+def api_add_trip_idea(request, trip_id):
+    """Add a loose idea to a trip — a note that is explicitly not a task yet."""
+    trip = get_object_or_404(Trip.objects.for_household(request.household), pk=trip_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JsonResponse({"error": "Veld 'text' is verplicht."}, status=400)
+    idea = TripIdea.objects.create(household=request.household, trip=trip, text=text, author=request.openclaw_user, created_by_agent=True)
+    log_openclaw_action(request.household, "reis_idee_toevoegen", f"Idee toegevoegd aan reis '{trip.destination}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": idea.id,
+        "trip_id": trip.id,
+        "text": idea.text,
+        "created_by_agent": idea.created_by_agent,
+        "created_at": idea.created_at.isoformat(),
+    }, status=201)

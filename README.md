@@ -16,6 +16,7 @@ De Compose-stack staat in [`docker-compose.django.yml`](docker-compose.django.ym
 
 ## Projectstructuur
 
+- `ARCHITECTURE.md`: bindende architectuurfundamentals (RLS, MCP-pariteit, scopes, delete-beleid, één overzicht) met de checklist voor elke nieuwe module.
 - `django_app/`: actieve Django-, HTMX- en PostgreSQL-applicatie.
 - `legacy/next-app/`: gearchiveerde Next.js-versie. Niet meer gebruiken voor nieuwe functionaliteit of deployments.
 

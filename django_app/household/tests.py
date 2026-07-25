@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingOffer, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task
+from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingOffer, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskNote
 from household.ocr import parse_receipt_line_items
 from household.price_providers import PriceProviderError, PriceResult, fetch_checkjebon_prices, refresh_household_prices
 from household.tasks import replenish_recurring_shopping_items
@@ -63,6 +63,35 @@ class HouseholdIsolationTests(TestCase):
         response = self.client.post(reverse("household:add_task"), {"title": "Afval buiten", "priority": 2}, follow=True)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Task.objects.filter(household=self.first_household, title="Afval buiten").exists())
+
+    def test_owner_can_add_a_note_to_the_task_timeline(self):
+        self.client.force_login(self.owner)
+
+        response = self.client.post(reverse("household:add_task_note", args=[self.task.pk]), {"text": "Gebeld met de gemeente."}, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        note = TaskNote.objects.get(task=self.task)
+        self.assertEqual(note.text, "Gebeld met de gemeente.")
+        self.assertEqual(note.author, self.owner)
+        self.assertFalse(note.created_by_agent)
+        self.assertEqual(note.household, self.first_household)
+
+    def test_task_timeline_is_shown_in_the_task_context(self):
+        TaskNote.objects.create(household=self.first_household, task=self.task, author=self.owner, text="Gebeld met de gemeente.")
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse("household:index"))
+
+        self.assertContains(response, "Gebeld met de gemeente.")
+        self.assertContains(response, "Toevoegen aan tijdlijn")
+
+    def test_member_cannot_add_a_note_to_a_task_from_another_household(self):
+        self.client.force_login(self.child)
+
+        response = self.client.post(reverse("household:add_task_note", args=[self.task.pk]), {"text": "Niet van dit gezin."})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(TaskNote.objects.filter(task=self.task).exists())
 
     def test_recurring_shopping_item_is_replenished_after_interval(self):
         shopping_list = ShoppingList.objects.create(household=self.first_household, name="Boodschappen")

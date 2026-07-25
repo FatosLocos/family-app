@@ -3,6 +3,9 @@
 .source-manager-item form { margin:0; }
 .source-manager-item.is-disabled { opacity:.58; }
 .source-manager .icon-button { width:24px; height:24px; }
+.source-manager-flag { margin-left:6px; padding:1px 7px; border-radius:var(--radius-pill); background:var(--surface-2); color:var(--text-2); font-size:11px; }
+.source-manager-flag.is-on { background:color-mix(in srgb, var(--green) 18%, transparent); color:var(--green); }
+.source-manager-error { margin-left:6px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--red); font-size:11px; }
 
 .agenda-panel { max-width:1120px; }
 .planner-actions { display:flex; align-items:center; gap:2px; }
@@ -49,3 +52,26 @@
   .agenda-day-dot { position:absolute; bottom:6px; left:50%; transform:translateX(-50%); width:5px; height:5px; border-radius:50%; background:var(--accent-text); }
   .agenda-day.is-today .agenda-day-dot { background:var(--accent-ink); }
 }
+
+/* Publieke evenement-uitnodiging (planning/public_event_invite.html) */
+.public-invite { max-width:780px; margin:40px auto; display:grid; gap:22px; }
+.public-invite header h1 { margin:0 0 8px; font-size:clamp(30px,5vw,48px); }
+.public-invite header p { display:flex; align-items:center; gap:7px; margin:3px 0; color:var(--muted); }
+.public-invite header svg { width:16px; }
+.public-invite-intro { line-height:1.55; }
+.public-invite-block { padding:18px; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); }
+.public-invite-block h2 { margin:0 0 10px; font-size:18px; }
+.public-invite-program li { display:flex; gap:10px; align-items:baseline; padding:5px 0; }
+.public-invite-program strong { min-width:64px; color:var(--accent-strong); }
+.public-invite-wishes li { display:flex; gap:10px; align-items:baseline; justify-content:space-between; padding:5px 0; border-bottom:1px solid var(--line); }
+.public-invite-rsvp { margin:12px 0; padding:10px 12px; border:1px solid var(--line); border-radius:5px; }
+.public-invite-rsvp legend { padding:0 5px; color:var(--muted); font-size:13px; }
+
+/* Uitnodiging beheren in de Agenda-tab */
+.invite-panel { display:grid; gap:14px; }
+.invite-share-link { display:grid; grid-template-columns:auto 1fr; gap:2px 8px; padding:8px 10px; border-left:3px solid var(--accent); background:var(--surface-alt); font-size:13px; word-break:break-all; }
+.invite-share-link svg { grid-row:span 2; width:17px; color:var(--accent-strong); }
+.invite-subform { display:grid; gap:6px; padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--surface-alt); }
+.invite-row { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--line); }
+.invite-row form { margin:0; }
+.invite-guest-answers { color:var(--muted); font-size:12px; }

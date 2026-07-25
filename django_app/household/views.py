@@ -16,7 +16,7 @@ from django.views.decorators.http import require_POST
 
 from households.decorators import household_required
 from household.forms import MealIngredientForm, MealPlanForm, PantryItemForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
-from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList, TaskListSync
+from household.models import TASK_NOTE_MAX_LENGTH, MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList, TaskListSync, TaskNote
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
 from integrations.models import IntegrationConnection
@@ -83,14 +83,15 @@ def index(request):
     shopping_filter = request.GET.get("shopping_filter", "open")
     household = request.household
     default_list, _ = ShoppingList.objects.get_or_create(household=household, name="Boodschappen", defaults={"is_default": True})
-    tasks = Task.objects.for_household(household).select_related("assigned_to", "list")
+    tasks = Task.objects.for_household(household).select_related("assigned_to", "list").prefetch_related("timeline_notes__author")
     if task_filter == "vandaag":
         tasks = tasks.filter(completed_at__isnull=True, due_at__date=timezone.localdate())
     elif task_filter == "afgerond":
         tasks = tasks.filter(completed_at__isnull=False)
     elif task_filter != "alles":
         tasks = tasks.filter(completed_at__isnull=True)
-    task_lists = list(TaskList.objects.for_household(household))
+    # select_related("trip"): the task group header shows a trip badge for a linked trip.
+    task_lists = list(TaskList.objects.for_household(household).select_related("sync_link", "trip"))
     tasks = list(tasks[:300])
     tasks_by_list = defaultdict(list)
     for task in tasks:
@@ -340,6 +341,20 @@ def toggle_task(request, task_id):
     if request.GET.get("next") == "today":
         return redirect("today")
     return redirect("household:index")
+
+
+@household_required
+@require_POST
+def add_task_note(request, task_id):
+    """Append a note to a task's timeline — the household's side of taak_notitie_toevoegen."""
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    text = request.POST.get("text", "").strip()[:TASK_NOTE_MAX_LENGTH]
+    if not text:
+        messages.error(request, "Schrijf eerst een notitie.")
+        return _household_tab_redirect("taken")
+    TaskNote.objects.create(household=request.household, task=task, author=request.user, text=text, created_by_agent=False)
+    messages.success(request, "Notitie toegevoegd aan de tijdlijn.")
+    return _household_tab_redirect("taken")
 
 
 @household_required

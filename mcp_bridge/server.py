@@ -76,7 +76,12 @@ def _checked(response: httpx.Response) -> dict:
 
 @mcp.tool()
 def vandaag(ctx: Context) -> dict:
-    """Get today's open tasks, shopping list, and calendar events for this household."""
+    """Get today's open tasks, shopping list, and calendar events for this household.
+
+    "tasks_open" is a preview of open tasks only — nothing that is already done shows up
+    here. Use taken(include_completed=True) to see recently finished tasks, why they were
+    finished, and their note timeline.
+    """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/vandaag/"))
 
@@ -84,6 +89,12 @@ def vandaag(ctx: Context) -> dict:
 @mcp.tool()
 def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, list_name: str | None = None, assigned_to: str | None = None, source_label: str | None = None, source_url: str | None = None) -> dict:
     """Add a new task to the household's task list.
+
+    Always call taken(include_completed=True) first and look for a task on the same
+    subject — including one that was already completed, with its reason and its note
+    timeline. If such a task exists, do NOT add a second one: record what you did with
+    taak_notitie_toevoegen (and taak_bijwerken or taak_afronden where that fits). Only
+    create a new task when the subject really isn't on the list yet.
 
     Args:
         title: What the task is (required).
@@ -214,13 +225,51 @@ def taak_lijst_bijwerken(ctx: Context, list_id: int, name: str) -> dict:
 
 
 @mcp.tool()
-def taken(ctx: Context) -> dict:
+def taken(ctx: Context, include_completed: bool = False) -> dict:
     """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
     preview. Each task includes its list ("list", null if unsorted), notes, due date,
-    priority, source, and whether OpenClaw created it. Use this before organizing tasks
-    with taak_bijwerken, so nothing gets missed."""
+    priority, source, whether OpenClaw created it, its completion state
+    ("completed_at"/"completion_reason", both null while the task is open) and
+    "notes_timeline": the task's history of notes, each with created_at, author, text and
+    created_by_agent. That timeline only holds the 5 most recent notes per task, with
+    "notes_total" as the real count — the app shows the rest. Use this before organizing
+    tasks with taak_bijwerken, so nothing gets missed.
+
+    Args:
+        include_completed: Also return tasks completed in the last 30 days (default
+            False, open tasks only). Set this to True before taak_toevoegen to check
+            whether the thing you're about to add was already done and why — the
+            completion reason and the notes timeline tell you what happened.
+    """
+    params = {"include_completed": "true"} if include_completed else {}
     with _client(ctx) as client:
-        return _checked(client.get("/instellingen/api/openclaw/taken/alle/"))
+        return _checked(client.get("/instellingen/api/openclaw/taken/alle/", params=params))
+
+
+@mcp.tool()
+def taak_notitie_toevoegen(ctx: Context, task_id: int, text: str) -> dict:
+    """Append a note to an existing task's timeline — how you record what you did with a
+    task instead of creating a second task for the same thing.
+
+    Whenever you handle something that already has a task (an e-mail, a document, a
+    message), write down what you did and why here: "e-mail verwerkt, geen actie nodig",
+    "aanbieder gebeld, wachten op antwoord", "hoort bij taak 12, geen nieuwe taak nodig".
+    The household reads this timeline in the app, and you get it back from taken(), so
+    later runs know the history instead of duplicating work.
+
+    Always call taken(include_completed=True) first and look for an existing task on the
+    subject. Only use taak_toevoegen when there really is no task yet; if there is one,
+    add a note here (and taak_afronden if it's finished). This tool never changes the
+    task itself — use taak_bijwerken for that.
+
+    Args:
+        task_id: The task's numeric id (from taken() or vandaag()).
+        text: What happened, in Dutch, in the household's own words. Say what you did and
+            what the consequence is, not just that you looked at it. Keep it to a few
+            sentences; anything past 2000 characters is cut off.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/notitie/", json={"text": text}))
 
 
 @mcp.tool()
@@ -343,8 +392,28 @@ def agenda(ctx: Context, start: str | None = None, end: str | None = None) -> di
 
 
 @mcp.tool()
+def agenda_bronnen(ctx: Context) -> dict:
+    """List the household's calendars and where a new event actually ends up.
+
+    Every source reports its name, its provider ("local", "outlook", "ics", "google_calendar"
+    or "caldav"), whether it is switched on, and "sends_local_events": whether events added with
+    afspraak_toevoegen are really pushed to that external calendar, credentials and all. Call
+    this before promising someone that an appointment will show up in Outlook: at most one
+    calendar can receive the write-back, and only if a parent turned it on in the Agenda tab. If
+    no source reports true, the appointment stays inside FamilyApp. There is no tool to change
+    that setting. Pushing runs on a timer, so it can take a few minutes to appear in Outlook.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/agenda/bronnen/"))
+
+
+@mcp.tool()
 def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None) -> dict:
     """Add a new event to the household's shared calendar.
+
+    The event lands in the family calendar. If a parent turned write-back on for an external
+    calendar it is also pushed there within a few minutes — call agenda_bronnen first when
+    someone asks whether the appointment will show up in Outlook, instead of assuming it does.
 
     Args:
         title: What the event is (required).
@@ -367,6 +436,11 @@ def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, i
 def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, starts_at: str | None = None, ends_at: str | None = None, is_all_day: bool | None = None, location: str | None = None, notes: str | None = None) -> dict:
     """Update one or more fields on an existing calendar event. Only the arguments you
     pass are changed.
+
+    Only events that live in the household's own calendar can be changed. An event that came out
+    of someone's Outlook or ICS calendar is read-only and returns "Externe agenda-afspraken zijn
+    alleen-lezen." — say so instead of trying again; the change has to be made in that calendar
+    itself.
 
     Args:
         event_id: The event's numeric id (from agenda()).
@@ -392,6 +466,31 @@ def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, st
         payload["notes"] = notes
     with _client(ctx) as client:
         return _checked(client.post(f"/instellingen/api/openclaw/agenda/{event_id}/bijwerken/", json=payload))
+
+
+@mcp.tool()
+def evenement_aanmeldingen(ctx: Context, event_id: int) -> dict:
+    """Get who signed up for an event's public invitation, and what they answered.
+
+    Call agenda() first to find the event's numeric id. Returns "has_invite": false when the
+    event has no invitation at all — then "guests" is empty. When "is_shared" is false the
+    invitation exists but its public link is switched off, so nobody can sign up right now;
+    sign-ups from an earlier time the link was on are still listed in "guests", so report
+    them instead of saying that nobody signed up.
+    Each guest has "rsvp" ("yes", "no" or "maybe"), "party_size" (how many people that one
+    sign-up brings, default 1), an optional free-text "note" and the answers to the questions
+    the organiser configured. "attending_count" already sums party_size over the yes answers,
+    so use that when someone asks how many people are coming.
+
+    Read-only. Creating an invitation, turning its public link on or off and adding programme
+    items or questions all happen in the Agenda tab of FamilyApp; there is no tool for that,
+    so never promise to share or unshare a link.
+
+    Args:
+        event_id: The event's numeric id (from agenda()).
+    """
+    with _client(ctx) as client:
+        return _checked(client.get(f"/instellingen/api/openclaw/agenda/{event_id}/aanmeldingen/"))
 
 
 @mcp.tool()
@@ -615,6 +714,68 @@ def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: 
 
 
 @mcp.tool()
+def e_mail_mappen(ctx: Context, account: str | None = None) -> dict:
+    """List the mail folders of this household member's mailbox, nested folders included, with
+    the id to hand to e_mail_verplaatsen and the id to hand to e_mail_map_aanmaken as a parent.
+    Call this before e_mail_map_aanmaken to check whether a suitable folder already exists.
+
+    Args:
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    params = {"account": account} if account else {}
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/mail/mappen/", params=params))
+
+
+@mcp.tool()
+def e_mail_map_aanmaken(ctx: Context, name: str, parent: str | None = None, account: str | None = None) -> dict:
+    """Create a new mail folder. Call e_mail_mappen first and only create a folder when none
+    of the existing ones fits — otherwise you end up with two folders for the same purpose.
+
+    Args:
+        name: Name of the new folder, e.g. "Nieuwsbrieven".
+        parent: Optional id of the folder to nest the new one under (from e_mail_mappen).
+            Omit it to create the folder at the top level of the mailbox.
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    payload = {"name": name}
+    if parent:
+        payload["parent"] = parent
+    if account:
+        payload["account"] = account
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/mail/mappen/aanmaken/", json=payload))
+
+
+@mcp.tool()
+def e_mail_verplaatsen(ctx: Context, message_id: str, destination: str, account: str | None = None) -> dict:
+    """Move a message to another mail folder, e.g. to archive a newsletter out of the inbox.
+    Call e_mail_mappen first to see which folders exist and to pick the destination id — that
+    way you never create a duplicate folder for one that is already there. The message gets a
+    new id in its new folder, so use the returned "id" for anything you do with it afterwards —
+    the old id no longer resolves. That "id" can come back as null for an IMAP account whose
+    server does not report the new id; call e_mail_overzicht on the destination folder to find
+    the message back in that case.
+
+    Args:
+        message_id: The message's id (from e_mail_overzicht/e_mail_lezen).
+        destination: Id of the destination folder (from e_mail_mappen or e_mail_map_aanmaken).
+        account: Which linked account to use — "outlook", or an IMAP account's e-mail
+            address. Only required if this household member has linked more than one mail
+            account — omit it if they only have one. Use e_mail_accounts() to see the options.
+    """
+    payload = {"destination": destination}
+    if account:
+        payload["account"] = account
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/mail/{message_id}/verplaatsen/", json=payload))
+
+
+@mcp.tool()
 def to_do_lijsten(ctx: Context) -> dict:
     """List this household member's Microsoft To Do lists — excluding any list that's already
     linked to a local taken-lijst in Instellingen (a "sync" setup). Linked lists are mirrored
@@ -682,6 +843,162 @@ def to_do_bijwerken(ctx: Context, list_id: str, task_id: str, title: str | None 
         payload["status"] = status
     with _client(ctx) as client:
         return _checked(client.post(f"/instellingen/api/openclaw/outlook/todo/{list_id}/{task_id}/bijwerken/", json=payload))
+
+@mcp.tool()
+def reizen(ctx: Context) -> dict:
+    """Get every trip of this household: destination, dates, stops, documents, ideas and the
+    trip's own task list ("Reis: <destination>") with its tasks.
+
+    Always call this first when an e-mail, document or message mentions travel — a flight
+    confirmation, hotel booking, rental car or insurance policy almost always belongs to a
+    trip that already exists. Update that trip (reis_bijwerken) or attach the document to it
+    (reis_document_toevoegen) instead of creating a second trip for the same journey. Packing
+    and preparation tasks are normal tasks in the trip's task list, so add them with
+    taak_toevoegen(list_name=<the task_list name from here>), not as an idea.
+    """
+    with _client(ctx) as client:
+        return _checked(client.get("/instellingen/api/openclaw/reizen/"))
+
+
+@mcp.tool()
+def reis_toevoegen(ctx: Context, destination: str, start_date: str | None = None, end_date: str | None = None, notes: str | None = None, stops: list[dict] | None = None) -> dict:
+    """Create a NEW trip and give it its own task list in FamilyApp's normal Taken tab.
+
+    Check reizen() first: only create a trip when this journey isn't in the list yet.
+    The task list is created automatically and is named "Reis: <destination>"; use that name
+    with taak_toevoegen's `list_name` for packing and preparation tasks.
+
+    Args:
+        destination: Where the trip goes, e.g. "Barcelona" or "Ardennen". Required.
+        start_date: Departure date as ISO 8601 (YYYY-MM-DD). Omit if unknown.
+        end_date: Return date as ISO 8601 (YYYY-MM-DD). Must not be before start_date.
+        notes: Free-text notes, e.g. "vlucht 's ochtends, huurauto geregeld".
+        stops: Optional intermediate stops, in order. Each stop is a dict with "name"
+            (required) and optionally "arrives_on"/"departs_on" as YYYY-MM-DD.
+    """
+    payload: dict = {"destination": destination}
+    if start_date:
+        payload["start_date"] = start_date
+    if end_date:
+        payload["end_date"] = end_date
+    if notes:
+        payload["notes"] = notes
+    if stops:
+        payload["stops"] = stops
+    with _client(ctx) as client:
+        return _checked(client.post("/instellingen/api/openclaw/reizen/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_bijwerken(ctx: Context, trip_id: int, destination: str | None = None, start_date: str | None = None, end_date: str | None = None, notes: str | None = None) -> dict:
+    """Update an EXISTING trip. Only the arguments you actually pass are changed.
+
+    This is the tool for the common case where you learn something new about a trip that is
+    already in FamilyApp — a flight confirmation that finally names the departure date, or a
+    hotel booking that shifts the return. Get trip_id from reizen(). To attach the
+    confirmation itself, use reis_document_toevoegen.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        destination: New destination, if it changed.
+        start_date: New departure date (YYYY-MM-DD). Pass "" to clear it.
+        end_date: New return date (YYYY-MM-DD). Pass "" to clear it.
+        notes: New free-text notes. Pass "" to clear.
+    """
+    payload = {}
+    if destination is not None:
+        payload["destination"] = destination
+    if start_date is not None:
+        payload["start_date"] = start_date
+    if end_date is not None:
+        payload["end_date"] = end_date
+    if notes is not None:
+        payload["notes"] = notes
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/bijwerken/", json=payload))
+
+
+@mcp.tool()
+def reis_tussenstop_toevoegen(ctx: Context, trip_id: int, name: str, arrives_on: str | None = None, departs_on: str | None = None) -> dict:
+    """Add one intermediate stop to an EXISTING trip, at the end of its route.
+
+    Use this when you learn about a place the family stays on the way — a hotel booking for
+    two nights in Girona on the road to Barcelona. Get trip_id from reizen() and check its
+    "stops" first, so you don't add the same stop twice; a stop can only be removed in the
+    app itself. For a whole new journey, use reis_toevoegen with its stops argument instead.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        name: The place of the stop, e.g. "Girona".
+        arrives_on: Arrival date as ISO 8601 (YYYY-MM-DD). Omit if unknown.
+        departs_on: Departure date as ISO 8601 (YYYY-MM-DD). Must not be before arrives_on.
+    """
+    payload = {"name": name}
+    if arrives_on:
+        payload["arrives_on"] = arrives_on
+    if departs_on:
+        payload["departs_on"] = departs_on
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/tussenstops/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_takenlijst_koppelen(ctx: Context, trip_id: int) -> dict:
+    """Give a trip a new list in FamilyApp's Taken tab when it lost the old one.
+
+    Only needed when reizen() reports "task_list": null for a trip — that happens after the
+    family deleted the list in the Taken tab. A new list "Reis: <destination>" is created and
+    linked, so packing and preparation tasks have somewhere to go again. Creating a trip
+    already does this by itself, so never call this right after reis_toevoegen.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/takenlijst/koppelen/", json={}))
+
+
+@mcp.tool()
+def reis_document_toevoegen(ctx: Context, trip_id: int, title: str, url: str | None = None, dropbox_path: str | None = None) -> dict:
+    """Attach a travel document (ticket, booking confirmation, insurance policy) to a trip.
+
+    Pass exactly ONE of url or dropbox_path — this tool links to where the document already
+    lives and cannot upload file contents (that is browser-only in FamilyApp). Use
+    dropbox_zoeken or dropbox_map first to find the exact Dropbox path of a file the family
+    already saved; for a booking that only exists as a web link, pass url. Find trip_id with
+    reizen(), and prefer attaching to an existing trip over creating a new one.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        title: Short Dutch title, e.g. "Vluchtbevestiging KL1234" or "Hotel Barcelona".
+        url: Link to the document. Use this OR dropbox_path, never both.
+        dropbox_path: Full path of the file in the linked Dropbox, e.g.
+            "/Reizen/Barcelona/tickets.pdf" (see dropbox_zoeken). Use this OR url.
+    """
+    payload = {"title": title}
+    if url:
+        payload["url"] = url
+    if dropbox_path:
+        payload["dropbox_path"] = dropbox_path
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/documenten/toevoegen/", json=payload))
+
+
+@mcp.tool()
+def reis_idee_toevoegen(ctx: Context, trip_id: int, text: str) -> dict:
+    """Add a loose idea to a trip — a suggestion or note that is explicitly not a task yet.
+
+    Use this for brainstorm material ("museum met kinderkorting in Barcelona"). Anything that
+    actually has to be done before leaving belongs in the trip's task list instead: call
+    taak_toevoegen with list_name set to the task_list name from reizen(). Ideas added here
+    are marked as created by the agent, so the family can see where they came from.
+
+    Args:
+        trip_id: The trip's numeric id (from reizen()).
+        text: The idea, in Dutch.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/reizen/{trip_id}/ideeen/toevoegen/", json={"text": text}))
 
 
 if __name__ == "__main__":

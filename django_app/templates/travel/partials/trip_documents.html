@@ -1,0 +1,13 @@
+<h3>{{ trip.destination }}{% if active_membership.can_manage %} <button class="icon-button" type="button" data-open-dialog="trip-document-{{ trip.id }}" title="Document koppelen" aria-label="Document koppelen aan {{ trip.destination }}"><i data-lucide="paperclip"></i></button>{% endif %}</h3>
+<ul class="clean-list">
+  {% for document in trip.documents.all %}
+    <li>
+      <i data-lucide="{% if document.file %}file-text{% elif document.dropbox_path %}folder{% else %}link{% endif %}"></i>
+      <div><strong>{{ document.title }}</strong><small>{% if document.file %}Geüpload bestand{% elif document.dropbox_path %}Dropbox · {{ document.dropbox_path }}{% else %}Link{% endif %} · {{ document.created_at|date:'d M Y' }}</small></div>
+      {% if document.file %}<a class="icon-button" href="{% url 'travel:download_document' document.id %}" title="Downloaden" aria-label="{{ document.title }} downloaden"><i data-lucide="download"></i></a>{% elif document.url %}<a class="icon-button" href="{{ document.url }}" target="_blank" rel="noreferrer" title="Openen" aria-label="{{ document.title }} openen"><i data-lucide="external-link"></i></a>{% endif %}
+      {% if active_membership.can_manage %}<form method="post" action="{% url 'travel:delete_document' document.id %}">{% csrf_token %}<button class="icon-button destructive" type="submit" title="Document verwijderen" aria-label="{{ document.title }} verwijderen"><i data-lucide="trash-2"></i></button></form>{% endif %}
+    </li>
+  {% empty %}
+    <li class="empty-copy">Nog geen documenten bij deze reis.</li>
+  {% endfor %}
+</ul>
