@@ -91,21 +91,26 @@ def index(request):
     start = timezone.make_aware(datetime.combine(start_date, time.min))
     end = timezone.make_aware(datetime.combine(end_date, time.min))
     selected_sources = request.GET.getlist("source")
-    events = CalendarEvent.objects.for_household(request.household).filter(starts_at__lt=end, ends_at__gte=start).filter(Q(source__isnull=True) | Q(source__is_enabled=True)).select_related("source", "invite__venue", "invite__wishlist").prefetch_related("invite__program_items", "invite__questions", "invite__guests__answers__question")
+    events = CalendarEvent.objects.for_household(request.household).filter(starts_at__lt=end, ends_at__gte=start).filter(Q(source__isnull=True) | Q(source__is_enabled=True)).select_related("source", "target_source", "invite__venue", "invite__wishlist").prefetch_related("invite__program_items", "invite__questions", "invite__guests__answers__question")
     if selected_sources:
         events = events.filter(source_id__in=selected_sources)
     sources = list(CalendarSource.objects.for_household(request.household).order_by("provider", "name"))
     for source in sources:
         source.last_sync_error = _latest_push_error(source)
-    form = CalendarEventForm()
+    form = CalendarEventForm(household=request.household)
     form.fields["participants"].queryset = request.user.__class__.objects.filter(memberships__household=request.household).distinct()
     event_list = list(events)
+    receiving_sources = list(CalendarSource.receiving(request.household))
+    receiving_ids = {source.pk for source in receiving_sources}
     venues = list(EventVenue.objects.for_household(request.household))
     wishlists = list(WishList.objects.for_household(request.household))
     for event in event_list:
         # A reverse OneToOne raises DoesNotExist when it is missing, so hand the template a
         # plain attribute instead of making it rely on silent template failures.
         event.event_invite = _invite_of(event)
+        # Its target calendar stopped accepting events, so the picker has to keep offering it
+        # instead of resetting the choice the next time someone opens the dialog.
+        event.target_is_paused = bool(event.target_source_id) and event.target_source_id not in receiving_ids
         if event.event_invite and event.event_invite.is_shared and event.event_invite.share_token:
             event.event_invite.public_url = _public_invite_url(request, event.event_invite)
     # Every live public link, whatever the calendar is showing: an invitation for a party in
@@ -120,23 +125,29 @@ def index(request):
         "sources": sources, "selected_sources": selected_sources, "event_form": form, "ics_form": IcsSubscriptionForm(), "ics_file_form": IcsFileForm(),
         "members": request.user.__class__.objects.filter(memberships__household=request.household).distinct(),
         "venues": venues, "wishlists": wishlists, "venue_form": EventVenueForm(), "question_kinds": EventQuestion.Kind.choices,
-        "shared_invites": shared_invites,
+        "shared_invites": shared_invites, "receiving_sources": receiving_sources,
     })
 
 
 @household_required
 @require_POST
 def add_event(request):
-    form = CalendarEventForm(request.POST)
+    form = CalendarEventForm(request.POST, household=request.household)
     form.fields["participants"].queryset = request.user.__class__.objects.filter(memberships__household=request.household).distinct()
     if form.is_valid():
         event = form.save(commit=False)
         event.household = request.household
         event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+        event.target_source = form.cleaned_data["target_source"]
         event.mark_pending()
         event.save()
         form.save_m2m()
-        messages.success(request, "Afspraak toegevoegd.")
+        if event.target_source:
+            messages.success(request, f"Afspraak toegevoegd. Hij wordt binnen enkele minuten naar {event.target_source.name} teruggestuurd.")
+        else:
+            messages.success(request, "Afspraak toegevoegd.")
+    else:
+        messages.error(request, "Controleer de afspraakvelden.")
     return redirect("planning:index")
 
 
@@ -151,14 +162,20 @@ def _local_event_or_404(request, event_id):
 @require_POST
 def update_event(request, event_id):
     event = _local_event_or_404(request, event_id)
-    form = CalendarEventForm(request.POST, instance=event)
+    form = CalendarEventForm(request.POST, instance=event, household=request.household)
     form.fields["participants"].queryset = request.user.__class__.objects.filter(memberships__household=request.household).distinct()
     if form.is_valid():
         event = form.save(commit=False)
+        previous_target = event.target_source
+        left_behind = event.retarget(form.cleaned_data["target_source"])
         event.mark_pending()
         event.save()
         form.save_m2m()
         messages.success(request, "Afspraak aangepast.")
+        if left_behind:
+            # There is no delete-sync, so the old calendar keeps its copy: say it here instead of
+            # letting the same appointment quietly show up twice.
+            messages.success(request, f"Let op: de kopie in {previous_target.name if previous_target else 'de vorige agenda'} blijft daar staan. Verwijder hem daar zelf.")
     else:
         messages.error(request, "Controleer de afspraakvelden.")
     return redirect("planning:index")
@@ -170,7 +187,7 @@ def delete_event(request, event_id):
     event = _local_event_or_404(request, event_id)
     # There is no delete-sync: an event that was already pushed keeps existing in the external
     # calendar and the next pull would import it again, so say so instead of pretending it is gone.
-    pushed_to = CalendarSource.write_back_target(request.household) if event.external_id else None
+    pushed_to = event.target_source if event.external_id else None
     event.delete()
     messages.success(request, "Afspraak verwijderd.")
     if pushed_to:
@@ -240,7 +257,11 @@ def toggle_source(request, source_id):
 @parent_required
 @require_POST
 def toggle_source_write_back(request, source_id):
-    """Turn "lokale afspraken hierheen terugsturen" on or off for one linked calendar."""
+    """Turn "lokale afspraken hierheen terugsturen" on or off for one linked calendar.
+
+    More than one calendar may be switched on: this only decides which calendars are offered as a
+    "Terugsturen naar" target, and every appointment picks exactly one of them itself.
+    """
     source = get_object_or_404(CalendarSource.objects.for_household(request.household), pk=source_id)
     if not source.supports_write_back:
         messages.error(request, f"{source.name} kan geen afspraken ontvangen.")
@@ -254,17 +275,11 @@ def toggle_source_write_back(request, source_id):
     source.is_read_only = not source.sync_local_events
     source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
     if not source.sync_local_events:
+        # Appointments still pointing here keep their choice on paper, but the push task skips a
+        # calendar that is switched off, so nothing leaves the app behind the user's back.
         messages.success(request, f"Lokale afspraken worden niet meer naar {source.name} teruggestuurd.")
         return redirect("planning:index")
-    messages.success(request, f"Lokale afspraken worden voortaan naar {source.name} teruggestuurd.")
-    # An event carries one external_id, so it can live in exactly one external calendar: turning
-    # write-back on here has to turn it off everywhere else, or every appointment would be
-    # duplicated across calendars.
-    superseded = CalendarSource.objects.for_household(request.household).filter(sync_local_events=True, provider__in=list(CalendarSource.WRITE_BACK_PROVIDERS)).exclude(pk=source.pk)
-    names = list(superseded.values_list("name", flat=True))
-    if names:
-        superseded.update(sync_local_events=False, is_read_only=True, updated_at=timezone.now())
-        messages.success(request, f"Terugsturen naar {', '.join(names)} is uitgezet: er kan er maar één tegelijk aanstaan.")
+    messages.success(request, f"{source.name} kan voortaan afspraken ontvangen. Kies per afspraak bij 'Terugsturen naar' waar hij naartoe gaat.")
     return redirect("planning:index")
 
 

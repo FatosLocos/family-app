@@ -378,6 +378,10 @@ def huis_bedienen(ctx: Context, entity_id: int, action: str, value: str | None =
 def agenda(ctx: Context, start: str | None = None, end: str | None = None) -> dict:
     """Get calendar events. Returns the ENTIRE calendar (past and future) unless narrowed.
 
+    Every event also reports "target_calendar" (the external calendar it is sent back to, or null
+    when it only lives in FamilyApp) and "sync_status": "pending" while it still has to go out,
+    "synced" once it is in that calendar, "error" when the last attempt failed.
+
     Args:
         start: Optional ISO date/datetime — only events ending on or after this. Omit for no lower bound.
         end: Optional ISO date/datetime — only events starting before this. Omit for no upper bound.
@@ -393,27 +397,28 @@ def agenda(ctx: Context, start: str | None = None, end: str | None = None) -> di
 
 @mcp.tool()
 def agenda_bronnen(ctx: Context) -> dict:
-    """List the household's calendars and where a new event actually ends up.
+    """List the household's calendars and which of them can receive a new event.
 
     Every source reports its name, its provider ("local", "outlook", "ics", "google_calendar"
-    or "caldav"), whether it is switched on, and "sends_local_events": whether events added with
-    afspraak_toevoegen are really pushed to that external calendar, credentials and all. Call
-    this before promising someone that an appointment will show up in Outlook: at most one
-    calendar can receive the write-back, and only if a parent turned it on in the Agenda tab. If
-    no source reports true, the appointment stays inside FamilyApp. There is no tool to change
-    that setting. Pushing runs on a timer, so it can take a few minutes to appear in Outlook.
+    or "caldav"), whether it is switched on, and "sends_local_events": whether an appointment
+    addressed to that calendar is really pushed to it, credentials and all. Call this before
+    using target_calendar on afspraak_toevoegen or afspraak_bijwerken — that argument takes the
+    exact name of a source reporting "sends_local_events": true. A parent turns that on per
+    calendar in the Agenda tab and there is no tool to change it. If no source reports true, an
+    appointment can only stay inside FamilyApp. Pushing runs on a timer, so it can take a few
+    minutes to appear in Outlook.
     """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/agenda/bronnen/"))
 
 
 @mcp.tool()
-def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None) -> dict:
+def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None, target_calendar: str | None = None) -> dict:
     """Add a new event to the household's shared calendar.
 
-    The event lands in the family calendar. If a parent turned write-back on for an external
-    calendar it is also pushed there within a few minutes — call agenda_bronnen first when
-    someone asks whether the appointment will show up in Outlook, instead of assuming it does.
+    The event always lands in the family calendar. Pass target_calendar to have it written to an
+    external calendar such as Outlook as well; that push runs on a timer, so it takes a few
+    minutes to show up there.
 
     Args:
         title: What the event is (required).
@@ -422,18 +427,24 @@ def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, i
         is_all_day: Whether this is an all-day event (default False).
         location: Optional location.
         notes: Optional free-text notes.
+        target_calendar: Exact name of the calendar to send this appointment to, from
+            agenda_bronnen() — only a source with "sends_local_events": true accepts one, and an
+            unknown name is refused with the list of calendars that do. Omit it (the default) and
+            the appointment stays in FamilyApp only.
     """
     payload = {"title": title, "starts_at": starts_at, "ends_at": ends_at, "is_all_day": is_all_day}
     if location:
         payload["location"] = location
     if notes:
         payload["notes"] = notes
+    if target_calendar:
+        payload["target_calendar"] = target_calendar
     with _client(ctx) as client:
         return _checked(client.post("/instellingen/api/openclaw/agenda/toevoegen/", json=payload))
 
 
 @mcp.tool()
-def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, starts_at: str | None = None, ends_at: str | None = None, is_all_day: bool | None = None, location: str | None = None, notes: str | None = None) -> dict:
+def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, starts_at: str | None = None, ends_at: str | None = None, is_all_day: bool | None = None, location: str | None = None, notes: str | None = None, target_calendar: str | None = None) -> dict:
     """Update one or more fields on an existing calendar event. Only the arguments you
     pass are changed.
 
@@ -450,6 +461,10 @@ def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, st
         is_all_day: Whether it's an all-day event.
         location: New location. Pass "" to clear.
         notes: New free-text notes. Pass "" to clear.
+        target_calendar: Exact name of the calendar this appointment has to be sent to, from
+            agenda_bronnen(); pass "" to keep it in FamilyApp only. Changing it recreates the
+            appointment in the new calendar and returns a "warning": the copy in the old calendar
+            stays behind and has to be deleted there by hand. Omit it to leave the choice alone.
     """
     payload = {}
     if title is not None:
@@ -464,6 +479,8 @@ def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, st
         payload["location"] = location
     if notes is not None:
         payload["notes"] = notes
+    if target_calendar is not None:
+        payload["target_calendar"] = target_calendar
     with _client(ctx) as client:
         return _checked(client.post(f"/instellingen/api/openclaw/agenda/{event_id}/bijwerken/", json=payload))
 

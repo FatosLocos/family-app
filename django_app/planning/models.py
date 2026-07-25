@@ -43,6 +43,10 @@ class CalendarSource(PlanningRecord):
     caldav_username = models.CharField(max_length=120, blank=True)  # CalDAV username
     sync_local_events = models.BooleanField(default=True)  # Whether to sync local events back to remote
 
+    def __str__(self):
+        # The "Terugsturen naar" picker renders these straight from the queryset.
+        return self.name
+
     @property
     def supports_write_back(self) -> bool:
         """Whether this source's provider is able to receive locally created events at all."""
@@ -66,35 +70,34 @@ class CalendarSource(PlanningRecord):
         return bool(self.write_access_token)
 
     @classmethod
-    def write_back_target(cls, household):
-        """The one calendar that currently receives this household's locally created events.
+    def receiving(cls, household):
+        """The calendars a CalendarEvent.target_source may point at right now.
 
-        A CalendarEvent carries a single external_id, so it can live in exactly one external
-        calendar; planning.views.toggle_source_write_back keeps at most one source switched on and
-        this returns the oldest one if a leftover ever slips through. A source that wants to
-        receive events but has lost its credentials is skipped here and shows up in the Agenda tab
-        as "Terugsturen wacht op koppeling".
+        Every gate planning.tasks.sync_pending_events_to_remote applies is repeated here,
+        credentials included, so the "Terugsturen naar" picker, OpenClaw and the push task can
+        never disagree about which calendar really accepts an appointment. A source that wants to
+        receive events but has lost its credentials is left out and shows up in the Agenda tab as
+        "Terugsturen wacht op koppeling".
         """
         candidates = cls.objects.for_household(household).filter(
             is_enabled=True, is_read_only=False, sync_local_events=True, provider__in=list(cls.WRITE_BACK_PROVIDERS)
-        ).select_related("connection").order_by("pk")
-        for source in candidates:
-            if source.accepts_local_events:
-                return source
-        return None
+        ).select_related("connection").order_by("name", "pk")
+        # A queryset rather than the list: forms.ModelChoiceField needs one, and accepts_local_events
+        # is a Python property so the credential half of the filter cannot live in SQL.
+        return cls.objects.for_household(household).filter(pk__in=[source.pk for source in candidates if source.accepts_local_events]).order_by("name", "pk")
 
 
 class CalendarEventQuerySet(HouseholdQuerySet):
     def pushable_to(self, source):
         """Every event sync_pending_events_to_remote may send to `source`.
 
-        Besides the events that already live on that calendar this covers the locally created
-        ones: planning.views.add_event files those under the household's own "Gezinsagenda"
-        (a LOCAL source, or no source at all for older rows), so without them the write-back
-        toggle would have nothing to send at all.
+        Two routes lead to a calendar: an event that already lives on it, and a locally created
+        one whose "Terugsturen naar" (target_source) points at it. The target always wins over the
+        origin, so an event that was addressed to another calendar is pushed there and nowhere
+        else — one event carries one external_id and may exist in one external calendar only.
         """
         return self.filter(household_id=source.household_id).filter(
-            models.Q(source=source) | models.Q(source__isnull=True) | models.Q(source__provider=CalendarSource.Provider.LOCAL)
+            models.Q(target_source=source) | models.Q(source=source, target_source__isnull=True)
         )
 
 
@@ -109,6 +112,9 @@ class CalendarEvent(PlanningRecord):
         ERROR = "error", "Error"
 
     source = models.ForeignKey(CalendarSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="events")
+    # Where a locally created event is written back to; source stays the calendar it came from.
+    # Empty means the appointment never leaves FamilyApp.
+    target_source = models.ForeignKey(CalendarSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="targeted_events")
     external_id = models.CharField(max_length=300, blank=True)
     title = models.CharField(max_length=240)
     starts_at = models.DateTimeField()
@@ -139,6 +145,23 @@ class CalendarEvent(PlanningRecord):
         """
         self.sync_status = self.SyncStatus.PENDING
         self.last_sync_error = ""
+
+    def retarget(self, source) -> bool:
+        """Send this event to another calendar from now on. Returns True when a copy is left behind.
+
+        external_id belongs to the calendar the event was created in, so it is dropped together
+        with the target: that is what makes the next push create the appointment in the new
+        calendar instead of patching the one in the old. There is no delete-sync, so the copy in
+        the old calendar keeps existing and every caller has to say so out loud.
+        """
+        if (source.pk if source else None) == self.target_source_id:
+            return False
+        self.target_source = source
+        left_behind = bool(self.external_id)
+        self.external_id = ""
+        self.remote_updated_at = None
+        self.mark_pending()
+        return left_behind
 
 
 class IcsSubscription(PlanningRecord):

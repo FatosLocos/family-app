@@ -2188,10 +2188,14 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
             for event in payload.get("value", []):
                 if not event.get("id"):
                     continue
-                # Matching on external_id alone (Graph ids are unique) finds a locally created
-                # event that was already pushed to this calendar too — that one keeps its LOCAL
-                # source so it stays editable in the app, and must not be duplicated here.
-                local_event = CalendarEvent.objects.pushable_to(source).filter(external_id=event["id"]).first()
+                # Match on external_id across the whole household first, and only prefer this
+                # calendar's own row when several carry the same id: Graph ids are unique, and a
+                # locally created event that was pushed here keeps its LOCAL source (so it stays
+                # editable in the app) while carrying the Graph id. Matching on
+                # (source, external_id) alone would miss that row and file the appointment a
+                # second time, which is exactly how the user ends up seeing it twice.
+                known = CalendarEvent.objects.for_household(connection.household).filter(external_id=event["id"])
+                local_event = known.filter(source=source).first() or known.first()
                 if local_event is None:
                     local_event = CalendarEvent(household=connection.household, source=source, external_id=event["id"])
                 elif local_event.sync_status in {CalendarEvent.SyncStatus.PENDING, CalendarEvent.SyncStatus.ERROR}:
