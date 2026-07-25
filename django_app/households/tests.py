@@ -15,8 +15,10 @@ class InviteFlowTests(TestCase):
         self.client.force_login(self.owner)
         self.client.post(reverse("households:create_invite"), {"role": "child", "label": "Kind"})
         invite = HouseholdInvite.objects.get(household=self.household)
+        # Het model bewaart alleen code_hash; de leesbare code komt uit de sessie van de maker.
+        code = self.client.session[f"invite_code_{invite.id}"]
         guest = self.client_class()
-        response = guest.get(reverse("households:accept_invite", args=[invite.code]))
+        response = guest.get(reverse("households:accept_invite", args=[code]))
         self.assertRedirects(response, reverse("identity:signup"))
         response = guest.get(reverse("identity:signup"))
         self.assertContains(response, "Sluit aan bij Gezin")
@@ -46,6 +48,26 @@ class InviteFlowTests(TestCase):
             user=user,
             role=Membership.Role.OWNER,
         ).exists())
+
+    def test_signup_leaves_the_new_user_logged_in(self):
+        # Regressietest: met twee authenticatie-backends moet login() een expliciete backend
+        # krijgen, anders faalt registreren met een ValueError en rolt alles terug.
+        response = self.client.post(reverse("identity:signup"), {
+            "display_name": "Ingelogde ouder",
+            "household_name": "Ingelogd gezin",
+            "email": "ingelogd@example.com",
+            "password1": "safe-password-123",
+            "password2": "safe-password-123",
+        }, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain[-1][0], reverse("today"))
+        user = User.objects.get(email="ingelogd@example.com")
+        self.assertTrue(response.wsgi_request.user.is_authenticated)
+        self.assertEqual(response.wsgi_request.user, user)
+        self.assertEqual(self.client.session["_auth_user_id"], str(user.pk))
+        household = Household.objects.get(name="Ingelogd gezin")
+        self.assertEqual(self.client.session["active_household_id"], household.pk)
 
     def test_signup_renders_the_specific_field_error(self):
         response = self.client.post(reverse("identity:signup"), {

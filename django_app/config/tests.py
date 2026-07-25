@@ -131,7 +131,8 @@ class HouseholdSearchTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Service-Worker-Allowed"], "/")
         self.assertContains(response, 'const OFFLINE_URL = "/offline/"')
-        self.assertContains(response, 'const CACHE_NAME = "family-app-static-v7"')
+        # Het versienummer wordt bewust opgehoogd bij elke wijziging, dus assert op het patroon.
+        self.assertRegex(response.content.decode(), r'const CACHE_NAME = "family-app-static-v\d+"')
         self.assertContains(response, 'caches.delete(key)')
 
     def test_authenticated_pages_reject_embedding_in_a_frame(self):

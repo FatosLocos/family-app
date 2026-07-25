@@ -1043,10 +1043,16 @@ class ProviderSyncTests(TestCase):
         with patch("integrations.providers._google_home_request", return_value=payload), patch("integrations.providers.requests.put", return_value=FakeResponse({})) as relay:
             result = start_google_home_live_stream(entity)
 
-        self.assertEqual(result["stream_name"], "family-app-live-mjpeg")
+        # De streamnaam is per huishouden en apparaat, zodat meerdere camera's elkaar niet
+        # overschrijven. Hij is deterministisch, dus een volgende sync hergebruikt dezelfde stream.
+        rtsp_stream_name = f"family-app-{entity.household_id}-{entity.id}"
+        mjpeg_stream_name = f"{rtsp_stream_name}-mjpeg"
+        self.assertEqual(result["stream_name"], mjpeg_stream_name)
+        self.assertEqual(result["rtsp_stream_name"], rtsp_stream_name)
         self.assertEqual(relay.call_count, 2)
-        self.assertEqual(relay.call_args_list[0].kwargs["params"]["name"], "family-app-live")
-        self.assertEqual(relay.call_args_list[1].kwargs["params"]["src"], "ffmpeg:family-app-live#video=mjpeg")
+        self.assertEqual(relay.call_args_list[0].kwargs["params"]["name"], rtsp_stream_name)
+        self.assertEqual(relay.call_args_list[1].kwargs["params"]["name"], mjpeg_stream_name)
+        self.assertEqual(relay.call_args_list[1].kwargs["params"]["src"], f"ffmpeg:{rtsp_stream_name}#video=mjpeg")
 
     def test_lg_thinq_sync_uses_configured_device_path(self):
         connection = IntegrationConnection.objects.create(
