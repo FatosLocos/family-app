@@ -26,6 +26,7 @@ from integrations.sonos_events import sonos_event_signature
 from integrations.tasks import sync_active_connections, sync_connection_task, sync_home_connect_connections
 from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource
+from planning.tasks import sync_pending_events_to_remote
 
 
 class FakeResponse:
@@ -1249,7 +1250,7 @@ class ProviderSyncTests(TestCase):
         def outlook_request(_method, url, **_kwargs):
             if url.endswith("me/calendars?$select=id,name"):
                 return FakeResponse({"value": [{"id": "calendar-1", "name": "Gezin"}]})
-            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}, "body": {"contentType": "text", "content": "Meenemen: sporttas"}}]})
 
         with patch("integrations.providers.requests.request", side_effect=outlook_request):
             result = sync_outlook(connection)
@@ -1267,6 +1268,78 @@ class ProviderSyncTests(TestCase):
         # A freshly pulled event must never look like an unsent local change.
         self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
         self.assertIsNotNone(event.remote_updated_at)
+        self.assertEqual(event.notes, "Meenemen: sporttas")
+
+    def _outlook_calendar_connection(self):
+        return IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+
+    def _outlook_calendar_pull(self):
+        def outlook_request(_method, url, **_kwargs):
+            if url.endswith("me/calendars?$select=id,name"):
+                return FakeResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "location": {"displayName": "Hal"}, "body": {"contentType": "text", "content": "Van Outlook"}}]})
+
+        return outlook_request
+
+    def test_outlook_sync_never_duplicates_or_overwrites_a_locally_created_event(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection, is_read_only=False, sync_local_events=True)
+        local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        start = timezone.now()
+        # This is what a local event looks like right after the push task created it in Outlook:
+        # it keeps the family calendar as its source but carries the Graph id.
+        pushed = CalendarEvent.objects.create(household=self.household, source=local_source, external_id="event-1", title="Tandarts", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.PENDING, notes="Halfjaarlijkse controle")
+
+        with patch("integrations.providers.requests.request", side_effect=self._outlook_calendar_pull()):
+            sync_outlook(connection)
+
+        self.assertEqual(CalendarEvent.objects.filter(household=self.household, external_id="event-1").count(), 1)
+        pushed.refresh_from_db()
+        # The edit has not been sent yet, so the pull may not throw it away either.
+        self.assertEqual(pushed.title, "Tandarts")
+        self.assertEqual(pushed.notes, "Halfjaarlijkse controle")
+        self.assertEqual(pushed.sync_status, CalendarEvent.SyncStatus.PENDING)
+        self.assertEqual(pushed.source_id, local_source.pk)
+        self.assertEqual(source.events.count(), 0)
+
+    def test_outlook_sync_keeps_a_failed_push_visible_instead_of_clearing_it(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection, is_read_only=False, sync_local_events=True)
+        start = timezone.now()
+        event = CalendarEvent.objects.create(household=self.household, source=source, external_id="event-1", title="Teamoverleg", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.ERROR, last_sync_error="Access is denied.")
+
+        with patch("integrations.providers.requests.request", side_effect=self._outlook_calendar_pull()):
+            sync_outlook(connection)
+
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.ERROR)
+        self.assertEqual(event.last_sync_error, "Access is denied.")
+        self.assertEqual(event.title, "Teamoverleg")
+
+    def test_outlook_sync_skips_a_remote_event_that_is_older_than_the_last_sync(self):
+        connection = self._outlook_calendar_connection()
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=connection)
+        start = timezone.now()
+        event = CalendarEvent.objects.create(household=self.household, source=source, external_id="event-1", title="Al bijgewerkt", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED, remote_updated_at=timezone.now())
+
+        def outlook_request(_method, url, **_kwargs):
+            if url.endswith("me/calendars?$select=id,name"):
+                return FakeResponse({"value": [{"id": "calendar-1", "name": "Werkagenda"}]})
+            return FakeResponse({"value": [{"id": "event-1", "subject": "Sport", "start": {"dateTime": "2026-07-13T09:00:00"}, "end": {"dateTime": "2026-07-13T10:00:00"}, "isAllDay": False, "lastModifiedDateTime": "2020-01-01T10:00:00Z"}]})
+
+        with patch("integrations.providers.requests.request", side_effect=outlook_request):
+            result = sync_outlook(connection)
+
+        self.assertEqual(result, {"calendars": 1, "events": 1})
+        event.refresh_from_db()
+        self.assertEqual(event.title, "Al bijgewerkt")
 
     def test_bunq_sync_falls_back_to_user_endpoint_and_discovers_multiple_accounts(self):
         connection = IntegrationConnection.objects.create(
@@ -2364,11 +2437,23 @@ class OpenClawCalendarSourceTests(TestCase):
         self.household = Household.objects.create(name="Eerste gezin")
         Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
         self.other_household = Household.objects.create(name="Tweede gezin")
-        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
-        CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", is_read_only=False, sync_local_events=True)
+        self.connection = IntegrationConnection.objects.create(
+            household=self.household,
+            user=self.user,
+            provider="outlook",
+            display_name="Outlook agenda",
+            secret_encrypted=encrypt("refresh-token"),
+            settings={"access_token": encrypt("access-token"), "expires_at": (timezone.now() + timedelta(hours=1)).isoformat()},
+        )
+        self.local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        self.work_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werkagenda", external_id="calendar-1", connection=self.connection, is_read_only=False, sync_local_events=True)
         CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.ICS, name="Feestdagen", is_read_only=True, sync_local_events=False)
         CalendarSource.objects.create(household=self.other_household, provider=CalendarSource.Provider.OUTLOOK, name="Agenda van de buren")
         _, self.token = create_token(self.household, self.user, scopes=["agenda:read"])
+
+    def _sources(self):
+        response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        return {source["name"]: source for source in response.json()["sources"]}
 
     def test_sources_report_where_a_local_event_ends_up(self):
         response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
@@ -2381,6 +2466,21 @@ class OpenClawCalendarSourceTests(TestCase):
         self.assertFalse(sources["Feestdagen"]["sends_local_events"])
         self.assertFalse(sources["Feestdagen"]["supports_write_back"])
         self.assertFalse(sources["Gezinsagenda"]["supports_write_back"])
+        # The family calendar has nowhere to push to, so it must never claim it does.
+        self.assertFalse(sources["Gezinsagenda"]["sends_local_events"])
+
+    def test_a_hidden_calendar_does_not_claim_to_receive_events(self):
+        self.work_source.is_enabled = False
+        self.work_source.save(update_fields=["is_enabled", "updated_at"])
+
+        self.assertFalse(self._sources()["Werkagenda"]["sends_local_events"])
+
+    def test_a_calendar_without_its_outlook_connection_does_not_claim_to_receive_events(self):
+        self.connection.delete()
+
+        self.work_source.refresh_from_db()
+        self.assertTrue(self.work_source.sync_local_events)
+        self.assertFalse(self._sources()["Werkagenda"]["sends_local_events"])
 
     def test_another_households_calendars_are_never_returned(self):
         response = self.client.get(reverse("integrations:api_openclaw_calendar_sources"), HTTP_AUTHORIZATION=f"Bearer {self.token}")
@@ -2411,6 +2511,50 @@ class OpenClawCalendarSourceTests(TestCase):
         self.assertEqual(event.location, "Praktijk")
         self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
         self.assertEqual(event.last_sync_error, "")
+
+    def test_an_event_added_by_openclaw_is_pushed_to_the_linked_outlook_calendar(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        calls = []
+
+        def graph_request(method, url, **_kwargs):
+            calls.append((method, url))
+            return FakeResponse({"id": "graph-event-3"}, status_code=201)
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_add_event"),
+            data=json.dumps({"title": "Tandarts", "starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat()}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual(calls, [("POST", "https://graph.microsoft.com/v1.0/me/calendars/calendar-1/events")])
+        event = CalendarEvent.objects.get(household=self.household, title="Tandarts")
+        self.assertEqual(event.external_id, "graph-event-3")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+
+    def test_an_event_from_an_outlook_calendar_cannot_be_rewritten(self):
+        _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(household=self.household, source=self.work_source, external_id="graph-event-9", title="Teamoverleg", starts_at=start, ends_at=start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        response = self.client.post(
+            reverse("integrations:api_openclaw_update_event", args=[event.id]),
+            data=json.dumps({"title": "Gekaapt via OpenClaw"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {write_token}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "Externe agenda-afspraken zijn alleen-lezen.")
+        event.refresh_from_db()
+        self.assertEqual(event.title, "Teamoverleg")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
 
     def test_updating_an_event_from_another_household_is_not_found(self):
         _, write_token = create_token(self.household, self.user, scopes=["agenda:write"])

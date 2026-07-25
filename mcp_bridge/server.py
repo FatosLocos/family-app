@@ -396,11 +396,12 @@ def agenda_bronnen(ctx: Context) -> dict:
     """List the household's calendars and where a new event actually ends up.
 
     Every source reports its name, its provider ("local", "outlook", "ics", "google_calendar"
-    or "caldav"), whether it is switched on, and "sends_local_events": whether events created
-    in FamilyApp are pushed back to that external calendar. Call this before promising someone
-    that an appointment will show up in Outlook — afspraak_toevoegen always writes to the local
-    family calendar, so it only reaches Outlook if a parent turned write-back on for that
-    calendar in the Agenda tab. There is no tool to change that setting.
+    or "caldav"), whether it is switched on, and "sends_local_events": whether events added with
+    afspraak_toevoegen are really pushed to that external calendar, credentials and all. Call
+    this before promising someone that an appointment will show up in Outlook: at most one
+    calendar can receive the write-back, and only if a parent turned it on in the Agenda tab. If
+    no source reports true, the appointment stays inside FamilyApp. There is no tool to change
+    that setting. Pushing runs on a timer, so it can take a few minutes to appear in Outlook.
     """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/agenda/bronnen/"))
@@ -409,6 +410,10 @@ def agenda_bronnen(ctx: Context) -> dict:
 @mcp.tool()
 def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, is_all_day: bool = False, location: str | None = None, notes: str | None = None) -> dict:
     """Add a new event to the household's shared calendar.
+
+    The event lands in the family calendar. If a parent turned write-back on for an external
+    calendar it is also pushed there within a few minutes — call agenda_bronnen first when
+    someone asks whether the appointment will show up in Outlook, instead of assuming it does.
 
     Args:
         title: What the event is (required).
@@ -431,6 +436,11 @@ def afspraak_toevoegen(ctx: Context, title: str, starts_at: str, ends_at: str, i
 def afspraak_bijwerken(ctx: Context, event_id: int, title: str | None = None, starts_at: str | None = None, ends_at: str | None = None, is_all_day: bool | None = None, location: str | None = None, notes: str | None = None) -> dict:
     """Update one or more fields on an existing calendar event. Only the arguments you
     pass are changed.
+
+    Only events that live in the household's own calendar can be changed. An event that came out
+    of someone's Outlook or ICS calendar is read-only and returns "Externe agenda-afspraken zijn
+    alleen-lezen." — say so instead of trying again; the change has to be made in that calendar
+    itself.
 
     Args:
         event_id: The event's numeric id (from agenda()).

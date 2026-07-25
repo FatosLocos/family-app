@@ -53,10 +53,12 @@ def adjacent_anchors(anchor, view):
 def _latest_push_error(source):
     """CalendarSource has no error field of its own — a failed write-back is recorded on the
     event that failed, so surface the most recent one instead of leaving a broken toggle silent.
+    The event set is the same one the push task walks (locally created events included), because
+    those are exactly the ones that can fail on their way to this calendar.
     """
-    if not source.sync_local_events:
+    if not source.accepts_local_events:
         return ""
-    return source.events.filter(sync_status=CalendarEvent.SyncStatus.ERROR).exclude(last_sync_error="").order_by("-updated_at").values_list("last_sync_error", flat=True).first() or ""
+    return CalendarEvent.objects.pushable_to(source).filter(sync_status=CalendarEvent.SyncStatus.ERROR).exclude(last_sync_error="").order_by("-updated_at").values_list("last_sync_error", flat=True).first() or ""
 
 
 @household_required
@@ -132,8 +134,13 @@ def update_event(request, event_id):
 @require_POST
 def delete_event(request, event_id):
     event = _local_event_or_404(request, event_id)
+    # There is no delete-sync: an event that was already pushed keeps existing in the external
+    # calendar and the next pull would import it again, so say so instead of pretending it is gone.
+    pushed_to = CalendarSource.write_back_target(request.household) if event.external_id else None
     event.delete()
     messages.success(request, "Afspraak verwijderd.")
+    if pushed_to:
+        messages.success(request, f"Let op: deze afspraak staat ook in {pushed_to.name}. Verwijder hem daar zelf, anders komt hij bij de volgende synchronisatie terug.")
     return redirect("planning:index")
 
 
@@ -212,8 +219,16 @@ def toggle_source_write_back(request, source_id):
     # task from ever seeing a source that is both "stuur hierheen" and "alleen-lezen".
     source.is_read_only = not source.sync_local_events
     source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
-    if source.sync_local_events:
-        messages.success(request, f"Lokale afspraken worden voortaan naar {source.name} teruggestuurd.")
-    else:
+    if not source.sync_local_events:
         messages.success(request, f"Lokale afspraken worden niet meer naar {source.name} teruggestuurd.")
+        return redirect("planning:index")
+    messages.success(request, f"Lokale afspraken worden voortaan naar {source.name} teruggestuurd.")
+    # An event carries one external_id, so it can live in exactly one external calendar: turning
+    # write-back on here has to turn it off everywhere else, or every appointment would be
+    # duplicated across calendars.
+    superseded = CalendarSource.objects.for_household(request.household).filter(sync_local_events=True, provider__in=list(CalendarSource.WRITE_BACK_PROVIDERS)).exclude(pk=source.pk)
+    names = list(superseded.values_list("name", flat=True))
+    if names:
+        superseded.update(sync_local_events=False, is_read_only=True, updated_at=timezone.now())
+        messages.success(request, f"Terugsturen naar {', '.join(names)} is uitgezet: er kan er maar één tegelijk aanstaan.")
     return redirect("planning:index")

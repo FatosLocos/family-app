@@ -619,7 +619,7 @@ def api_calendar_sources(request):
                 "name": source.name,
                 "provider": source.provider,
                 "is_enabled": source.is_enabled,
-                "sends_local_events": source.sync_local_events and not source.is_read_only,
+                "sends_local_events": source.accepts_local_events,
                 "supports_write_back": source.supports_write_back,
                 "last_sync_at": source.last_sync_at.isoformat() if source.last_sync_at else None,
             }
@@ -654,7 +654,13 @@ def api_add_event(request):
 @require_POST
 def api_update_event(request, event_id):
     """Partial update of any field on an existing calendar event."""
-    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household).select_related("source"), pk=event_id)
+    if event.source_id and event.source.provider != CalendarSource.Provider.LOCAL:
+        # The same rule as planning.views._local_event_or_404: an event that came out of someone's
+        # Outlook or ICS calendar is read-only here. Without this the write-back push would turn
+        # an agenda:write token into a licence to rewrite a real mailbox calendar.
+        log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' is alleen-lezen", status="error", detail=f"bron: {event.source.provider}", user=request.openclaw_user)
+        return JsonResponse({"error": "Externe agenda-afspraken zijn alleen-lezen."}, status=404)
     try:
         payload = json.loads(request.body) if request.body else {}
     except (TypeError, ValueError):

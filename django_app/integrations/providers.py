@@ -2121,9 +2121,31 @@ def _outlook_token(connection: IntegrationConnection) -> str:
     return payload["access_token"]
 
 
+def _apply_remote_outlook_event(event: CalendarEvent, remote: dict) -> None:
+    """Copy one Graph event onto a local CalendarEvent.
+
+    sync_status becomes SYNCED because a just-pulled event is by definition identical to the
+    remote one; leaving it on the PENDING model default would make
+    planning.tasks.sync_pending_events_to_remote push it straight back out again.
+    """
+    event.title = remote.get("subject") or "Outlook afspraak"
+    event.starts_at = _parse_graph_datetime(remote.get("start", {}))
+    event.ends_at = _parse_graph_datetime(remote.get("end", {}))
+    event.is_all_day = bool(remote.get("isAllDay"))
+    event.location = (remote.get("location") or {}).get("displayName", "")
+    if "body" in remote:
+        # Only when Graph actually sent a body: a missing one is not the same as an empty one,
+        # and clearing notes here would let the next push wipe the description in Outlook.
+        event.notes = ((remote.get("body") or {}).get("content") or "").strip()
+    event.sync_status = CalendarEvent.SyncStatus.SYNCED
+    event.last_sync_error = ""
+
+
 def sync_outlook(connection: IntegrationConnection) -> dict:
     token = _outlook_token(connection)
-    headers = {"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="Europe/Amsterdam"'}
+    # The body is selected below so a local edit can push the description back without wiping it,
+    # and the text Prefer keeps that body plain text instead of a blob of Outlook HTML.
+    headers = {"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="Europe/Amsterdam", outlook.body-content-type="text"'}
     calendars_response = _request_with_retry("GET", "https://graph.microsoft.com/v1.0/me/calendars?$select=id,name", headers=headers, timeout=20)
     calendars = _safe_response_json(calendars_response, "Outlook").get("value", [])
     start, end = timezone.now() - timedelta(days=14), timezone.now() + timedelta(days=120)
@@ -2160,21 +2182,33 @@ def sync_outlook(connection: IntegrationConnection) -> dict:
         if not source.is_enabled:
             continue
         url = f"https://graph.microsoft.com/v1.0/me/calendars/{calendar['id']}/calendarView"
-        params = {"startDateTime": start.isoformat(), "endDateTime": end.isoformat(), "$select": "id,subject,start,end,isAllDay,location"}
+        params = {"startDateTime": start.isoformat(), "endDateTime": end.isoformat(), "$select": "id,subject,start,end,isAllDay,location,body,lastModifiedDateTime"}
         while url:
             response = _request_with_retry("GET", url, headers=headers, params=params if url == f"https://graph.microsoft.com/v1.0/me/calendars/{calendar['id']}/calendarView" else None, timeout=30)
             payload = _safe_response_json(response, "Outlook")
             for event in payload.get("value", []):
                 if not event.get("id"):
                     continue
-                starts_at = _parse_graph_datetime(event.get("start", {}))
-                ends_at = _parse_graph_datetime(event.get("end", {}))
-                # sync_status must be SYNCED here: an event we just pulled is by definition
-                # identical to the remote one, and leaving it on the PENDING default would make
-                # planning.tasks.sync_pending_events_to_remote push it straight back out again.
-                # remote_updated_at is re-stamped to now() right after the write, the same
-                # anti-pingpong idiom as _sync_one_todo_list above.
-                local_event, _ = CalendarEvent.objects.update_or_create(household=connection.household, source=source, external_id=event["id"], defaults={"title": event.get("subject") or "Outlook afspraak", "starts_at": starts_at, "ends_at": ends_at, "is_all_day": bool(event.get("isAllDay")), "location": event.get("location", {}).get("displayName", ""), "sync_status": CalendarEvent.SyncStatus.SYNCED, "last_sync_error": ""})
+                # Matching on external_id alone (Graph ids are unique) finds a locally created
+                # event that was already pushed to this calendar too — that one keeps its LOCAL
+                # source so it stays editable in the app, and must not be duplicated here.
+                local_event = CalendarEvent.objects.pushable_to(source).filter(external_id=event["id"]).first()
+                if local_event is None:
+                    local_event = CalendarEvent(household=connection.household, source=source, external_id=event["id"])
+                elif local_event.sync_status in {CalendarEvent.SyncStatus.PENDING, CalendarEvent.SyncStatus.ERROR}:
+                    # A local change is still waiting to go out (or failed). Overwriting it here
+                    # would silently throw the edit away and wipe the error that explains why.
+                    total += 1
+                    continue
+                else:
+                    remote_modified = _parse_graph_timestamp(event.get("lastModifiedDateTime"))
+                    if remote_modified and local_event.remote_updated_at and remote_modified <= local_event.remote_updated_at:
+                        total += 1
+                        continue
+                _apply_remote_outlook_event(local_event, event)
+                local_event.save()
+                # remote_updated_at is stamped to now(), never to the provider's own timestamp,
+                # the same anti-pingpong idiom as _sync_one_todo_list below.
                 CalendarEvent.objects.filter(pk=local_event.pk).update(remote_updated_at=timezone.now())
                 total += 1
             url = payload.get("@odata.nextLink")
@@ -2193,38 +2227,61 @@ def _outlook_headers(connection: IntegrationConnection) -> dict:
     }
 
 
-def _outlook_calendar_datetime(value, is_all_day: bool) -> dict:
-    """Format one local datetime the way Graph wants it for a calendar event.
+def _outlook_calendar_datetime(value) -> dict:
+    """Format one aware datetime the way Graph wants it for a calendar event.
 
     _outlook_headers deliberately carries no outlook.timezone Prefer, so the timeZone has to be
-    spelled out in the body or Graph would silently read the naive value as UTC. All-day events
-    must start and end on midnight boundaries, otherwise Graph rejects the whole request.
+    spelled out in the body or Graph would silently read the naive value as UTC.
     """
-    local = timezone.localtime(value)
-    if is_all_day:
-        local = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return {"dateTime": local.replace(tzinfo=None).isoformat(), "timeZone": "Europe/Amsterdam"}
+    return {"dateTime": timezone.localtime(value).replace(tzinfo=None).isoformat(), "timeZone": "Europe/Amsterdam"}
 
 
-def _outlook_calendar_event_body(event: CalendarEvent) -> dict:
-    """Translate one local CalendarEvent into a Graph event body."""
-    ends_at = event.ends_at
-    if event.is_all_day and timezone.localtime(ends_at).date() <= timezone.localtime(event.starts_at).date():
-        ends_at = event.starts_at + timedelta(days=1)
-    return {
+def _outlook_all_day_dates(event: CalendarEvent) -> tuple:
+    """Midnight start and *exclusive* midnight end for an all-day event, as Graph requires.
+
+    FamilyApp stores an inclusive end: planning.ics turns a DTEND date into time.max and
+    planning.views.planner_days counts the end date itself as a visible day. Graph counts the end
+    as exclusive, so a day has to be added — except when the end already sits on midnight of a
+    later day, which is what an all-day event pulled back out of Outlook looks like.
+    """
+    start_local = timezone.localtime(event.starts_at)
+    end_local = timezone.localtime(event.ends_at)
+    end_date = end_local.date()
+    if end_date <= start_local.date() or end_local.hour or end_local.minute or end_local.second:
+        end_date = end_date + timedelta(days=1)
+    return start_local.date(), end_date
+
+
+def _outlook_calendar_event_body(event: CalendarEvent, *, include_notes: bool) -> dict:
+    """Translate one local CalendarEvent into a Graph event body.
+
+    `include_notes` is False for an update with an empty notes field: Outlook's own description
+    would be replaced by an empty string, and FamilyApp is not always the place where that text
+    was written, so an empty local note leaves the remote one alone.
+    """
+    if event.is_all_day:
+        start_date, end_date = _outlook_all_day_dates(event)
+        start = {"dateTime": f"{start_date.isoformat()}T00:00:00", "timeZone": "Europe/Amsterdam"}
+        end = {"dateTime": f"{end_date.isoformat()}T00:00:00", "timeZone": "Europe/Amsterdam"}
+    else:
+        start = _outlook_calendar_datetime(event.starts_at)
+        end = _outlook_calendar_datetime(event.ends_at)
+    body = {
         "subject": event.title,
-        "body": {"contentType": "Text", "content": event.notes or ""},
         "location": {"displayName": event.location or ""},
         "isAllDay": bool(event.is_all_day),
-        "start": _outlook_calendar_datetime(event.starts_at, event.is_all_day),
-        "end": _outlook_calendar_datetime(ends_at, event.is_all_day),
+        "start": start,
+        "end": end,
     }
+    if include_notes:
+        body["body"] = {"contentType": "Text", "content": event.notes or ""}
+    return body
 
 
 def outlook_calendar_event_create(connection: IntegrationConnection, calendar_id: str, event: CalendarEvent) -> str:
     """Create a local calendar event in an Outlook calendar and return its new Graph event id."""
     headers = _outlook_headers(connection)
-    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/calendars/{_graph_segment(calendar_id)}/events", headers=headers, json=_outlook_calendar_event_body(event), timeout=20)
+    response = _request_with_retry("POST", f"https://graph.microsoft.com/v1.0/me/calendars/{_graph_segment(calendar_id)}/events", headers=headers, json=_outlook_calendar_event_body(event, include_notes=True), timeout=20)
     created = _safe_response_json(response, "Outlook")
     if not created.get("id"):
         raise ProviderError("Outlook gaf geen afspraak-id terug.")
@@ -2234,7 +2291,8 @@ def outlook_calendar_event_create(connection: IntegrationConnection, calendar_id
 def outlook_calendar_event_update(connection: IntegrationConnection, event_id: str, event: CalendarEvent) -> str:
     """Overwrite an existing Outlook event with the local version and return its Graph event id."""
     headers = _outlook_headers(connection)
-    response = _request_with_retry("PATCH", f"https://graph.microsoft.com/v1.0/me/events/{_graph_segment(event_id)}", headers=headers, json=_outlook_calendar_event_body(event), timeout=20)
+    payload = _outlook_calendar_event_body(event, include_notes=bool(event.notes))
+    response = _request_with_retry("PATCH", f"https://graph.microsoft.com/v1.0/me/events/{_graph_segment(event_id)}", headers=headers, json=payload, timeout=20)
     updated = _safe_response_json(response, "Outlook")
     return updated.get("id") or event_id
 

@@ -83,13 +83,15 @@ def sync_event_to_caldav(event, caldav_url: str, username: str, password: str) -
         return {"status": "error", "error": str(e), "external_id": event.external_id}
 
 
-def sync_event_to_outlook(event, connection) -> dict | None:
-    """Sync a calendar event to the Outlook calendar its source points at.
+def sync_event_to_outlook(event, connection, calendar_id: str) -> dict | None:
+    """Sync a calendar event to a linked Outlook calendar.
 
-    `connection` is the IntegrationConnection behind event.source; the source's external_id is
-    the Graph calendar id. Like the Google and CalDAV variants this never raises — a
-    ProviderError from the Graph call is reported back as an "error" result so the caller can
-    record it on the event.
+    `connection` is the IntegrationConnection of the calendar being written to and `calendar_id`
+    is that calendar's Graph id — both come from the target CalendarSource, never from
+    event.source: a locally created event stays on the household's own "Gezinsagenda", which has
+    no Graph id at all. Like the Google and CalDAV variants this never raises — a ProviderError
+    from the Graph call is reported back as an "error" result so the caller can record it on the
+    event.
     """
     try:
         from integrations.providers import outlook_calendar_event_create, outlook_calendar_event_update
@@ -97,7 +99,7 @@ def sync_event_to_outlook(event, connection) -> dict | None:
         if event.external_id:
             external_id = outlook_calendar_event_update(connection, event.external_id, event)
         else:
-            external_id = outlook_calendar_event_create(connection, event.source.external_id, event)
+            external_id = outlook_calendar_event_create(connection, calendar_id, event)
 
         return {"status": "synced", "error": None, "external_id": external_id}
 

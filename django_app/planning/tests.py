@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from unittest.mock import Mock, patch
 
 from django.test import TestCase
@@ -162,6 +162,109 @@ class OutlookCalendarWriteBackTests(TestCase):
         self.assertEqual(event.last_sync_error, "")
         self.assertIsNotNone(event.remote_updated_at)
 
+    def test_an_event_added_in_the_agenda_tab_is_created_in_outlook(self):
+        """The whole point of issue #45: add_event files every new event under the local
+        "Gezinsagenda", so the push task has to pick those up too or nothing ever leaves the app.
+        """
+        local_start = timezone.localtime(self.start)
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append((method, url, kwargs.get("json")))
+            return FakeGraphResponse({"id": "graph-event-7"}, status_code=201)
+
+        response = self.client.post(reverse("planning:add_event"), {
+            "title": "Tandarts", "starts_at": local_start.strftime("%Y-%m-%dT%H:%M"), "ends_at": (local_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        event = CalendarEvent.objects.get(household=self.household, title="Tandarts")
+        self.assertEqual(event.source.provider, CalendarSource.Provider.LOCAL)
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual([(method, url) for method, url, _ in calls], [("POST", "https://graph.microsoft.com/v1.0/me/calendars/calendar-1/events")])
+        self.assertEqual(calls[0][2]["subject"], "Tandarts")
+        event = CalendarEvent.objects.get(pk=event.pk)
+        self.assertEqual(event.external_id, "graph-event-7")
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.SYNCED)
+        # It stays on the family calendar, so the app keeps letting a parent edit and delete it.
+        self.assertEqual(event.source.provider, CalendarSource.Provider.LOCAL)
+
+    def test_a_local_event_is_not_pushed_while_write_back_is_off(self):
+        self.source.sync_local_events = False
+        self.source.is_read_only = True
+        self.source.save(update_fields=["sync_local_events", "is_read_only", "updated_at"])
+        local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        event = CalendarEvent.objects.create(household=self.household, source=local_source, title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1))
+
+        with patch("integrations.providers.requests.request") as graph_request:
+            sync_pending_events_to_remote()
+
+        graph_request.assert_not_called()
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.PENDING)
+
+    def test_deleting_a_pushed_event_warns_that_outlook_still_has_it(self):
+        local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
+        event = CalendarEvent.objects.create(household=self.household, source=local_source, external_id="graph-event-1", title="Tandarts", starts_at=self.start, ends_at=self.start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED)
+
+        response = self.client.post(reverse("planning:delete_event", args=[event.pk]), follow=True)
+
+        self.assertContains(response, "staat ook in Werkagenda")
+        self.assertFalse(CalendarEvent.objects.filter(pk=event.pk).exists())
+
+    def test_a_multi_day_all_day_event_keeps_its_last_day_in_outlook(self):
+        starts_at = timezone.make_aware(datetime.combine(datetime(2026, 8, 1).date(), time.min))
+        ends_at = timezone.make_aware(datetime.combine(datetime(2026, 8, 3).date(), time(23, 59)))
+        self._event(title="Kamperen", is_all_day=True, starts_at=starts_at, ends_at=ends_at)
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append(kwargs.get("json"))
+            return FakeGraphResponse({"id": "graph-event-8"}, status_code=201)
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        # Graph reads the end of an all-day event as exclusive, so 1 t/m 3 augustus ends on the 4th.
+        self.assertEqual(calls[0]["start"]["dateTime"], "2026-08-01T00:00:00")
+        self.assertEqual(calls[0]["end"]["dateTime"], "2026-08-04T00:00:00")
+        self.assertTrue(calls[0]["isAllDay"])
+
+    def test_an_all_day_event_pulled_from_outlook_keeps_its_exclusive_end(self):
+        starts_at = timezone.make_aware(datetime.combine(datetime(2026, 8, 1).date(), time.min))
+        ends_at = timezone.make_aware(datetime.combine(datetime(2026, 8, 2).date(), time.min))
+        self._event(title="Vrije dag", is_all_day=True, starts_at=starts_at, ends_at=ends_at, external_id="graph-event-9")
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append(kwargs.get("json"))
+            return FakeGraphResponse({"id": "graph-event-9"})
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertEqual(calls[0]["end"]["dateTime"], "2026-08-02T00:00:00")
+
+    def test_an_update_without_notes_leaves_the_outlook_description_alone(self):
+        """The pull only fills notes from the remote body when the remote changed, so an empty
+        notes field is not proof that Outlook has no description — never overwrite it with "".
+        """
+        self._event(external_id="graph-event-1", notes="")
+        calls = []
+
+        def graph_request(method, url, **kwargs):
+            calls.append(kwargs.get("json"))
+            return FakeGraphResponse({"id": "graph-event-1"})
+
+        with patch("integrations.providers.requests.request", side_effect=graph_request):
+            sync_pending_events_to_remote()
+
+        self.assertNotIn("body", calls[0])
+
     def test_known_event_is_patched_instead_of_created(self):
         self._event(external_id="graph-event-1")
         calls = []
@@ -220,6 +323,17 @@ class OutlookCalendarWriteBackTests(TestCase):
         response = self.client.get(reverse("planning:index"), {"view": "week", "date": self.start.date().isoformat()})
         self.assertContains(response, "Laatste fout")
 
+    def test_a_failed_push_bumps_updated_at_so_the_newest_error_is_the_one_shown(self):
+        event = self._event()
+        before = CalendarEvent.objects.get(pk=event.pk).updated_at
+
+        with patch("integrations.providers.requests.request", return_value=FakeGraphResponse({"error": {"message": "Access is denied."}}, ok=False, status_code=403)):
+            sync_pending_events_to_remote()
+
+        event.refresh_from_db()
+        self.assertEqual(event.sync_status, CalendarEvent.SyncStatus.ERROR)
+        self.assertGreater(event.updated_at, before)
+
     def test_local_edit_puts_a_synced_event_back_on_pending(self):
         local_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda")
         event = CalendarEvent.objects.create(household=self.household, source=local_source, title="Oud", starts_at=self.start, ends_at=self.start + timedelta(hours=1), sync_status=CalendarEvent.SyncStatus.SYNCED, last_sync_error="oude fout")
@@ -249,6 +363,21 @@ class OutlookCalendarWriteBackTests(TestCase):
         self.assertTrue(self.source.sync_local_events)
         self.assertFalse(self.source.is_read_only)
 
+    def test_only_one_calendar_can_receive_the_write_back(self):
+        second_source = CalendarSource.objects.create(
+            household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Privéagenda", external_id="calendar-2",
+            connection=self.connection, is_read_only=True, sync_local_events=False,
+        )
+
+        response = self.client.post(reverse("planning:toggle_source_write_back", args=[second_source.pk]), follow=True)
+
+        self.assertContains(response, "maar één tegelijk")
+        second_source.refresh_from_db()
+        self.source.refresh_from_db()
+        self.assertTrue(second_source.sync_local_events)
+        self.assertFalse(self.source.sync_local_events)
+        self.assertTrue(self.source.is_read_only)
+
     def test_write_back_toggle_is_refused_for_an_ics_source(self):
         ics_source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.ICS, name="Feestdagen", is_read_only=True, sync_local_events=False)
 
@@ -277,3 +406,12 @@ class OutlookCalendarWriteBackTests(TestCase):
 
         self.assertContains(response, "Werkagenda")
         self.assertContains(response, "Terugsturen aan")
+
+    def test_agenda_tab_does_not_claim_write_back_without_an_outlook_connection(self):
+        self.connection.delete()
+        self._event()
+
+        response = self.client.get(reverse("planning:index"), {"view": "week", "date": self.start.date().isoformat()})
+
+        self.assertNotContains(response, "Terugsturen aan")
+        self.assertContains(response, "Terugsturen wacht op koppeling")
