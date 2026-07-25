@@ -167,8 +167,8 @@ BEGIN
   INSERT INTO households_household (name, created_at, invite_only) VALUES ('RLS uitnodiging B', now(), false) RETURNING id INTO other_household;
 
   PERFORM set_config('app.household_id', invite_household::text, false);
-  INSERT INTO planning_calendarevent (household_id, created_at, updated_at, external_id, title, starts_at, ends_at, is_all_day, location, notes, sync_status, last_sync_error)
-  VALUES (invite_household, now(), now(), '', 'RLS uitnodiging', now(), now(), false, '', '', 'pending', '') RETURNING id INTO event_id;
+  INSERT INTO planning_calendarevent (household_id, created_at, updated_at, external_id, abandoned_external_ids, title, starts_at, ends_at, is_all_day, location, notes, sync_status, last_sync_error)
+  VALUES (invite_household, now(), now(), '', '[]', 'RLS uitnodiging', now(), now(), false, '', '', 'pending', '') RETURNING id INTO event_id;
   INSERT INTO planning_eventinvite (household_id, created_at, updated_at, event_id, is_shared, share_token, intro)
   VALUES (invite_household, now(), now(), event_id, true, 'rls-controle-token', '') RETURNING id INTO invite_id;
   INSERT INTO planning_eventquestion (household_id, created_at, updated_at, invite_id, label, kind, is_required, sort_order)

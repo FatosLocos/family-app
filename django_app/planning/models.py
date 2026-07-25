@@ -116,6 +116,10 @@ class CalendarEvent(PlanningRecord):
     # Empty means the appointment never leaves FamilyApp.
     target_source = models.ForeignKey(CalendarSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="targeted_events")
     external_id = models.CharField(max_length=300, blank=True)
+    # The ids of the copies earlier targets kept: there is no delete-sync, so those copies stay in
+    # their external calendar and integrations.providers.sync_outlook has to recognise them, or it
+    # imports every one of them as a second appointment.
+    abandoned_external_ids = models.JSONField(default=list, blank=True)
     title = models.CharField(max_length=240)
     starts_at = models.DateTimeField()
     ends_at = models.DateTimeField()
@@ -152,16 +156,30 @@ class CalendarEvent(PlanningRecord):
         external_id belongs to the calendar the event was created in, so it is dropped together
         with the target: that is what makes the next push create the appointment in the new
         calendar instead of patching the one in the old. There is no delete-sync, so the copy in
-        the old calendar keeps existing and every caller has to say so out loud.
+        the old calendar keeps existing and every caller has to say so out loud. Its id moves to
+        abandoned_external_ids, because otherwise the next pull of that calendar would file the
+        copy as a second appointment inside FamilyApp on top of that.
+
+        Callers using save(update_fields=...) must include "target_source", "external_id",
+        "abandoned_external_ids", "remote_updated_at", "sync_status" and "last_sync_error".
         """
         if (source.pk if source else None) == self.target_source_id:
             return False
         self.target_source = source
         left_behind = bool(self.external_id)
+        if left_behind:
+            self.abandon_external_id(self.external_id)
         self.external_id = ""
         self.remote_updated_at = None
         self.mark_pending()
         return left_behind
+
+    def abandon_external_id(self, external_id: str) -> None:
+        """Remember a remote copy this event no longer maintains, so no pull imports it again."""
+        remembered = list(self.abandoned_external_ids or [])
+        if external_id and external_id not in remembered:
+            remembered.append(external_id)
+        self.abandoned_external_ids = remembered
 
 
 class IcsSubscription(PlanningRecord):

@@ -585,6 +585,10 @@ def _resolve_target_calendar(household, name):
     """Resolve a calendar name to a source that can really receive events, or raise a Dutch error."""
     candidates = CalendarSource.receiving(household)
     name = str(name or "").strip()
+    if not name:
+        # name__icontains="" matches every calendar, so a blank name would silently pick one and
+        # write the appointment into a real mailbox nobody asked for.
+        raise ValueError("Geef de naam van de agenda op waar de afspraak naartoe moet, of laat target_calendar leeg om hem alleen in FamilyApp te houden.")
     exact = candidates.filter(name__iexact=name).first()
     if exact:
         return exact
@@ -664,7 +668,10 @@ def api_add_event(request):
         log_openclaw_action(request.household, "afspraak_toevoegen", "Afspraak toevoegen mislukt", status="error", detail=str(form.errors), user=request.openclaw_user)
         return JsonResponse({"error": "Ongeldige afspraakvelden.", "details": form.errors}, status=400)
     target = None
-    if payload.get("target_calendar"):
+    # Whitespace is no calendar name: an agent passing " " means "no external calendar", the same
+    # as leaving the argument out, and must never be resolved to whichever calendar happens to be
+    # the only one that can receive events.
+    if str(payload.get("target_calendar") or "").strip():
         try:
             target = _resolve_target_calendar(request.household, payload["target_calendar"])
         except ValueError as error:
@@ -740,7 +747,9 @@ def api_update_event(request, event_id):
     left_behind_in = None
     if "target_calendar" in payload:
         target = None
-        if payload["target_calendar"]:
+        # Whitespace clears the target just like the documented "": resolving it would match every
+        # calendar on name__icontains and could move the appointment into a real mailbox instead.
+        if str(payload["target_calendar"] or "").strip():
             try:
                 target = _resolve_target_calendar(request.household, payload["target_calendar"])
             except ValueError as error:
@@ -751,7 +760,7 @@ def api_update_event(request, event_id):
             # There is no delete-sync, so the copy in the old calendar stays behind; the agent has
             # to be able to pass that warning on instead of promising the appointment moved.
             left_behind_in = previous_target.name if previous_target else "de vorige agenda"
-        update_fields.extend(["target_source", "external_id", "remote_updated_at"])
+        update_fields.extend(["target_source", "external_id", "abandoned_external_ids", "remote_updated_at"])
 
     if len(update_fields) == 1:
         return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)

@@ -236,8 +236,21 @@ def remove_source(request, source_id):
     if source.provider == CalendarSource.Provider.LOCAL:
         messages.error(request, "De gezinsagenda kan niet worden verwijderd.")
     else:
+        # target_source is SET_NULL, so without this the appointments addressed here would keep an
+        # external_id that no longer belongs to any calendar: they would never be pushed again and
+        # their copy would come back as a second appointment as soon as the calendar is relinked.
+        left_behind = 0
+        for event in CalendarEvent.objects.for_household(request.household).filter(target_source=source):
+            if event.retarget(None):
+                left_behind += 1
+            event.save(update_fields=["target_source", "external_id", "abandoned_external_ids", "remote_updated_at", "sync_status", "last_sync_error", "updated_at"])
+        name = source.name
         source.delete()
         messages.success(request, "Agendakoppeling verwijderd.")
+        if left_behind == 1:
+            messages.success(request, f"Eén afspraak stond ook in {name}. Die blijft voortaan alleen in FamilyApp staan; verwijder de kopie in {name} daar zelf.")
+        elif left_behind:
+            messages.success(request, f"{left_behind} afspraken stonden ook in {name}. Die blijven voortaan alleen in FamilyApp staan; verwijder de kopieën in {name} daar zelf.")
     return redirect("planning:index")
 
 

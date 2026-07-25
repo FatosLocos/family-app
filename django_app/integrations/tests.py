@@ -2618,6 +2618,32 @@ class OpenClawCalendarSourceTests(TestCase):
         self.assertIn("Werkagenda", response.json()["error"])
         self.assertFalse(CalendarEvent.objects.for_household(self.household).exists())
 
+    def test_a_blank_target_calendar_never_picks_a_calendar_by_itself(self):
+        """A name of nothing but spaces matches every calendar on name__icontains, so with one
+        receiving calendar in the household the appointment would land in a real mailbox that the
+        agent never named."""
+        response = self._add_event(self._event_payload(target_calendar="   "))
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.json()["target_calendar"])
+        self.assertIsNone(CalendarEvent.objects.get(household=self.household, title="Tandarts").target_source_id)
+
+    def test_a_blank_target_calendar_clears_the_target_of_an_existing_event(self):
+        start = timezone.now().replace(second=0, microsecond=0)
+        event = CalendarEvent.objects.create(
+            household=self.household, source=self.local_source, target_source=self.work_source, title="Tandarts",
+            starts_at=start, ends_at=start + timedelta(hours=1), external_id="graph-event-7", sync_status=CalendarEvent.SyncStatus.SYNCED,
+        )
+
+        response = self._update_event(event.id, {"target_calendar": " "})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["target_calendar"])
+        self.assertIn("Werkagenda", response.json()["warning"])
+        event.refresh_from_db()
+        self.assertIsNone(event.target_source_id)
+        self.assertEqual(event.abandoned_external_ids, ["graph-event-7"])
+
     def test_an_event_added_without_a_target_calendar_stays_in_the_app(self):
         response = self._add_event(self._event_payload())
 
