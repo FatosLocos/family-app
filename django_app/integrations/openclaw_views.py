@@ -52,7 +52,7 @@ from integrations.providers import (
 )
 from notifications.models import Notification
 from planning.forms import CalendarEventForm
-from planning.models import CalendarEvent, CalendarSource
+from planning.models import CalendarEvent, CalendarSource, EventInvite
 from travel.models import Trip, TripDocument, TripIdea, TripStop
 from travel.services import ensure_trip_task_list, trip_payload, trips_for_reading
 
@@ -718,6 +718,52 @@ def api_update_event(request, event_id):
         "is_all_day": event.is_all_day,
         "location": event.location,
         "notes": event.notes,
+    })
+
+
+@require_openclaw_token("uitnodigingen:read")
+@require_GET
+def api_event_rsvps(request, event_id):
+    """Who signed up for one event's public invitation, plus the answers they gave.
+
+    Its own scope rather than agenda:read: a guest list holds names, free-text notes and
+    answers of people outside the household, so reading the agenda must not silently hand
+    those personal details over as well.
+
+    Read-only on purpose: the public link itself is managed in the Agenda tab, never here, so
+    this token can report on an invitation but never publish or unpublish one.
+    """
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    invite = EventInvite.objects.for_household(request.household).filter(event=event).select_related("venue", "wishlist").first()
+    log_openclaw_action(request.household, "evenement_aanmeldingen", f"Aanmeldingen voor '{event.title}' opgevraagd", user=request.openclaw_user)
+    if invite is None:
+        return JsonResponse({"event_id": event.id, "title": event.title, "has_invite": False, "is_shared": False, "guests": []})
+    guests = invite.guests.prefetch_related("answers__question")
+    return JsonResponse({
+        "event_id": event.id,
+        "title": event.title,
+        "starts_at": event.starts_at.isoformat(),
+        "has_invite": True,
+        "is_shared": invite.is_shared,
+        "intro": invite.intro,
+        "venue": invite.venue.name if invite.venue else None,
+        "wishlist": invite.wishlist.title if invite.wishlist else None,
+        "rsvp_deadline": invite.rsvp_deadline.isoformat() if invite.rsvp_deadline else None,
+        "attending_count": invite.attending_count,
+        "program": [{"starts_at": item.starts_at, "description": item.description} for item in invite.program_items.all()],
+        "questions": [{"id": question.id, "label": question.label, "kind": question.kind, "is_required": question.is_required} for question in invite.questions.all()],
+        "guests": [
+            {
+                "id": guest.id,
+                "name": guest.name,
+                "rsvp": guest.rsvp,
+                "party_size": guest.party_size,
+                "note": guest.note,
+                "answered_at": guest.created_at.isoformat(),
+                "answers": [{"question": answer.question.label, "value": answer.value} for answer in guest.answers.all()],
+            }
+            for guest in guests
+        ],
     })
 
 

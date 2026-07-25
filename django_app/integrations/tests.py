@@ -25,7 +25,7 @@ from integrations.services import get_sonos_event_callback_token, save_app_confi
 from integrations.sonos_events import sonos_event_signature
 from integrations.tasks import sync_active_connections, sync_connection_task, sync_home_connect_connections
 from notifications.models import Notification
-from planning.models import CalendarEvent, CalendarSource
+from planning.models import CalendarEvent, CalendarSource, EventAnswer, EventGuest, EventInvite, EventQuestion
 from planning.tasks import sync_pending_events_to_remote
 from travel.models import Trip, TripDocument, TripIdea, TripStop
 from travel.services import ensure_trip_task_list
@@ -2777,3 +2777,52 @@ class OpenClawTravelTests(TestCase):
         self.assertFalse(TripStop.objects.filter(trip=self.other_trip).exists())
         self.assertFalse(TripDocument.objects.filter(trip=self.other_trip).exists())
         self.assertFalse(TripIdea.objects.filter(trip=self.other_trip).exists())
+
+
+class OpenClawEventRsvpTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ouder@example.com", email="ouder@example.com", password="safe-password-123", display_name="Ouder")
+        self.household = Household.objects.create(name="Eerste gezin")
+        Membership.objects.create(household=self.household, user=self.user, role=Membership.Role.PARENT)
+        self.other_household = Household.objects.create(name="Tweede gezin")
+        start = timezone.now().replace(second=0, microsecond=0) + timedelta(days=7)
+        self.event = CalendarEvent.objects.create(household=self.household, title="Verjaardag Sanne", starts_at=start, ends_at=start + timedelta(hours=3))
+        self.other_event = CalendarEvent.objects.create(household=self.other_household, title="Feest van de buren", starts_at=start, ends_at=start + timedelta(hours=1))
+        _, self.token = create_token(self.household, self.user, scopes=["uitnodigingen:read"])
+
+    def _get(self, event_id, token=None):
+        return self.client.get(reverse("integrations:api_openclaw_event_rsvps", args=[event_id]), HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def test_rsvps_report_who_is_coming_and_what_they_answered(self):
+        invite = EventInvite.objects.create(household=self.household, event=self.event, is_shared=True, share_token="deel-token-verjaardag")
+        question = EventQuestion.objects.create(household=self.household, invite=invite, label="Eet je mee?", kind=EventQuestion.Kind.YESNO)
+        guest = EventGuest.objects.create(household=self.household, invite=invite, name="Oma Riet", rsvp=EventGuest.Rsvp.YES, party_size=2)
+        EventAnswer.objects.create(household=self.household, guest=guest, question=question, value="ja")
+
+        response = self._get(self.event.id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["has_invite"])
+        self.assertTrue(payload["is_shared"])
+        self.assertEqual(payload["attending_count"], 2)
+        self.assertEqual(payload["guests"][0]["name"], "Oma Riet")
+        self.assertEqual(payload["guests"][0]["answers"], [{"question": "Eet je mee?", "value": "ja"}])
+
+    def test_event_without_an_invite_reports_that_honestly(self):
+        payload = self._get(self.event.id).json()
+
+        self.assertFalse(payload["has_invite"])
+        self.assertEqual(payload["guests"], [])
+
+    def test_rsvps_need_their_own_scope_and_not_merely_agenda_read(self):
+        # Guest names, notes and answers are personal details of people outside the household,
+        # so an existing agenda:read token must not reach them without being re-issued.
+        _, agenda_token = create_token(self.household, self.user, scopes=["agenda:read"])
+
+        self.assertEqual(self._get(self.event.id, token=agenda_token).status_code, 403)
+
+    def test_rsvps_of_another_household_are_not_found(self):
+        EventInvite.objects.create(household=self.other_household, event=self.other_event, is_shared=True, share_token="andermans-token")
+
+        self.assertEqual(self._get(self.other_event.id).status_code, 404)
