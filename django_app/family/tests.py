@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.db import connection
 from django.test import TestCase
 from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -230,3 +231,33 @@ class FamilyWishlistTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(content.index("Morgen"), content.index("Later"))
         self.assertContains(response, "wordt 26")
+
+
+class PublicWishlistPolicyTests(TestCase):
+    """The share link only works when the database policy survives every migration.
+
+    The suite itself runs as a superuser and therefore bypasses RLS, so the policy
+    predicate is asserted against the catalog instead of through a query.
+    """
+
+    def test_shared_clause_lives_in_using_and_never_in_with_check(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("RLS is alleen van toepassing op PostgreSQL.")
+
+        for table in ("family_wishlist", "family_wishitem"):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT qual, with_check FROM pg_policies
+                    WHERE schemaname = current_schema()
+                      AND tablename = %s
+                      AND policyname = 'household_isolation'
+                    """,
+                    [table],
+                )
+                policy = cursor.fetchone()
+
+            self.assertIsNotNone(policy, table)
+            using, with_check = policy
+            self.assertIn("is_shared", using, table)
+            self.assertNotIn("is_shared", with_check, table)

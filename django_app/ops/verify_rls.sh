@@ -91,6 +91,32 @@ END $$;
 
 DO $$
 DECLARE
+  broken text;
+BEGIN
+  -- De publieke wenslijst mag anoniem gelezen worden (is_shared in USING) maar nooit
+  -- anoniem geschreven (WITH CHECK blijft de kale huishoudencheck).
+  SELECT string_agg(expected.table_name, ', ')
+  INTO broken
+  FROM (
+    VALUES
+      ('family_wishlist'), ('family_wishitem')
+  ) AS expected(table_name)
+  LEFT JOIN pg_policies policy
+    ON policy.schemaname = 'public'
+   AND policy.tablename = expected.table_name
+   AND policy.policyname = 'household_isolation'
+  WHERE policy.qual IS NULL
+     OR policy.qual NOT LIKE '%is_shared%'
+     OR policy.with_check IS NULL
+     OR policy.with_check LIKE '%is_shared%';
+
+  IF broken IS NOT NULL THEN
+    RAISE EXCEPTION 'Publieke deelpolicy klopt niet voor: % (USING moet is_shared bevatten, WITH CHECK niet)', broken;
+  END IF;
+END $$;
+
+DO $$
+DECLARE
   first_household bigint;
   second_household bigint;
   task_id bigint;
