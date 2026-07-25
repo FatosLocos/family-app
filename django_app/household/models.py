@@ -70,11 +70,16 @@ class Task(HouseholdRecord):
         constraints = [models.UniqueConstraint(fields=("household", "external_provider", "external_id"), condition=~models.Q(external_id=""), name="unique_task_external_ref")]
 
 
+TASK_NOTE_MAX_LENGTH = 2000
+
+
 class TaskNote(HouseholdRecord):
     """Append-only timeline of what happened to a task, next to Task.notes' free text.
 
     Gives OpenClaw somewhere to record "handled this, no action needed" instead of
     creating a duplicate task, and gives the household the same history in the app.
+    The views cap new notes at TASK_NOTE_MAX_LENGTH characters; the column stays a
+    TextField so history written before that cap is never cut short.
     """
 
     task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="timeline_notes")

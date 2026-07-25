@@ -62,7 +62,7 @@
         <label>Notitie<textarea name="notes" rows="2">{{ task.notes }}</textarea></label>
         <button class="button button-primary" type="submit">Opslaan</button>
       </form>
-      {% if task.completion_reason %}<p class="modal-inline-section task-completion-reason"><strong>Afgerond:</strong> {{ task.completion_reason }}{% if task.completed_at %} · {{ task.completed_at|date:'D j M H:i' }}{% endif %}</p>{% endif %}
+      {% if task.completed_at and task.completion_reason %}<p class="modal-inline-section task-completion-reason"><strong>Afgerond:</strong> {{ task.completion_reason }} · {{ task.completed_at|date:'D j M H:i' }}</p>{% endif %}
       <div class="modal-inline-section task-timeline">
         <h3>Tijdlijn</h3>
         {% for note in task.timeline_notes.all %}

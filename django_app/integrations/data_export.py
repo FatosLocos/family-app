@@ -4,7 +4,7 @@ from django.utils import timezone
 
 from family.models import BulletinPost, Contact, ContactPerson, WishItem, WishList
 from finance.models import BankAccount, Budget, RecurringRule, Transaction
-from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceSnapshot, Task
+from household.models import MealPlan, Receipt, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceSnapshot, Task, TaskNote
 from notifications.models import Notification
 from planning.models import CalendarEvent, CalendarSource, IcsSubscription
 
@@ -28,7 +28,8 @@ def household_export(household):
             "bulletin_posts": list(BulletinPost.objects.for_household(household).select_related("author").values("author__display_name", "body", "pinned", "created_at")),
         },
         "household_data": {
-            "tasks": list(Task.objects.for_household(household).select_related("assigned_to").values("title", "notes", "assigned_to__display_name", "due_at", "priority", "completed_at", "created_at")),
+            "tasks": list(Task.objects.for_household(household).select_related("assigned_to").values("title", "notes", "assigned_to__display_name", "due_at", "priority", "completed_at", "completion_reason", "created_at")),
+            "task_notes": list(TaskNote.objects.for_household(household).select_related("task", "author").values("task__title", "author__display_name", "text", "created_by_agent", "created_at")),
             "shopping_lists": list(ShoppingList.objects.for_household(household).values("name", "is_default", "created_at")),
             "shopping_items": list(ShoppingItem.objects.for_household(household).select_related("list").values("list__name", "name", "quantity", "category", "recurring", "recurrence_days", "completed_at", "created_at")),
             "shopping_prices": list(ShoppingPrice.objects.for_household(household).select_related("item").values("item__name", "retailer", "price", "unit_label", "is_offer", "offer_label", "product_url", "observed_at")),

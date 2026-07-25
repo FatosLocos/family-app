@@ -16,7 +16,7 @@ from django.views.decorators.http import require_POST
 
 from households.decorators import household_required
 from household.forms import MealIngredientForm, MealPlanForm, PantryItemForm, ReceiptForm, RoutineForm, ShoppingItemForm, ShoppingPriceForm, TaskForm
-from household.models import MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList, TaskListSync, TaskNote
+from household.models import TASK_NOTE_MAX_LENGTH, MealIngredient, MealPlan, PantryItem, Receipt, ReceiptLineItem, Routine, ShoppingItem, ShoppingList, ShoppingPrice, ShoppingPriceProviderStatus, ShoppingPriceSnapshot, Task, TaskList, TaskListSync, TaskNote
 from household.price_history import save_price_observation
 from household.receipt_matching import match_receipt_to_transaction
 from integrations.models import IntegrationConnection
@@ -347,7 +347,7 @@ def toggle_task(request, task_id):
 def add_task_note(request, task_id):
     """Append a note to a task's timeline — the household's side of taak_notitie_toevoegen."""
     task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
-    text = request.POST.get("text", "").strip()
+    text = request.POST.get("text", "").strip()[:TASK_NOTE_MAX_LENGTH]
     if not text:
         messages.error(request, "Schrijf eerst een notitie.")
         return _household_tab_redirect("taken")

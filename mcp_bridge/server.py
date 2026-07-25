@@ -76,7 +76,12 @@ def _checked(response: httpx.Response) -> dict:
 
 @mcp.tool()
 def vandaag(ctx: Context) -> dict:
-    """Get today's open tasks, shopping list, and calendar events for this household."""
+    """Get today's open tasks, shopping list, and calendar events for this household.
+
+    "tasks_open" is a preview of open tasks only — nothing that is already done shows up
+    here. Use taken(include_completed=True) to see recently finished tasks, why they were
+    finished, and their note timeline.
+    """
     with _client(ctx) as client:
         return _checked(client.get("/instellingen/api/openclaw/vandaag/"))
 
@@ -84,6 +89,12 @@ def vandaag(ctx: Context) -> dict:
 @mcp.tool()
 def taak_toevoegen(ctx: Context, title: str, due_at: str | None = None, priority: int | None = None, notes: str | None = None, list_name: str | None = None, assigned_to: str | None = None, source_label: str | None = None, source_url: str | None = None) -> dict:
     """Add a new task to the household's task list.
+
+    Always call taken(include_completed=True) first and look for a task on the same
+    subject — including one that was already completed, with its reason and its note
+    timeline. If such a task exists, do NOT add a second one: record what you did with
+    taak_notitie_toevoegen (and taak_bijwerken or taak_afronden where that fits). Only
+    create a new task when the subject really isn't on the list yet.
 
     Args:
         title: What the task is (required).
@@ -218,9 +229,11 @@ def taken(ctx: Context, include_completed: bool = False) -> dict:
     """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
     preview. Each task includes its list ("list", null if unsorted), notes, due date,
     priority, source, whether OpenClaw created it, its completion state
-    ("completed_at"/"completion_reason") and "notes_timeline": the task's history of
-    notes, each with created_at, author, text and created_by_agent. Use this before
-    organizing tasks with taak_bijwerken, so nothing gets missed.
+    ("completed_at"/"completion_reason", both null while the task is open) and
+    "notes_timeline": the task's history of notes, each with created_at, author, text and
+    created_by_agent. That timeline only holds the 5 most recent notes per task, with
+    "notes_total" as the real count — the app shows the rest. Use this before organizing
+    tasks with taak_bijwerken, so nothing gets missed.
 
     Args:
         include_completed: Also return tasks completed in the last 30 days (default
@@ -252,7 +265,8 @@ def taak_notitie_toevoegen(ctx: Context, task_id: int, text: str) -> dict:
     Args:
         task_id: The task's numeric id (from taken() or vandaag()).
         text: What happened, in Dutch, in the household's own words. Say what you did and
-            what the consequence is, not just that you looked at it.
+            what the consequence is, not just that you looked at it. Keep it to a few
+            sentences; anything past 2000 characters is cut off.
     """
     with _client(ctx) as client:
         return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/notitie/", json={"text": text}))
