@@ -665,9 +665,9 @@ def e_mail_beantwoorden(ctx: Context, message_id: str, comment: str, reply_all: 
 
 @mcp.tool()
 def e_mail_mappen(ctx: Context, account: str | None = None) -> dict:
-    """List the mail folders of this household member's mailbox, with the id to hand to
-    e_mail_verplaatsen and the id to hand to e_mail_map_aanmaken as a parent. Call this before
-    e_mail_map_aanmaken to check whether a suitable folder already exists.
+    """List the mail folders of this household member's mailbox, nested folders included, with
+    the id to hand to e_mail_verplaatsen and the id to hand to e_mail_map_aanmaken as a parent.
+    Call this before e_mail_map_aanmaken to check whether a suitable folder already exists.
 
     Args:
         account: Which linked account to use — "outlook", or an IMAP account's e-mail
@@ -706,7 +706,10 @@ def e_mail_verplaatsen(ctx: Context, message_id: str, destination: str, account:
     """Move a message to another mail folder, e.g. to archive a newsletter out of the inbox.
     Call e_mail_mappen first to see which folders exist and to pick the destination id — that
     way you never create a duplicate folder for one that is already there. The message gets a
-    new id in its new folder, so use the returned "id" for anything you do with it afterwards.
+    new id in its new folder, so use the returned "id" for anything you do with it afterwards —
+    the old id no longer resolves. That "id" can come back as null for an IMAP account whose
+    server does not report the new id; call e_mail_overzicht on the destination folder to find
+    the message back in that case.
 
     Args:
         message_id: The message's id (from e_mail_overzicht/e_mail_lezen).
