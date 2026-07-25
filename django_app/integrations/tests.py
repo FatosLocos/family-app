@@ -2788,7 +2788,7 @@ class OpenClawEventRsvpTests(TestCase):
         start = timezone.now().replace(second=0, microsecond=0) + timedelta(days=7)
         self.event = CalendarEvent.objects.create(household=self.household, title="Verjaardag Sanne", starts_at=start, ends_at=start + timedelta(hours=3))
         self.other_event = CalendarEvent.objects.create(household=self.other_household, title="Feest van de buren", starts_at=start, ends_at=start + timedelta(hours=1))
-        _, self.token = create_token(self.household, self.user, scopes=["agenda:read"])
+        _, self.token = create_token(self.household, self.user, scopes=["uitnodigingen:read"])
 
     def _get(self, event_id, token=None):
         return self.client.get(reverse("integrations:api_openclaw_event_rsvps", args=[event_id]), HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
@@ -2815,10 +2815,12 @@ class OpenClawEventRsvpTests(TestCase):
         self.assertFalse(payload["has_invite"])
         self.assertEqual(payload["guests"], [])
 
-    def test_rsvps_need_the_agenda_read_scope(self):
-        _, other_token = create_token(self.household, self.user, scopes=["vandaag:read"])
+    def test_rsvps_need_their_own_scope_and_not_merely_agenda_read(self):
+        # Guest names, notes and answers are personal details of people outside the household,
+        # so an existing agenda:read token must not reach them without being re-issued.
+        _, agenda_token = create_token(self.household, self.user, scopes=["agenda:read"])
 
-        self.assertEqual(self._get(self.event.id, token=other_token).status_code, 403)
+        self.assertEqual(self._get(self.event.id, token=agenda_token).status_code, 403)
 
     def test_rsvps_of_another_household_are_not_found(self):
         EventInvite.objects.create(household=self.other_household, event=self.other_event, is_shared=True, share_token="andermans-token")

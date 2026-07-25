@@ -48,11 +48,28 @@
   {% endif %}
 </section>
 
+{% if active_membership.can_manage %}
 <section class="arena-card list-panel">
   <div class="panel-heading">
     <div><h2>Uitnodigingen</h2><small>Deel een afspraak als publieke link met programma, eigen vragen, wenslijst en locatie.</small></div>
-    <button class="button button-secondary" type="button" data-open-dialog="venue-dialog"><i data-lucide="map-pin"></i>Locatie toevoegen</button>
+    <button class="button button-secondary" type="button" data-open-dialog="venue-dialog"><i data-lucide="map-pin"></i>Locaties beheren</button>
   </div>
+  {% if shared_invites %}
+    <h3>Actieve publieke links</h3>
+    <ul class="clean-list">
+      {% for invite in shared_invites %}
+        <li class="invite-row">
+          <div>
+            <strong>{{ invite.event.title }}</strong>
+            <small>{{ invite.event.starts_at|date:'j F Y · H:i' }}</small>
+            <small><code>{{ invite.public_url }}</code></small>
+          </div>
+          <form method="post" action="{% url 'planning:toggle_event_share' invite.event_id %}">{% csrf_token %}<button class="button button-secondary" type="submit"><i data-lucide="link-2-off"></i>Link uitschakelen</button></form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  <h3>Afspraken in deze periode</h3>
   <ul class="clean-list">
     {% for event in events %}
       {% if not event.source or event.source.provider == 'local' %}
@@ -70,9 +87,11 @@
     {% endfor %}
   </ul>
 </section>
+{% endif %}
 
 {% for event in events %}
   {% if not event.source or event.source.provider == 'local' %}
+    {% if active_membership.can_manage %}
     <dialog id="invite-{{ event.id }}" class="modal">
       <div class="dialog-title"><h2>Uitnodiging · {{ event.title }}</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
       <div class="invite-panel">
@@ -106,6 +125,7 @@
         </div>
       </div>
     </dialog>
+    {% endif %}
     <dialog id="event-edit-{{ event.id }}" class="modal">
       <form method="post" action="{% url 'planning:update_event' event.id %}">
         {% csrf_token %}
@@ -125,6 +145,31 @@
 
 <dialog id="event-dialog" class="modal"><form method="post" action="{% url 'planning:add_event' %}">{% csrf_token %}<div class="dialog-title"><h2>Afspraak toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Titel{{ event_form.title }}</label><div class="field-grid"><label>Begint{{ event_form.starts_at }}</label><label>Eindigt{{ event_form.ends_at }}</label></div><label class="check-label">{{ event_form.is_all_day }}Hele dag</label><label>Locatie{{ event_form.location }}</label><label>Wie zijn erbij?{{ event_form.participants }}</label><label>Notitie{{ event_form.notes }}</label><button class="button button-primary">Opslaan</button></form></dialog>
 <dialog id="ics-dialog" class="modal"><div class="dialog-title"><h2>ICS toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><div class="modal-sections"><form method="post" action="{% url 'planning:add_ics_subscription' %}">{% csrf_token %}<h3>Abonnement</h3><label>Naam{{ ics_form.name }}</label><label>ICS-link{{ ics_form.url }}</label><button class="button button-primary">Toevoegen</button></form><form method="post" enctype="multipart/form-data" action="{% url 'planning:import_ics_file' %}">{% csrf_token %}<h3>Bestand importeren</h3><label>Naam{{ ics_file_form.name }}</label><label>ICS-bestand{{ ics_file_form.calendar_file }}</label><button class="button button-secondary">Importeren</button></form></div></dialog>
-<dialog id="venue-dialog" class="modal"><form method="post" action="{% url 'planning:add_event_venue' %}">{% csrf_token %}<div class="dialog-title"><h2>Locatie toevoegen</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div><label>Naam{{ venue_form.name }}</label><label>Adres{{ venue_form.address }}</label><div class="field-grid"><label>Postcode{{ venue_form.postal_code }}</label><label>Plaats{{ venue_form.city }}</label></div><label>Notitie{{ venue_form.notes }}</label><ul class="clean-list">{% for venue in venues %}<li><strong>{{ venue.name }}</strong>{% if venue.full_address %}<small>{{ venue.full_address }}</small>{% endif %}</li>{% empty %}<li class="empty-copy">Nog geen standaardlocaties.</li>{% endfor %}</ul><button class="button button-primary" type="submit">Locatie opslaan</button></form></dialog>
+{% if active_membership.can_manage %}
+<dialog id="venue-dialog" class="modal">
+  <div class="dialog-title"><h2>Standaardlocaties</h2><button class="icon-button" type="button" data-close-dialog aria-label="Sluiten"><i data-lucide="x"></i></button></div>
+  <div class="modal-sections">
+    <form method="post" action="{% url 'planning:add_event_venue' %}">{% csrf_token %}<h3>Locatie toevoegen</h3><label>Naam{{ venue_form.name }}</label><label>Adres{{ venue_form.address }}</label><div class="field-grid"><label>Postcode{{ venue_form.postal_code }}</label><label>Plaats{{ venue_form.city }}</label></div><label>Notitie{{ venue_form.notes }}</label><button class="button button-primary" type="submit">Locatie opslaan</button></form>
+    <div>
+      <h3>Bestaande locaties</h3>
+      <ul class="clean-list">
+        {% for venue in venues %}
+          <li class="invite-row">
+            <form class="invite-subform" method="post" action="{% url 'planning:update_event_venue' venue.id %}">{% csrf_token %}
+              <div class="field-grid"><label>Naam<input name="name" value="{{ venue.name }}" maxlength="160" required></label><label>Adres<input name="address" value="{{ venue.address }}" maxlength="240"></label></div>
+              <div class="field-grid"><label>Postcode<input name="postal_code" value="{{ venue.postal_code }}" maxlength="24"></label><label>Plaats<input name="city" value="{{ venue.city }}" maxlength="100"></label></div>
+              <label>Notitie<textarea name="notes" rows="2">{{ venue.notes }}</textarea></label>
+              <button class="button button-secondary" type="submit">Locatie aanpassen</button>
+            </form>
+            <form method="post" action="{% url 'planning:delete_event_venue' venue.id %}">{% csrf_token %}<button class="icon-button destructive" title="{{ venue.name }} verwijderen" aria-label="{{ venue.name }} verwijderen"><i data-lucide="trash-2"></i></button></form>
+          </li>
+        {% empty %}
+          <li class="empty-copy">Nog geen standaardlocaties.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</dialog>
+{% endif %}
 <dialog id="event-detail-dialog" class="modal event-detail"><form method="dialog"><div class="dialog-title"><h2 data-event-detail-title>Afspraak</h2><button class="icon-button" aria-label="Sluiten"><i data-lucide="x"></i></button></div><p data-event-detail-meta></p><p data-event-detail-notes></p><button class="button button-secondary" type="button" data-event-detail-edit hidden><i data-lucide="pencil"></i>Aanpassen</button></form></dialog>
 {% endblock %}

@@ -473,8 +473,10 @@ def evenement_aanmeldingen(ctx: Context, event_id: int) -> dict:
     """Get who signed up for an event's public invitation, and what they answered.
 
     Call agenda() first to find the event's numeric id. Returns "has_invite": false when the
-    event has no invitation at all, and "is_shared": false when the invitation exists but its
-    public link is switched off — in both cases "guests" is empty and no one can sign up yet.
+    event has no invitation at all — then "guests" is empty. When "is_shared" is false the
+    invitation exists but its public link is switched off, so nobody can sign up right now;
+    sign-ups from an earlier time the link was on are still listed in "guests", so report
+    them instead of saying that nobody signed up.
     Each guest has "rsvp" ("yes", "no" or "maybe"), "party_size" (how many people that one
     sign-up brings, default 1), an optional free-text "note" and the answers to the questions
     the organiser configured. "attending_count" already sums party_size over the yes answers,

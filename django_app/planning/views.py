@@ -65,6 +65,13 @@ def _latest_push_error(source):
     return CalendarEvent.objects.pushable_to(source).filter(sync_status=CalendarEvent.SyncStatus.ERROR).exclude(last_sync_error="").order_by("-updated_at").values_list("last_sync_error", flat=True).first() or ""
 
 
+def _public_invite_url(request, invite):
+    """The absolute public URL of a shared invitation, or "" while it has no token yet."""
+    if not invite.share_token:
+        return ""
+    return request.build_absolute_uri(reverse("planning:public_event_invite", args=[invite.share_token]))
+
+
 def _invite_of(event):
     """The event's invitation, or None. Reverse OneToOne access raises when there is none."""
     try:
@@ -100,7 +107,12 @@ def index(request):
         # plain attribute instead of making it rely on silent template failures.
         event.event_invite = _invite_of(event)
         if event.event_invite and event.event_invite.is_shared and event.event_invite.share_token:
-            event.event_invite.public_url = request.build_absolute_uri(reverse("planning:public_event_invite", args=[event.event_invite.share_token]))
+            event.event_invite.public_url = _public_invite_url(request, event.event_invite)
+    # Every live public link, whatever the calendar is showing: an invitation for a party in
+    # August must stay revocable when the agenda is open on September.
+    shared_invites = list(EventInvite.objects.for_household(request.household).filter(is_shared=True).select_related("event").order_by("event__starts_at"))
+    for invite in shared_invites:
+        invite.public_url = _public_invite_url(request, invite)
     previous_anchor, next_anchor = adjacent_anchors(anchor, view)
     return render(request, "planning/index.html", {
         "view": view, "anchor": anchor, "range_start": start_date, "range_end": end_date - timedelta(days=1), "events": event_list,
@@ -108,6 +120,7 @@ def index(request):
         "sources": sources, "selected_sources": selected_sources, "event_form": form, "ics_form": IcsSubscriptionForm(), "ics_file_form": IcsFileForm(),
         "members": request.user.__class__.objects.filter(memberships__household=request.household).distinct(),
         "venues": venues, "wishlists": wishlists, "venue_form": EventVenueForm(), "question_kinds": EventQuestion.Kind.choices,
+        "shared_invites": shared_invites,
     })
 
 
@@ -263,13 +276,24 @@ def toggle_source_write_back(request, source_id):
 
 
 def _event_invite_or_404(request, event_id):
-    """Get (or lazily create) the invitation for one of this household's events."""
-    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    """Get (or lazily create) the invitation for one of this household's local events.
+
+    Goes through _local_event_or_404 like every other mutating event endpoint: an appointment
+    that was synced in from Outlook, Google or an ICS feed is read-only here, and publishing
+    its title, time and location on an unauthenticated URL is exactly the kind of write the
+    rest of this module already refuses.
+    """
+    event = _local_event_or_404(request, event_id)
     invite, _ = EventInvite.objects.get_or_create(event=event, defaults={"household": request.household})
     return invite
 
 
-@household_required
+# Everything below is @parent_required, not @household_required: the content of an invitation
+# ends up on an unauthenticated URL the moment the link is on, so putting a family appointment
+# out there is a parent's call — like every other publish/link action in this module
+# (add_ics_subscription, toggle_source, remove_source) and like family.views.
+# toggle_wishlist_share, which only lets the owner or a parent share.
+@parent_required
 @require_POST
 def update_event_invite(request, event_id):
     """Create or update the invitation details of an event. Never touches the public link."""
@@ -283,7 +307,7 @@ def update_event_invite(request, event_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def toggle_event_share(request, event_id):
     invite = _event_invite_or_404(request, event_id)
@@ -297,7 +321,7 @@ def toggle_event_share(request, event_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def add_event_program_item(request, event_id):
     invite = _event_invite_or_404(request, event_id)
@@ -313,7 +337,7 @@ def add_event_program_item(request, event_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def delete_event_program_item(request, item_id):
     item = get_object_or_404(EventProgramItem.objects.for_household(request.household), pk=item_id)
@@ -322,7 +346,7 @@ def delete_event_program_item(request, item_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def add_event_question(request, event_id):
     invite = _event_invite_or_404(request, event_id)
@@ -338,7 +362,7 @@ def add_event_question(request, event_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def delete_event_question(request, question_id):
     question = get_object_or_404(EventQuestion.objects.for_household(request.household), pk=question_id)
@@ -347,7 +371,7 @@ def delete_event_question(request, question_id):
     return redirect("planning:index")
 
 
-@household_required
+@parent_required
 @require_POST
 def add_event_venue(request):
     form = EventVenueForm(request.POST)
@@ -362,6 +386,36 @@ def add_event_venue(request):
         messages.success(request, "Locatie toegevoegd.")
     else:
         messages.error(request, "Controleer de locatiegegevens.")
+    return redirect("planning:index")
+
+
+@parent_required
+@require_POST
+def update_event_venue(request, venue_id):
+    """Correct a standard venue. Without this a typo in the name is permanent: the unique
+    constraint on (household, name) blocks recreating it under the right name."""
+    venue = get_object_or_404(EventVenue.objects.for_household(request.household), pk=venue_id)
+    form = EventVenueForm(request.POST, instance=venue)
+    if form.is_valid():
+        name = form.cleaned_data["name"]
+        if EventVenue.objects.for_household(request.household).filter(name=name).exclude(pk=venue.pk).exists():
+            messages.error(request, f"Er bestaat al een locatie met de naam '{name}'.")
+            return redirect("planning:index")
+        form.save()
+        messages.success(request, "Locatie aangepast.")
+    else:
+        messages.error(request, "Controleer de locatiegegevens.")
+    return redirect("planning:index")
+
+
+@parent_required
+@require_POST
+def delete_event_venue(request, venue_id):
+    """Remove a standard venue. EventInvite.venue is SET_NULL, so an invitation that used it
+    keeps existing and simply falls back to the event's own location."""
+    venue = get_object_or_404(EventVenue.objects.for_household(request.household), pk=venue_id)
+    venue.delete()
+    messages.success(request, "Locatie verwijderd.")
     return redirect("planning:index")
 
 

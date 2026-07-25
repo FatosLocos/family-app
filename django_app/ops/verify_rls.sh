@@ -206,6 +206,24 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
+  -- Een ingelogd ander huishouden mag evenmin een programma-onderdeel of vraag in andermans
+  -- gedeelde uitnodiging hangen: die zou anders op de publieke pagina van dat huishouden
+  -- verschijnen. De WITH CHECK eist dat de bovenliggende uitnodiging hetzelfde huishouden heeft.
+  PERFORM set_config('app.household_id', other_household::text, false);
+  BEGIN
+    INSERT INTO planning_eventprogramitem (household_id, created_at, updated_at, invite_id, starts_at, description, sort_order)
+    VALUES (other_household, now(), now(), invite_id, '14:00', 'RLS mag dit blokkeren', 0);
+    RAISE EXCEPTION 'Een vreemd huishouden kon een programma-onderdeel in andermans uitnodiging schrijven';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO planning_eventquestion (household_id, created_at, updated_at, invite_id, label, kind, is_required, sort_order)
+    VALUES (other_household, now(), now(), invite_id, 'RLS mag dit blokkeren', 'text', false, 0);
+    RAISE EXCEPTION 'Een vreemd huishouden kon een vraag in andermans uitnodiging schrijven';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
   PERFORM set_config('app.household_id', invite_household::text, false);
   UPDATE planning_eventinvite SET is_shared = false WHERE id = invite_id;
   PERFORM set_config('app.household_id', '', false);

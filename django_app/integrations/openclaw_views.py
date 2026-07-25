@@ -721,13 +721,17 @@ def api_update_event(request, event_id):
     })
 
 
-@require_openclaw_token("agenda:read")
+@require_openclaw_token("uitnodigingen:read")
 @require_GET
 def api_event_rsvps(request, event_id):
     """Who signed up for one event's public invitation, plus the answers they gave.
 
+    Its own scope rather than agenda:read: a guest list holds names, free-text notes and
+    answers of people outside the household, so reading the agenda must not silently hand
+    those personal details over as well.
+
     Read-only on purpose: the public link itself is managed in the Agenda tab, never here, so
-    an agenda:read token can report on an invitation but never publish or unpublish one.
+    this token can report on an invitation but never publish or unpublish one.
     """
     event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
     invite = EventInvite.objects.for_household(request.household).filter(event=event).select_related("venue", "wishlist").first()

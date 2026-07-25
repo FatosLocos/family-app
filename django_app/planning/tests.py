@@ -659,3 +659,85 @@ class EventInviteTests(TestCase):
         self.assertTrue(EventQuestion.objects.filter(pk=other_question.pk).exists())
         self.assertEqual(EventProgramItem.objects.filter(invite=other_invite).count(), 1)
         self.assertEqual(EventQuestion.objects.filter(invite=other_invite).count(), 1)
+
+    def test_venue_endpoints_of_another_household_are_not_found(self):
+        other_venue = EventVenue.objects.create(household=self.other_household, name="Andermans zaal", city="Zeist")
+
+        self.assertEqual(self.client.post(reverse("planning:update_event_venue", args=[other_venue.pk]), {"name": "Gekaapt"}).status_code, 404)
+        self.assertEqual(self.client.post(reverse("planning:delete_event_venue", args=[other_venue.pk])).status_code, 404)
+
+        other_venue.refresh_from_db()
+        self.assertEqual(other_venue.name, "Andermans zaal")
+
+    # --- rechten -------------------------------------------------------------------
+
+    def test_a_child_cannot_publish_an_appointment_on_a_public_url(self):
+        child = User.objects.create_user(username="kind@example.com", email="kind@example.com", password="safe-password-123", display_name="Kind")
+        Membership.objects.create(user=child, household=self.household, role=Membership.Role.CHILD)
+        self.client.force_login(child)
+
+        for url, data in (
+            (reverse("planning:toggle_event_share", args=[self.event.pk]), {}),
+            (reverse("planning:update_event_invite", args=[self.event.pk]), {"intro": "Kom je?"}),
+            (reverse("planning:add_event_program_item", args=[self.event.pk]), {"description": "Taart eten"}),
+            (reverse("planning:add_event_question", args=[self.event.pk]), {"label": "Eet je mee?", "kind": "text"}),
+            (reverse("planning:add_event_venue"), {"name": "Speeltuin De Bron"}),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.post(url, data).status_code, 403)
+
+        self.assertFalse(EventInvite.objects.filter(event=self.event).exists())
+        self.assertFalse(EventVenue.objects.for_household(self.household).exists())
+
+        agenda = self.client.get(reverse("planning:index"), {"view": "day", "date": timezone.localtime(self.start).date().isoformat()})
+        self.assertNotContains(agenda, "Publieke link aanzetten")
+
+    def test_an_event_from_an_external_calendar_cannot_be_shared(self):
+        source = CalendarSource.objects.create(household=self.household, provider=CalendarSource.Provider.OUTLOOK, name="Werk", is_read_only=True)
+        work_event = CalendarEvent.objects.create(household=self.household, source=source, title="Beoordelingsgesprek HR", starts_at=self.start, ends_at=self.start + timedelta(hours=1), location="Kamer 3.12")
+
+        for url, data in (
+            (reverse("planning:toggle_event_share", args=[work_event.pk]), {}),
+            (reverse("planning:update_event_invite", args=[work_event.pk]), {"intro": "Kom je?"}),
+            (reverse("planning:add_event_program_item", args=[work_event.pk]), {"description": "Taart eten"}),
+            (reverse("planning:add_event_question", args=[work_event.pk]), {"label": "Eet je mee?", "kind": "text"}),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.post(url, data).status_code, 404)
+
+        self.assertFalse(EventInvite.objects.filter(event=work_event).exists())
+
+    # --- beheer van locaties en actieve links --------------------------------------
+
+    def test_a_venue_can_be_renamed_and_removed_without_losing_the_invitation(self):
+        venue = EventVenue.objects.create(household=self.household, name="Speeltin De Bron", city="Bunnik")
+        invite = self._shared_invite(venue=venue)
+
+        self.client.post(reverse("planning:update_event_venue", args=[venue.pk]), {"name": "Speeltuin De Bron", "address": "Dorpsstraat 1", "postal_code": "3981 AA", "city": "Bunnik", "notes": ""})
+        venue.refresh_from_db()
+        self.assertEqual(venue.name, "Speeltuin De Bron")
+        self.assertEqual(venue.address, "Dorpsstraat 1")
+
+        self.client.post(reverse("planning:delete_event_venue", args=[venue.pk]))
+
+        self.assertFalse(EventVenue.objects.filter(pk=venue.pk).exists())
+        invite.refresh_from_db()
+        self.assertIsNone(invite.venue_id)
+
+    def test_renaming_a_venue_to_an_existing_name_is_refused(self):
+        EventVenue.objects.create(household=self.household, name="Speeltuin De Bron")
+        other = EventVenue.objects.create(household=self.household, name="Buurthuis")
+
+        response = self.client.post(reverse("planning:update_event_venue", args=[other.pk]), {"name": "Speeltuin De Bron"}, follow=True)
+
+        self.assertContains(response, "bestaat al een locatie")
+        other.refresh_from_db()
+        self.assertEqual(other.name, "Buurthuis")
+
+    def test_a_live_public_link_stays_revocable_outside_the_shown_period(self):
+        invite = self._shared_invite()
+
+        agenda = self.client.get(reverse("planning:index"), {"view": "day", "date": (timezone.localtime(self.start) + timedelta(days=60)).date().isoformat()})
+
+        self.assertContains(agenda, invite.share_token)
+        self.assertContains(agenda, "Link uitschakelen")
