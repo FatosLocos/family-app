@@ -10,7 +10,7 @@ from django.views.decorators.http import require_POST
 from households.decorators import household_required, parent_required
 from planning.forms import CalendarEventForm, IcsFileForm, IcsSubscriptionForm
 from planning.ics import parse_ics
-from planning.models import CalendarEvent, CalendarSource, IcsSubscription
+from planning.models import CalendarEvent, CalendarSource
 
 
 def calendar_range(anchor, view):

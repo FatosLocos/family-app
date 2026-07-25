@@ -1,7 +1,7 @@
 from django.http import HttpRequest
 
 from common.db_scope import household_db_scope
-from households.models import Household, Membership
+from households.models import Membership
 
 
 class ActiveHouseholdMiddleware:

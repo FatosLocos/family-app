@@ -63,9 +63,9 @@ def sync_energy_readings_from_home_assistant():
     """Sync energy readings from Home Assistant if available."""
     for household in Household.objects.all():
         with household_db_scope(household.pk):
-            try:
-                config = HomeAssistantConfig.objects.get(household=household)
-            except HomeAssistantConfig.DoesNotExist:
+            # Alleen huishoudens met een Home Assistant-koppeling hebben standen;
+            # get_ha_entities() haalt de config zelf nog een keer op.
+            if not HomeAssistantConfig.objects.filter(household=household).exists():
                 continue
 
             try:

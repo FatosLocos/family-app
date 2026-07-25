@@ -9,7 +9,7 @@ from finance.forms import BudgetForm, RecurringRuleSettingsForm, StatementUpload
 from finance.importers import parse_abn_rows, rows_for_upload
 from finance.models import BankAccount, BankConnection, Budget, RecurringRule, Transaction
 from finance.tasks import fingerprint, next_recurring_due_date, refresh_household_recurring_rules
-from households.decorators import household_required, parent_required
+from households.decorators import parent_required
 
 
 @parent_required

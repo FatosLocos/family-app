@@ -9,7 +9,9 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
 django_asgi_app = get_asgi_application()
 
-from home.routing import websocket_urlpatterns
+# Bewust pas hier geïmporteerd: home.routing laadt consumers die de app-registry
+# nodig hebben, dus deze import moet ná get_asgi_application() blijven staan.
+from home.routing import websocket_urlpatterns  # noqa: E402
 
 
 application = ProtocolTypeRouter(
