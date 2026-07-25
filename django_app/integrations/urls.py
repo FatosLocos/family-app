@@ -25,6 +25,7 @@ urlpatterns = [
     path("api/openclaw/huis/", openclaw_views.api_home_entities, name="api_openclaw_home_entities"),
     path("api/openclaw/huis/<int:entity_id>/bedienen/", openclaw_views.api_home_control, name="api_openclaw_home_control"),
     path("api/openclaw/agenda/", openclaw_views.api_agenda, name="api_openclaw_agenda"),
+    path("api/openclaw/agenda/bronnen/", openclaw_views.api_calendar_sources, name="api_openclaw_calendar_sources"),
     path("api/openclaw/agenda/toevoegen/", openclaw_views.api_add_event, name="api_openclaw_add_event"),
     path("api/openclaw/agenda/<int:event_id>/bijwerken/", openclaw_views.api_update_event, name="api_openclaw_update_event"),
     path("api/openclaw/geld/", openclaw_views.api_finance, name="api_openclaw_finance"),

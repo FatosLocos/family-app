@@ -606,6 +606,28 @@ def api_agenda(request):
     })
 
 
+@require_openclaw_token("agenda:read")
+@require_GET
+def api_calendar_sources(request):
+    """Which calendars this household has, and where a locally added event ends up."""
+    sources = CalendarSource.objects.for_household(request.household).order_by("provider", "name")
+    log_openclaw_action(request.household, "agenda_bronnen", "Agendabronnen opgevraagd", user=request.openclaw_user)
+    return JsonResponse({
+        "sources": [
+            {
+                "id": source.id,
+                "name": source.name,
+                "provider": source.provider,
+                "is_enabled": source.is_enabled,
+                "sends_local_events": source.accepts_local_events,
+                "supports_write_back": source.supports_write_back,
+                "last_sync_at": source.last_sync_at.isoformat() if source.last_sync_at else None,
+            }
+            for source in sources
+        ],
+    })
+
+
 @require_openclaw_token("agenda:write")
 @require_POST
 def api_add_event(request):
@@ -621,6 +643,7 @@ def api_add_event(request):
     event = form.save(commit=False)
     event.household = request.household
     event.source, _ = CalendarSource.objects.get_or_create(household=request.household, provider=CalendarSource.Provider.LOCAL, name="Gezinsagenda", defaults={"is_read_only": False})
+    event.mark_pending()
     event.save()
     form.save_m2m()
     log_openclaw_action(request.household, "afspraak_toevoegen", f"Afspraak '{event.title}' toegevoegd", user=request.openclaw_user)
@@ -631,7 +654,13 @@ def api_add_event(request):
 @require_POST
 def api_update_event(request, event_id):
     """Partial update of any field on an existing calendar event."""
-    event = get_object_or_404(CalendarEvent.objects.for_household(request.household), pk=event_id)
+    event = get_object_or_404(CalendarEvent.objects.for_household(request.household).select_related("source"), pk=event_id)
+    if event.source_id and event.source.provider != CalendarSource.Provider.LOCAL:
+        # The same rule as planning.views._local_event_or_404: an event that came out of someone's
+        # Outlook or ICS calendar is read-only here. Without this the write-back push would turn
+        # an agenda:write token into a licence to rewrite a real mailbox calendar.
+        log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' is alleen-lezen", status="error", detail=f"bron: {event.source.provider}", user=request.openclaw_user)
+        return JsonResponse({"error": "Externe agenda-afspraken zijn alleen-lezen."}, status=404)
     try:
         payload = json.loads(request.body) if request.body else {}
     except (TypeError, ValueError):
@@ -674,6 +703,8 @@ def api_update_event(request, event_id):
     if len(update_fields) == 1:
         return JsonResponse({"error": "Geef minstens één veld op om te wijzigen."}, status=400)
 
+    event.mark_pending()
+    update_fields.extend(["sync_status", "last_sync_error"])
     event.save(update_fields=update_fields)
     log_openclaw_action(request.household, "afspraak_bijwerken", f"Afspraak '{event.title}' bijgewerkt", user=request.openclaw_user)
     return JsonResponse({

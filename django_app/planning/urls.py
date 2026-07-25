@@ -11,5 +11,6 @@ urlpatterns = [
     path("ics/toevoegen/", views.add_ics_subscription, name="add_ics_subscription"),
     path("ics/importeren/", views.import_ics_file, name="import_ics_file"),
     path("bronnen/<int:source_id>/schakelen/", views.toggle_source, name="toggle_source"),
+    path("bronnen/<int:source_id>/terugsturen/", views.toggle_source_write_back, name="toggle_source_write_back"),
     path("bronnen/<int:source_id>/verwijderen/", views.remove_source, name="remove_source"),
 ]

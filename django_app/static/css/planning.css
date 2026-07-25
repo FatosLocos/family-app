@@ -3,6 +3,9 @@
 .source-manager-item form { margin:0; }
 .source-manager-item.is-disabled { opacity:.58; }
 .source-manager .icon-button { width:24px; height:24px; }
+.source-manager-flag { margin-left:6px; padding:1px 7px; border-radius:var(--radius-pill); background:var(--surface-2); color:var(--text-2); font-size:11px; }
+.source-manager-flag.is-on { background:color-mix(in srgb, var(--green) 18%, transparent); color:var(--green); }
+.source-manager-error { margin-left:6px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--red); font-size:11px; }
 
 .agenda-panel { max-width:1120px; }
 .planner-actions { display:flex; align-items:center; gap:2px; }

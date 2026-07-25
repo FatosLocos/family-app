@@ -32,7 +32,20 @@
       </section>
     {% endfor %}
   </div>
-  {% if sources %}<div class="source-manager">{% for source in sources %}{% if source.provider != 'local' %}<div class="source-manager-item {% if not source.is_enabled %}is-disabled{% endif %}"><span>{{ source.name }}</span><form method="post" action="{% url 'planning:toggle_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} {% if source.is_enabled %}verbergen{% else %}tonen{% endif %}"><i data-lucide="{% if source.is_enabled %}eye{% else %}eye-off{% endif %}"></i></button></form><form method="post" action="{% url 'planning:remove_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} verwijderen"><i data-lucide="trash-2"></i></button></form></div>{% endif %}{% endfor %}</div>{% endif %}
+  {% if sources %}
+    <div class="source-manager">
+      {% for source in sources %}{% if source.provider != 'local' %}
+        <div class="source-manager-item {% if not source.is_enabled %}is-disabled{% endif %}">
+          <span>{{ source.name }}</span>
+          {% if source.supports_write_back %}<span class="source-manager-flag {% if source.accepts_local_events %}is-on{% endif %}">{% if source.accepts_local_events %}Terugsturen aan{% elif source.sync_local_events %}Terugsturen wacht op koppeling{% else %}Terugsturen uit{% endif %}</span>{% endif %}
+          {% if source.last_sync_error %}<span class="source-manager-error" title="{{ source.last_sync_error }}">Laatste fout: {{ source.last_sync_error }}</span>{% endif %}
+          <form method="post" action="{% url 'planning:toggle_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} {% if source.is_enabled %}verbergen{% else %}tonen{% endif %}"><i data-lucide="{% if source.is_enabled %}eye{% else %}eye-off{% endif %}"></i></button></form>
+          {% if source.supports_write_back %}<form method="post" action="{% url 'planning:toggle_source_write_back' source.id %}">{% csrf_token %}<button class="icon-button" title="Lokale afspraken {% if source.sync_local_events %}niet meer naar {{ source.name }} terugsturen{% else %}hierheen terugsturen naar {{ source.name }}{% endif %}"><i data-lucide="{% if source.sync_local_events %}cloud-off{% else %}cloud-upload{% endif %}"></i></button></form>{% endif %}
+          <form method="post" action="{% url 'planning:remove_source' source.id %}">{% csrf_token %}<button class="icon-button" title="{{ source.name }} verwijderen"><i data-lucide="trash-2"></i></button></form>
+        </div>
+      {% endif %}{% endfor %}
+    </div>
+  {% endif %}
 </section>
 
 {% for event in events %}
