@@ -70,6 +70,22 @@ class Task(HouseholdRecord):
         constraints = [models.UniqueConstraint(fields=("household", "external_provider", "external_id"), condition=~models.Q(external_id=""), name="unique_task_external_ref")]
 
 
+class TaskNote(HouseholdRecord):
+    """Append-only timeline of what happened to a task, next to Task.notes' free text.
+
+    Gives OpenClaw somewhere to record "handled this, no action needed" instead of
+    creating a duplicate task, and gives the household the same history in the app.
+    """
+
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="timeline_notes")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="task_notes")
+    text = models.TextField()
+    created_by_agent = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ("created_at", "id")
+
+
 class ShoppingList(HouseholdRecord):
     name = models.CharField(max_length=120, default="Boodschappen")
     is_default = models.BooleanField(default=False)

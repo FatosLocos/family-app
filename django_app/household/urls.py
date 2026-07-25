@@ -9,6 +9,7 @@ urlpatterns = [
     path("taken/<int:task_id>/toggle/", views.toggle_task, name="toggle_task"),
     path("taken/<int:task_id>/aanpassen/", views.update_task, name="update_task"),
     path("taken/<int:task_id>/verwijderen/", views.delete_task, name="delete_task"),
+    path("taken/<int:task_id>/notitie/", views.add_task_note, name="add_task_note"),
     path("taken/lijstjes/toevoegen/", views.add_task_list, name="add_task_list"),
     path("taken/lijstjes/<int:list_id>/verwijderen/", views.delete_task_list, name="delete_task_list"),
     path("taken/lijstjes/<int:list_id>/koppelen/", views.link_task_list_sync, name="link_task_list_sync"),

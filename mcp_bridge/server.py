@@ -214,13 +214,48 @@ def taak_lijst_bijwerken(ctx: Context, list_id: int, name: str) -> dict:
 
 
 @mcp.tool()
-def taken(ctx: Context) -> dict:
+def taken(ctx: Context, include_completed: bool = False) -> dict:
     """Get ALL open tasks for the household — not capped to a handful like vandaag()'s
     preview. Each task includes its list ("list", null if unsorted), notes, due date,
-    priority, source, and whether OpenClaw created it. Use this before organizing tasks
-    with taak_bijwerken, so nothing gets missed."""
+    priority, source, whether OpenClaw created it, its completion state
+    ("completed_at"/"completion_reason") and "notes_timeline": the task's history of
+    notes, each with created_at, author, text and created_by_agent. Use this before
+    organizing tasks with taak_bijwerken, so nothing gets missed.
+
+    Args:
+        include_completed: Also return tasks completed in the last 30 days (default
+            False, open tasks only). Set this to True before taak_toevoegen to check
+            whether the thing you're about to add was already done and why — the
+            completion reason and the notes timeline tell you what happened.
+    """
+    params = {"include_completed": "true"} if include_completed else {}
     with _client(ctx) as client:
-        return _checked(client.get("/instellingen/api/openclaw/taken/alle/"))
+        return _checked(client.get("/instellingen/api/openclaw/taken/alle/", params=params))
+
+
+@mcp.tool()
+def taak_notitie_toevoegen(ctx: Context, task_id: int, text: str) -> dict:
+    """Append a note to an existing task's timeline — how you record what you did with a
+    task instead of creating a second task for the same thing.
+
+    Whenever you handle something that already has a task (an e-mail, a document, a
+    message), write down what you did and why here: "e-mail verwerkt, geen actie nodig",
+    "aanbieder gebeld, wachten op antwoord", "hoort bij taak 12, geen nieuwe taak nodig".
+    The household reads this timeline in the app, and you get it back from taken(), so
+    later runs know the history instead of duplicating work.
+
+    Always call taken(include_completed=True) first and look for an existing task on the
+    subject. Only use taak_toevoegen when there really is no task yet; if there is one,
+    add a note here (and taak_afronden if it's finished). This tool never changes the
+    task itself — use taak_bijwerken for that.
+
+    Args:
+        task_id: The task's numeric id (from taken() or vandaag()).
+        text: What happened, in Dutch, in the household's own words. Say what you did and
+            what the consequence is, not just that you looked at it.
+    """
+    with _client(ctx) as client:
+        return _checked(client.post(f"/instellingen/api/openclaw/taken/{task_id}/notitie/", json={"text": text}))
 
 
 @mcp.tool()

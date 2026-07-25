@@ -1,6 +1,6 @@
 """Browser-side token management plus the bearer-token API surface for OpenClaw."""
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -17,7 +17,7 @@ from finance.models import BankAccount, Budget, Transaction
 from home.models import HomeEntity
 from home.services import HomeAssistantError, control_entity
 from household.forms import ShoppingItemForm, TaskForm
-from household.models import ShoppingItem, ShoppingList, Task, TaskList, TaskListSync
+from household.models import ShoppingItem, ShoppingList, Task, TaskList, TaskListSync, TaskNote
 from household.tasks import refresh_household_shopping_prices
 from households.decorators import household_required, parent_required
 from identity.models import User
@@ -75,7 +75,14 @@ def api_today(request):
     return JsonResponse({
         "today": summary["today"].isoformat(),
         "tasks_open": [
-            {"id": task.id, "title": task.title, "due_at": task.due_at.isoformat() if task.due_at else None, "priority": task.priority}
+            {
+                "id": task.id,
+                "title": task.title,
+                "due_at": task.due_at.isoformat() if task.due_at else None,
+                "priority": task.priority,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "completion_reason": task.completion_reason or None,
+            }
             for task in summary["tasks"]
         ],
         "tasks_due_today": {"total": summary["tasks_due_today_total"], "done": summary["tasks_due_today_done"]},
@@ -323,11 +330,40 @@ def api_update_task(request, task_id):
     })
 
 
+COMPLETED_TASK_WINDOW_DAYS = 30
+
+
+def _task_timeline(task):
+    """Compact, chronological history of a task for the OpenClaw JSON responses."""
+    return [
+        {
+            "created_at": note.created_at.isoformat(),
+            "author": str(note.author) if note.author else None,
+            "text": note.text,
+            "created_by_agent": note.created_by_agent,
+        }
+        for note in task.timeline_notes.all()
+    ]
+
+
 @require_openclaw_token("vandaag:read")
 @require_GET
 def api_all_tasks(request):
-    """Every open task (not capped to a handful like api_today's preview), with list membership."""
-    tasks = Task.objects.for_household(request.household).filter(completed_at__isnull=True).select_related("list", "assigned_to").order_by("list_id", "position", "created_at")
+    """Every open task (not capped to a handful like api_today's preview), with list membership.
+
+    Each task carries its completion state and its note timeline, so OpenClaw can tell
+    whether something was already handled. include_completed=true widens the result with
+    tasks finished in the last COMPLETED_TASK_WINDOW_DAYS days; the default stays open-only
+    to keep the payload small.
+    """
+    include_completed = request.GET.get("include_completed") == "true"
+    tasks = Task.objects.for_household(request.household).select_related("list", "assigned_to").prefetch_related("timeline_notes__author")
+    if include_completed:
+        cutoff = timezone.now() - timedelta(days=COMPLETED_TASK_WINDOW_DAYS)
+        tasks = tasks.filter(Q(completed_at__isnull=True) | Q(completed_at__gte=cutoff))
+    else:
+        tasks = tasks.filter(completed_at__isnull=True)
+    tasks = tasks.order_by("list_id", "position", "created_at")
     log_openclaw_action(request.household, "taken", "Volledige takenlijst opgevraagd", user=request.openclaw_user)
     return JsonResponse({
         "tasks": [
@@ -342,10 +378,37 @@ def api_all_tasks(request):
                 "created_by_agent": task.created_by_agent,
                 "source_label": task.source_label or None,
                 "source_url": task.source_url or None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "completion_reason": task.completion_reason or None,
+                "notes_timeline": _task_timeline(task),
             }
             for task in tasks
         ],
     })
+
+
+@require_openclaw_token("taken:write")
+@require_POST
+def api_add_task_note(request, task_id):
+    """Append a note to an existing task's timeline, without touching the task itself."""
+    task = get_object_or_404(Task.objects.for_household(request.household), pk=task_id)
+    try:
+        payload = json.loads(request.body)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Ongeldige aanvraag."}, status=400)
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JsonResponse({"error": "Veld 'text' is verplicht."}, status=400)
+    note = TaskNote.objects.create(household=request.household, task=task, author=request.openclaw_user, text=text, created_by_agent=True)
+    log_openclaw_action(request.household, "taak_notitie_toevoegen", f"Notitie toegevoegd aan taak '{task.title}'", user=request.openclaw_user)
+    return JsonResponse({
+        "id": note.id,
+        "task_id": task.id,
+        "created_at": note.created_at.isoformat(),
+        "author": str(note.author) if note.author else None,
+        "text": note.text,
+        "created_by_agent": note.created_by_agent,
+    }, status=201)
 
 
 @require_openclaw_token("taken:write")
